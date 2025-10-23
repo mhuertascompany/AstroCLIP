@@ -22,12 +22,7 @@ from astroclip.env import format_with_env
 LOGGER = logging.getLogger("prepare_dataset")
 
 
-def _resolve_repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 def _load_splits(
-    script_path: Path,
     split_sizes: Dict[str, Optional[int]],
     shuffle: bool,
     seed: int,
@@ -35,13 +30,12 @@ def _load_splits(
 ) -> DatasetDict:
     dataset_splits: Dict[str, Dataset] = {}
 
+    dataset_module = "astroclip.data.dataset"
     for split_name, sample_size in split_sizes.items():
         LOGGER.info("Loading split '%s' (sample_size=%s)", split_name, sample_size)
         split_selector = split_name
-        builder_path = str(script_path)
-
         ds = load_dataset(
-            builder_path,
+            dataset_module,
             name="joint",
             split=split_selector,
             streaming=streaming,
@@ -93,12 +87,6 @@ def stage_dataset(
     seed: int,
     streaming: bool,
 ) -> Path:
-    repo_root = _resolve_repo_root()
-    script_path = repo_root / "astroclip" / "data" / "dataset.py"
-
-    if not script_path.exists():
-        raise FileNotFoundError(f"Dataset script not found at {script_path}")
-
     if output_dir.exists():
         if not overwrite:
             raise FileExistsError(
@@ -110,7 +98,6 @@ def stage_dataset(
 
     split_sizes = {"train": train_size, "test": test_size}
     dataset = _load_splits(
-        script_path=script_path,
         split_sizes=split_sizes,
         shuffle=shuffle,
         seed=seed,
