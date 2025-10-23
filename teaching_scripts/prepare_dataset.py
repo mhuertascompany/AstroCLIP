@@ -15,14 +15,22 @@ import shutil
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, __version__ as datasets_version, load_dataset
+from packaging import version
 
 from astroclip.env import format_with_env
 
 LOGGER = logging.getLogger("prepare_dataset")
 
+if version.parse(datasets_version) >= version.parse("5.0.0"):
+    raise RuntimeError(
+        "The teaching dataset scripts rely on HuggingFace datasets<5.0.0. "
+        f"Detected version {datasets_version}. Install datasets==4.2.0."
+    )
+
 
 def _load_splits(
+    script_path: Path,
     split_sizes: Dict[str, Optional[int]],
     shuffle: bool,
     seed: int,
@@ -30,12 +38,11 @@ def _load_splits(
 ) -> DatasetDict:
     dataset_splits: Dict[str, Dataset] = {}
 
-    dataset_module = "astroclip.data.dataset"
     for split_name, sample_size in split_sizes.items():
         LOGGER.info("Loading split '%s' (sample_size=%s)", split_name, sample_size)
         split_selector = split_name
         ds = load_dataset(
-            dataset_module,
+            str(script_path),
             name="joint",
             split=split_selector,
             streaming=streaming,
@@ -87,6 +94,11 @@ def stage_dataset(
     seed: int,
     streaming: bool,
 ) -> Path:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "astroclip" / "data" / "dataset.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Dataset script not found at {script_path}")
+
     if output_dir.exists():
         if not overwrite:
             raise FileExistsError(
@@ -98,6 +110,7 @@ def stage_dataset(
 
     split_sizes = {"train": train_size, "test": test_size}
     dataset = _load_splits(
+        script_path=script_path,
         split_sizes=split_sizes,
         shuffle=shuffle,
         seed=seed,
