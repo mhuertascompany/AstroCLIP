@@ -42,7 +42,7 @@ def _load_splits(
         LOGGER.info("Loading split '%s' (sample_size=%s)", split_name, sample_size)
         split_selector = split_name
         ds = load_dataset(
-            str(script_path),
+            str(script_path.parent),
             name="joint",
             split=split_selector,
             streaming=streaming,
