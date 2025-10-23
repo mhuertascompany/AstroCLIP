@@ -15,6 +15,10 @@ import shutil
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+import os
+
+os.environ.setdefault("HF_DATASETS_ALLOW_LOCAL_SCRIPT", "1")
+
 from datasets import Dataset, DatasetDict, __version__ as datasets_version, load_dataset
 from packaging import version
 
@@ -42,7 +46,7 @@ def _load_splits(
         LOGGER.info("Loading split '%s' (sample_size=%s)", split_name, sample_size)
         split_selector = split_name
         ds = load_dataset(
-            str(script_path.parent),
+            str(script_path),
             name="joint",
             split=split_selector,
             streaming=streaming,
