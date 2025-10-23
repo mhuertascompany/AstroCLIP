@@ -18,6 +18,8 @@ from typing import Dict, Iterable, Optional
 import os
 
 os.environ.setdefault("HF_DATASETS_ALLOW_LOCAL_SCRIPT", "1")
+os.environ.setdefault("HF_DATASETS_ALLOW_CODE", "1")
+os.environ.setdefault("HF_ALLOW_CODE_EVAL", "1")
 
 from datasets import Dataset, DatasetDict, __version__ as datasets_version, load_dataset
 from packaging import version
