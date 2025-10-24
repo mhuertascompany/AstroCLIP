@@ -5,8 +5,14 @@ from pathlib import Path
 
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.loggers import CSVLogger
+import matplotlib
 
-from teaching_scripts.data_utils import load_astroclip_dataset, build_image_dataloader
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from teaching_scripts.data_utils import build_image_dataloader, load_astroclip_dataset
 from teaching_scripts.models import ImageAutoencoder
 
 
@@ -25,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--devices", default="auto")
     parser.add_argument("--precision", default="32")
     parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--log-dir", type=Path, default=Path("logs/image_autoencoder"))
+    parser.add_argument("--run-name", type=str, default="image_autoencoder")
+    parser.add_argument("--plot-path", type=Path, default=None, help="Optional path to save the loss curve PNG.")
     return parser.parse_args()
 
 
@@ -50,6 +59,9 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
 
+    args.log_dir.mkdir(parents=True, exist_ok=True)
+    logger = CSVLogger(save_dir=str(args.log_dir), name=args.run_name)
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.output.parent,
         filename=args.output.stem,
@@ -66,11 +78,36 @@ def main() -> None:
         precision=args.precision,
         deterministic=args.deterministic,
         callbacks=[checkpoint_callback],
+        logger=logger,
         log_every_n_steps=25,
     )
 
     trainer.fit(model, train_loader, val_loader)
     trainer.save_checkpoint(args.output)
+
+    metrics_path = Path(logger.log_dir) / "metrics.csv"
+    plot_path = args.plot_path or Path(logger.log_dir) / "loss_curve.png"
+    if metrics_path.exists():
+        df = pd.read_csv(metrics_path)
+        fig, ax = plt.subplots()
+        if "train_loss" in df.columns:
+            train_df = df.dropna(subset=["train_loss"])
+            if not train_df.empty:
+                ax.plot(train_df["epoch"], train_df["train_loss"], label="train_loss")
+        if "val_loss" in df.columns:
+            val_df = df.dropna(subset=["val_loss"])
+            if not val_df.empty:
+                ax.plot(val_df["epoch"], val_df["val_loss"], label="val_loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("Image autoencoder training")
+        ax.legend()
+        plot_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved loss curve to {plot_path}")
+    else:
+        print(f"No metrics.csv found at {metrics_path}; skipping plot.")
 
 
 if __name__ == "__main__":

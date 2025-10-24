@@ -27,4 +27,5 @@ export PYTHONPATH=/n03data/huertas/astroinfo/AstroCLIP:$PYTHONPATH
 
 export ASTROCLIP_ROOT=/n03data/huertas/astroinfo/astroclip_data
 
-python teaching_scripts/train_image_encoder.py  --dataset $ASTROCLIP_ROOT/teaching_demo/astroclip_dataset  --output $ASTROCLIP_ROOT/teaching_demo/image_autoencoder.ckpt --max-epochs 10
+#python teaching_scripts/train_image_encoder.py  --dataset $ASTROCLIP_ROOT/teaching_demo/astroclip_dataset  --output $ASTROCLIP_ROOT/teaching_demo/image_autoencoder.ckpt --max-epochs 10
+python teaching_scripts/train_spectrum_encoder.py  --dataset $ASTROCLIP_ROOT/teaching_demo/astroclip_subset  --output $ASTROCLIP_ROOT/teaching_demo/spectrum_autoencoder.ckpt  --max-epochs 15

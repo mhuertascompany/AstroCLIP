@@ -90,14 +90,14 @@ class ImageAutoencoder(L.LightningModule):
         images = batch
         recon = self(images)
         loss = F.mse_loss(recon, images)
-        self.log("train_loss", loss, prog_bar=True)
+        self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx: int) -> None:
         images = batch
         recon = self(images)
         loss = F.mse_loss(recon, images)
-        self.log("val_loss", loss, prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -156,14 +156,14 @@ class SpectrumAutoencoder(L.LightningModule):
         spectra = batch
         recon = self(spectra)
         loss = F.mse_loss(recon, spectra)
-        self.log("train_loss", loss, prog_bar=True)
+        self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx: int) -> None:
         spectra = batch
         recon = self(spectra)
         loss = F.mse_loss(recon, spectra)
-        self.log("val_loss", loss, prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -242,6 +242,8 @@ class SmallCLIPModel(L.LightningModule):
         self.log_dict(
             {"train_loss": loss, "logit_scale": self.logit_scale.exp()},
             prog_bar=True,
+            on_step=False,
+            on_epoch=True,
         )
         return loss
 
@@ -261,6 +263,8 @@ class SmallCLIPModel(L.LightningModule):
         self.log_dict(
             {"val_loss": loss, "logit_scale": self.logit_scale.exp()},
             prog_bar=True,
+            on_step=False,
+            on_epoch=True,
         )
 
     def configure_optimizers(self):
