@@ -8,6 +8,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
 #SBATCH --gres=gpu:1
+#SBATCH --chdir=/n03data/huertas/astroinfo/AstroCLIP
 
 module load cuda/11.8
 # Initialize Conda in this shell
@@ -25,5 +26,4 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 export ASTROCLIP_ROOT=/n03data/huertas/astroinfo/astroclip_data
 
-cd /n03data/huertas/astroinfo/AstroCLIP
 python teaching_scripts/train_image_encoder.py  --dataset $ASTROCLIP_ROOT/teaching_demo/astroclip_dataset  --output $ASTROCLIP_ROOT/teaching_demo/image_autoencoder.ckpt --max-epochs 10
