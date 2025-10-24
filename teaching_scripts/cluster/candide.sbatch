@@ -23,6 +23,7 @@ export PATH=$CONDA_PREFIX/bin:$PATH
 export CUDA_HOME=$CONDA_PREFIX
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=$CONDA_PREFIX
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/n03data/huertas/astroinfo/AstroCLIP:$PYTHONPATH
 
 export ASTROCLIP_ROOT=/n03data/huertas/astroinfo/astroclip_data
 
