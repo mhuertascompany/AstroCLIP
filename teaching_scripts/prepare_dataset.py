@@ -1,10 +1,10 @@
-"""Utility script to stage paired image/spectrum data for the teaching pipeline.
+"""Prepare a lightweight AstroCLIP dataset from the Hugging Face hub.
 
-This script relies on the in-repo HuggingFace dataset builder located at
-`astroclip/data/dataset.py`. It can fetch the full dataset (≈60 GB) or derive a
-smaller subset for quick experimentation. The resulting dataset is saved in the
-standard HuggingFace `save_to_disk` format so that `AstroClipDataloader` can
-load it without further changes.
+This script mirrors the setup used in the AstroCLIP tutorial notebook:
+https://github.com/EiffL/Tutorials/blob/master/FoundationModels/AstroCLIPTutorial_solutions.ipynb
+
+It downloads the community-hosted dataset ``EiffL/AstroCLIP`` and materialises a
+train/test split locally so the rest of the teaching pipeline can run offline.
 """
 
 from __future__ import annotations
@@ -13,125 +13,90 @@ import argparse
 import logging
 import shutil
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Optional
 
-import os
-
-os.environ.setdefault("HF_DATASETS_ALLOW_LOCAL_SCRIPT", "1")
-os.environ.setdefault("HF_DATASETS_ALLOW_CODE", "1")
-os.environ.setdefault("HF_ALLOW_CODE_EVAL", "1")
-
-from datasets import Dataset, DatasetDict, __version__ as datasets_version, load_dataset
-from packaging import version
+from datasets import Dataset, DatasetDict, load_dataset
 
 from astroclip.env import format_with_env
 
 LOGGER = logging.getLogger("prepare_dataset")
 
-if version.parse(datasets_version) >= version.parse("5.0.0"):
-    raise RuntimeError(
-        "The teaching dataset scripts rely on HuggingFace datasets<5.0.0. "
-        f"Detected version {datasets_version}. Install datasets==4.2.0."
-    )
 
-
-def _load_splits(
-    script_path: Path,
-    split_sizes: Dict[str, Optional[int]],
+def _subset_dataset(
+    dataset: Dataset,
+    sample_size: Optional[int],
     shuffle: bool,
     seed: int,
-    streaming: bool,
-) -> DatasetDict:
-    dataset_splits: Dict[str, Dataset] = {}
-
-    for split_name, sample_size in split_sizes.items():
-        LOGGER.info("Loading split '%s' (sample_size=%s)", split_name, sample_size)
-        split_selector = split_name
-        ds = load_dataset(
-            str(script_path),
-            name="joint",
-            split=split_selector,
-            streaming=streaming,
-        )
-
-        if streaming:
-            if sample_size is None:
-                raise ValueError(
-                    "Streaming mode requires --sample-size/--train-size/--test-size."
-                )
-            LOGGER.info("Sampling %d elements from streaming dataset", sample_size)
-            sampled_columns = _take(ds, sample_size)
-            ds = Dataset.from_dict(sampled_columns)
-
-        if sample_size is not None and not streaming:
-            ds = ds.shuffle(seed=seed) if shuffle else ds
-            sample_size = min(sample_size, len(ds))
-            ds = ds.select(range(sample_size))
-            LOGGER.info("Selected %d examples from split '%s'", len(ds), split_name)
-
-        dataset_splits[split_name] = ds
-
-    return DatasetDict(dataset_splits)
-
-
-def _take(dataset: Iterable[Dict], n: int) -> Dict[str, Iterable]:
-    """Collect `n` examples from an iterable dataset into column-major dict."""
-    columns = None
-    count = 0
-    for item in dataset:
-        if columns is None:
-            columns = {k: [] for k in item.keys()}
-        for key, value in item.items():
-            columns[key].append(value)
-        count += 1
-        if count >= n:
-            break
-    if columns is None:
-        raise ValueError("Dataset iterator produced no items.")
-    return columns
+) -> Dataset:
+    if sample_size is None:
+        return dataset
+    sample_size = min(sample_size, len(dataset))
+    if shuffle:
+        dataset = dataset.shuffle(seed=seed)
+    return dataset.select(range(sample_size))
 
 
 def stage_dataset(
+    dataset_name: str,
     output_dir: Path,
     train_size: Optional[int],
     test_size: Optional[int],
-    overwrite: bool,
+    test_fraction: Optional[float],
     shuffle: bool,
     seed: int,
-    streaming: bool,
+    overwrite: bool,
 ) -> Path:
-    repo_root = Path(__file__).resolve().parents[1]
-    script_path = repo_root / "astroclip" / "data" / "dataset.py"
-    if not script_path.exists():
-        raise FileNotFoundError(f"Dataset script not found at {script_path}")
+    LOGGER.info("Loading dataset '%s'", dataset_name)
+    base_dataset = load_dataset(dataset_name, split="train")
+    LOGGER.info("Loaded %d examples from the hub", len(base_dataset))
+
+    if test_size is not None and test_size >= len(base_dataset):
+        raise ValueError("test_size must be smaller than the dataset size.")
+
+    if test_fraction is None and test_size is None:
+        test_fraction = 0.2
+
+    if test_size is not None:
+        split = base_dataset.train_test_split(test_size=test_size, seed=seed)
+    elif test_fraction is not None and 0 < test_fraction < 1:
+        split = base_dataset.train_test_split(test_size=test_fraction, seed=seed)
+    else:
+        split = {"train": base_dataset, "test": None}
+
+    train_dataset = _subset_dataset(split["train"], train_size, shuffle, seed)
+    test_dataset = split["test"]
+    if test_dataset is not None:
+        test_dataset = _subset_dataset(test_dataset, test_size, shuffle, seed)
+
+    dataset_dict = DatasetDict({"train": train_dataset})
+    if test_dataset is not None:
+        dataset_dict["test"] = test_dataset
 
     if output_dir.exists():
         if not overwrite:
             raise FileExistsError(
-                f"Output directory {output_dir} already exists. "
-                "Pass --overwrite to replace it."
+                f"{output_dir} already exists. Use --overwrite to replace it."
             )
-        LOGGER.warning("Removing existing directory %s", output_dir)
         shutil.rmtree(output_dir)
 
-    split_sizes = {"train": train_size, "test": test_size}
-    dataset = _load_splits(
-        script_path=script_path,
-        split_sizes=split_sizes,
-        shuffle=shuffle,
-        seed=seed,
-        streaming=streaming,
-    )
-
-    LOGGER.info("Saving dataset dictionary to %s", output_dir)
+    LOGGER.info("Saving dataset to %s", output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    dataset.save_to_disk(output_dir)
+    dataset_dict.save_to_disk(output_dir)
+    LOGGER.info("Done. Train size=%d, Test size=%s", len(train_dataset), len(test_dataset) if test_dataset is not None else "N/A")
     return output_dir
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download/save a paired AstroCLIP dataset for teaching demos."
+        description=(
+            "Download the tutorial dataset from the Hugging Face hub and stage it "
+            "for the AstroCLIP teaching pipeline."
+        )
+    )
+    parser.add_argument(
+        "--dataset",
+        default="EiffL/AstroCLIP",
+        help="Hugging Face dataset identifier to download.",
     )
     default_root = format_with_env("{ASTROCLIP_ROOT}")
     parser.add_argument(
@@ -144,18 +109,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--train-size",
         type=int,
         default=2048,
-        help=(
-            "Number of examples to keep in the training split. "
-            "None keeps the full split."
-        ),
+        help="Number of training examples to keep (None uses the entire split).",
     )
     parser.add_argument(
         "--test-size",
         type=int,
         default=512,
+        help="Number of test examples to keep (set to None to use fraction instead).",
+    )
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        default=None,
         help=(
-            "Number of examples to keep in the test split. "
-            "None keeps the full split."
+            "Fraction of the dataset reserved for testing. "
+            "Ignored if --test-size is provided."
         ),
     )
     parser.add_argument(
@@ -167,20 +135,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--seed",
         type=int,
         default=42,
-        help="Random seed used when shuffling splits before sampling.",
+        help="Random seed used for shuffling and splitting.",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Allow replacing an existing output directory.",
-    )
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-        help=(
-            "Use HuggingFace streaming mode. Requires --train-size/--test-size "
-            "to limit the number of downloaded examples."
-        ),
+        help="Allow replacing the output directory if it already exists.",
     )
     parser.add_argument(
         "--log-level",
@@ -201,15 +161,15 @@ def main() -> None:
     )
 
     stage_dataset(
+        dataset_name=args.dataset,
         output_dir=args.output_dir,
         train_size=None if args.train_size is None else args.train_size,
         test_size=None if args.test_size is None else args.test_size,
-        overwrite=args.overwrite,
+        test_fraction=args.test_fraction,
         shuffle=not args.no_shuffle,
         seed=args.seed,
-        streaming=args.streaming,
+        overwrite=args.overwrite,
     )
-    LOGGER.info("Dataset preparation completed successfully.")
 
 
 if __name__ == "__main__":
