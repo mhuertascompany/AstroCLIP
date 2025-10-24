@@ -45,7 +45,8 @@ def main() -> None:
         raise ValueError("Dataset must contain a 'train' split.")
 
     sample = ds["train"][0]["spectrum"]
-    input_dim = int(np.prod(sample.shape))
+    sample_arr = np.asarray(sample)
+    input_dim = int(np.prod(sample_arr.shape))
 
     args.log_dir.mkdir(parents=True, exist_ok=True)
     logger = CSVLogger(save_dir=str(args.log_dir), name=args.run_name)
