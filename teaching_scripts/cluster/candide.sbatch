@@ -4,7 +4,7 @@
 #SBATCH --error=/n03data/huertas/astroinfo/logs/astroclip.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --nodelist=n36
+#SBATCH --nodelist=n03
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
 #SBATCH --gres=gpu:1
