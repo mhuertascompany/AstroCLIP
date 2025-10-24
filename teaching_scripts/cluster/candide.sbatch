@@ -1,3 +1,5 @@
+#!/bin/bash
+#SBATCH --job-name=astroclip_astroinfo
 #SBATCH --output=/n03data/huertas/astroinfo/logs/astroclip.out
 #SBATCH --error=/n03data/huertas/astroinfo/logs/astroclip.err
 #SBATCH --nodes=1
@@ -6,7 +8,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
 #SBATCH --gres=gpu:1
-
 
 module load cuda/11.8
 # Initialize Conda in this shell
