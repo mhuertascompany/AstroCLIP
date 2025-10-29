@@ -173,6 +173,90 @@ class SpectrumAutoencoder(L.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
 
+class SpectrumTransformer(L.LightningModule):
+    """Lightweight transformer encoder that embeds spectra into a fixed representation."""
+
+    def __init__(
+        self,
+        input_dim: int = 7781,
+        patch_size: int = 16,
+        embed_dim: int = 256,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        lr: float = 1e-3,
+        weight_decay: float = 1e-5,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        if input_dim % patch_size != 0:
+            raise ValueError("input_dim must be divisible by patch_size")
+
+        num_patches = input_dim // patch_size
+        self.patch_embed = nn.Linear(patch_size, embed_dim)
+        self.positional_encoding = nn.Parameter(torch.randn(1, num_patches, embed_dim))
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            batch_first=True,
+            dim_feedforward=embed_dim * 2,
+            activation="gelu",
+            dropout=0.1,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.reconstruction = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, input_dim),
+        )
+
+        self.apply(_weight_init)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.hparams.embed_dim
+
+    def _patchify(self, spectrum: torch.Tensor) -> torch.Tensor:
+        b, seq_len = spectrum.shape
+        ps = self.hparams.patch_size
+        patches = spectrum.view(b, seq_len // ps, ps)
+        return patches
+
+    def encode(self, spectrum: torch.Tensor) -> torch.Tensor:
+        patches = self._patchify(spectrum)
+        tokens = self.patch_embed(patches) + self.positional_encoding
+        encoded = self.transformer(tokens)
+        pooled = encoded.mean(dim=1)
+        return self.norm(pooled)
+
+    def forward(self, spectrum: torch.Tensor) -> torch.Tensor:
+        return self.encode(spectrum)
+
+    def training_step(self, batch, batch_idx: int) -> torch.Tensor:
+        spectra = batch
+        emb = self.encode(spectra)
+        recon = self.reconstruction(emb)
+        loss = F.mse_loss(recon, spectra)
+        self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx: int) -> None:
+        spectra = batch
+        emb = self.encode(spectra)
+        recon = self.reconstruction(emb)
+        loss = F.mse_loss(recon, spectra)
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
+        return {"optimizer": optimizer, "lr_scheduler": scheduler}
+
+
 class SmallCLIPModel(L.LightningModule):
     """CLIP-style alignment using pretrained image and spectrum encoders."""
 
