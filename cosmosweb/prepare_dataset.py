@@ -292,6 +292,23 @@ def main() -> None:
     log.info(f'After photometric quality cuts: {len(df_all)}')
 
     # Morpho cross-match (id is from the photom file)
+    log.info(f'Morpho  id sample (first 5): {list(df_morpho["id"].head())}  dtype={df_morpho["id"].dtype}')
+    log.info(f'Photom  id sample (first 5): {list(df_all["id"].head())}  dtype={df_all["id"].dtype}')
+    n_overlap = df_all['id'].isin(morpho_ids).sum()
+    log.info(f'ID overlap before type coercion: {n_overlap}')
+
+    # Try casting both to the same type if no overlap found
+    if n_overlap == 0:
+        try:
+            morpho_ids_int = set(df_morpho['id'].astype(np.int64))
+            n_overlap_int  = df_all['id'].astype(np.int64).isin(morpho_ids_int).sum()
+            log.info(f'ID overlap after int64 coercion: {n_overlap_int}')
+            if n_overlap_int > 0:
+                morpho_ids = morpho_ids_int
+                df_all['id'] = df_all['id'].astype(np.int64)
+        except (ValueError, OverflowError):
+            log.warning('int64 coercion failed; IDs may be strings or floats')
+
     df_merged = df_all[df_all['id'].isin(morpho_ids)].copy()
     log.info(f'After morpho cross-match: {len(df_merged)} galaxies')
 
