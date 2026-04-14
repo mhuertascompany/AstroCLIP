@@ -65,35 +65,51 @@ log = logging.getLogger(__name__)
 def load_morpho_db(db_path: str) -> pd.DataFrame:
     """Read the visual morphology SQLite DB; return galaxies passing basic QC."""
     con = sqlite3.connect(db_path)
+    # Read native column names directly from the SQLite schema
+    cursor = con.execute('SELECT * FROM morphology LIMIT 0')
+    db_col_names = [desc[0] for desc in cursor.description]
     df  = pd.read_sql_query('SELECT * FROM morphology', con)
     con.close()
 
-    col_names = [
-        'id',
-        'FAKE', 'PHOTOMETRY_OFF', 'SERSIC_OFF', 'SUBCOMPONENT', 'BLENDED',
-        'TOO_FAINT', 'TOO_SMALL', 'UNCERTAIN', 'BRIGHT_FOREGROUND',
-        'ELL_REGULAR', 'ELL_INTER', 'ELL_DISTURB',
-        'S0_REGULAR', 'S0_INTER', 'S0_DISTURB',
-        'EDISK_REGULAR', 'EDISK_INTER', 'EDISK_DISTURB',
-        'LDISK_REGULAR', 'LDISK_INTER', 'LDISK_DISTURB',
-        'EDGE_ON', 'ASYMETRY', 'ARMS', 'BAR', 'LSB_DISK',
-        'CLUMP', 'MANY_CLUMPS', 'IS_A_CLUMP', 'CHAIN', 'COMPACT',
-        'IRR', 'POINT_LIKE', 'POWERLAW',
-        'MINOR_MERGER', 'MINOR_CLOSE', 'MINOR_PAIR',
-        'MAJOR_MERGER', 'MAJOR_CLOSE', 'MAJOR_PAIR',
-        'IS_SMALL_COMPANION', 'CONSISTENT_Z', 'DRY', 'REMNANT',
-        'LENS', 'GROUPE', 'INFO', 'ADDI', 'VERSION',
-    ]
-    df.columns = col_names[:len(df.columns)]
+    # The DB already carries column names; only rename if they are positional
+    # integers (older DB versions that lack a schema).  Otherwise keep as-is.
+    if df.columns[0] == 0 or str(df.columns[0]).isdigit():
+        known = [
+            'id',
+            'FAKE', 'PHOTOMETRY_OFF', 'SERSIC_OFF', 'SUBCOMPONENT', 'BLENDED',
+            'TOO_FAINT', 'TOO_SMALL', 'UNCERTAIN', 'BRIGHT_FOREGROUND',
+            'ELL_REGULAR', 'ELL_INTER', 'ELL_DISTURB',
+            'S0_REGULAR', 'S0_INTER', 'S0_DISTURB',
+            'EDISK_REGULAR', 'EDISK_INTER', 'EDISK_DISTURB',
+            'LDISK_REGULAR', 'LDISK_INTER', 'LDISK_DISTURB',
+            'EDGE_ON', 'ASYMETRY', 'ARMS', 'BAR', 'LSB_DISK',
+            'CLUMP', 'MANY_CLUMPS', 'IS_A_CLUMP', 'CHAIN', 'COMPACT',
+            'IRR', 'POINT_LIKE', 'POWERLAW',
+            'MINOR_MERGER', 'MINOR_CLOSE', 'MINOR_PAIR',
+            'MAJOR_MERGER', 'MAJOR_CLOSE', 'MAJOR_PAIR',
+            'IS_SMALL_COMPANION', 'CONSISTENT_Z', 'DRY', 'REMNANT',
+            'LENS', 'GROUPE', 'INFO', 'ADDI', 'VERSION',
+        ]
+        # Pad with generic names for any extra columns beyond the known list
+        padded = known + [f'_COL{i}' for i in range(len(known), len(df.columns))]
+        df.columns = padded
+    else:
+        log.info(f'Morpho DB native columns: {list(df.columns)}')
 
-    keep = (
-        (df['FAKE']             == 0) &
-        (df['TOO_FAINT']        == 0) &
-        (df['TOO_SMALL']        == 0) &
-        (df['BRIGHT_FOREGROUND']== 0) &
-        (df['POINT_LIKE']       == 0)
-    )
-    log.info(f'Morpho DB: {len(df)} total, {keep.sum()} pass QC cuts')
+    log.info(f'Morpho DB: {len(df)} total columns={len(df.columns)}')
+
+    qc_cols = ['FAKE', 'TOO_FAINT', 'TOO_SMALL', 'BRIGHT_FOREGROUND', 'POINT_LIKE']
+    missing = [c for c in qc_cols if c not in df.columns]
+    if missing:
+        log.warning(f'QC columns not found (skipping): {missing}')
+        qc_cols = [c for c in qc_cols if c in df.columns]
+
+    if qc_cols:
+        keep = (df[qc_cols] == 0).all(axis=1)
+    else:
+        keep = pd.Series(True, index=df.index)
+
+    log.info(f'  {keep.sum()} / {len(df)} pass QC cuts')
     return df[keep].copy()
 
 
