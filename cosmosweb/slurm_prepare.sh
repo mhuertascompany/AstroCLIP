@@ -13,7 +13,7 @@
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
-REPO_DIR=/n03data/huertas/AstroCLIP
+REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
 
 mkdir -p ${OUTPUT_DIR}
