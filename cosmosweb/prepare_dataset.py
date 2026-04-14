@@ -128,20 +128,16 @@ def load_photom(photom_path: str) -> pd.DataFrame:
     want = ['id', 'tile', 'ra', 'dec', 'radius_sersic',
             'flag_star', 'flag_blend', 'warn_flag']
     df = _fits_to_df(photom_path, cols=want)
-    keep = (
-        (df['flag_star'] == 0) &
-        (df['warn_flag'] == 0) &
-        df['ra'].notna() &
-        df['tile'].notna()
-    )
-    log.info(f'Photom catalog: {len(df)} total, {keep.sum()} pass quality cuts')
-    return df[keep].copy()
+    log.info(f'Photom catalog: {len(df)} rows')
+    return df
 
 
 def load_lephare(lephare_path: str) -> pd.DataFrame:
-    """Load LePhare photo-z from its dedicated FITS file."""
-    want = ['id', 'zfinal', 'zpdf_l68', 'zpdf_u68']
-    return _fits_to_df(lephare_path, cols=want)
+    """Load LePhare photo-z (row-aligned with photom, no id column)."""
+    want = ['zfinal', 'zpdf_l68', 'zpdf_u68']
+    df = _fits_to_df(lephare_path, cols=want)
+    log.info(f'LePhare catalog: {len(df)} rows')
+    return df
 
 
 def load_cigale(cigale_path: str) -> tuple[pd.DataFrame, dict]:
@@ -286,21 +282,38 @@ def main() -> None:
     df_morpho   = load_morpho_db(args.morpho_db)
     morpho_ids  = set(df_morpho['id'])
 
+    # The three FITS catalogs are row-aligned (same 784016 rows, same order).
+    # Only the photom file carries 'id'; lephare and cigale have no id column.
+    # → concat by position, then filter.
     log.info('Loading photometry catalog…')
-    df_phot = load_photom(args.photom_cat)
-    df_phot = df_phot[df_phot['id'].isin(morpho_ids)].copy()
-    log.info(f'  {len(df_phot)} galaxies after morpho cross-match')
+    df_phot   = load_photom(args.photom_cat)
 
     log.info('Loading LePhare catalog…')
-    df_lp = load_lephare(args.lephare_cat)
+    df_lp     = load_lephare(args.lephare_cat)
 
     log.info('Loading CIGALE catalog…')
     df_cigale, _COL_MAP = load_cigale(args.cigale_cat)
 
-    # Merge on 'id' — inner join keeps only galaxies present in all catalogs
-    df_merged = df_phot.merge(df_lp,      on='id', how='left')
-    df_merged = df_merged.merge(df_cigale, on='id', how='inner')
-    log.info(f'After full cross-match: {len(df_merged)} galaxies')
+    # Positional concat — all three have the same number of rows
+    df_all = pd.concat(
+        [df_phot, df_lp, df_cigale],
+        axis=1,
+    ).reset_index(drop=True)
+    log.info(f'Combined catalog: {len(df_all)} rows')
+
+    # Quality cuts
+    keep = (
+        (df_all['flag_star'] == 0) &
+        (df_all['warn_flag'] == 0) &
+        df_all['ra'].notna() &
+        df_all['tile'].notna()
+    )
+    df_all = df_all[keep].copy()
+    log.info(f'After photometric quality cuts: {len(df_all)}')
+
+    # Morpho cross-match (id is from the photom file)
+    df_merged = df_all[df_all['id'].isin(morpho_ids)].copy()
+    log.info(f'After morpho cross-match: {len(df_merged)} galaxies')
 
     # Drop rows where any SFH column is null
     sfh_cols = _COL_MAP['sfr'] + _COL_MAP['time'] + [_COL_MAP['integrated']]
