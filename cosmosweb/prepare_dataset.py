@@ -3,13 +3,16 @@ Prepare the paired COSMOS-Web image + CIGALE SFH dataset.
 
 For each galaxy selected from the visual morphology catalog:
   1. Cut a 64x64 stamp in F150W, F277W, F444W from the NIRCam tile mosaics
-  2. Interpolate the CIGALE SFH to a common log-spaced lookback-time grid
+  2. Interpolate the CIGALE SFH onto a redshift-normalized fractional time grid
+     (Option A: t_frac = t_lookback / t_universe(z), so all SFHs share the
+      same [0, 1] axis regardless of redshift)
   3. Store everything in an HDF5 file ready for training
 
 Output HDF5 layout:
     /images         (N, 3, 64, 64)  float32  arcsinh-stretched flux
-    /sfh            (N, N_TIME)     float32  log10(SFR + EPS) on common grid
-    /sfh_time_grid  (N_TIME,)       float32  lookback time in Myr
+    /sfh            (N, N_TIME)     float32  log10(SFR + EPS) on fractional grid
+    /sfh_time_grid  (N_TIME,)       float32  fractional lookback time ∈ [0, 1]
+    /sfh_time_norm  (N,)            float32  age of universe at galaxy z [Myr]
     /galaxy_id      (N,)            int64
     /ra             (N,)            float64
     /dec            (N,)            float64
@@ -43,17 +46,24 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
+from astropy.cosmology import FlatLambdaCDM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'cigale'))
 from SFHandle.sfh import SFH
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-FILTERS     = ['f150w', 'f277w', 'f444w']
-STAMP_SIZE  = 64
-SFH_N_BINS  = 50
-SFH_EPS     = 1e-10  # avoids log10(0) for quiescent galaxies
-SFH_TIME_GRID = np.logspace(np.log10(10), np.log10(14_000), SFH_N_BINS)  # Myr
+FILTERS    = ['f150w', 'f277w', 'f444w']
+STAMP_SIZE = 64
+SFH_N_BINS = 50
+SFH_EPS    = 1e-10   # avoids log10(0) for quiescent galaxies
+
+# Fractional lookback-time grid ∈ [0, 1].
+# Multiplied by t_universe(z) [Myr] per galaxy to get the physical grid.
+SFH_T_FRAC = np.linspace(0, 1, SFH_N_BINS)
+
+# Flat ΛCDM cosmology for computing t_universe(z)
+COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s  %(levelname)s  %(message)s')
 log = logging.getLogger(__name__)
@@ -164,14 +174,25 @@ def load_cigale(cigale_path: str) -> tuple[pd.DataFrame, dict]:
 _COL_MAP: dict = {}
 
 
-def sfh_to_common_grid(row: pd.Series) -> np.ndarray | None:
+def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | None:
     """
-    Extract and interpolate one galaxy's CIGALE SFH to SFH_TIME_GRID.
+    Extract and interpolate one galaxy's CIGALE SFH to the fractional time grid.
 
-    Returns log10(SFR + SFH_EPS) array of shape (SFH_N_BINS,), or None if
-    the row does not contain valid SFH data.  Requires _COL_MAP to be set.
+    Option A (z-dependent normalization): the physical time axis is
+    ``SFH_T_FRAC * t_universe(z)`` so that all SFHs live on the same
+    normalized [0, 1] lookback-time axis independent of redshift.
+
+    Returns (sfh_log, t_universe_myr) where
+      sfh_log        – float32 array of shape (SFH_N_BINS,), log10(SFR + EPS)
+      t_universe_myr – age of universe at z in Myr (stored per galaxy in HDF5)
+
+    Returns None if the row does not contain valid SFH data or z is invalid.
+    Requires _COL_MAP to be set.
     """
-    int_col = _COL_MAP['integrated']
+    if not (np.isfinite(z) and z > 0):
+        return None
+
+    int_col    = _COL_MAP['integrated']
     integrated = float(row.get(int_col, np.nan))
     if not (np.isfinite(integrated) and integrated > 0):
         return None
@@ -183,11 +204,16 @@ def sfh_to_common_grid(row: pd.Series) -> np.ndarray | None:
     if not (np.all(np.isfinite(lb_time)) and np.all(np.isfinite(sfr))):
         return None
 
-    sfh_obj       = SFH(lb_time, sfr, err)
-    sfr_interp, _ = sfh_obj.interpolate_sfh(
-        SFH_TIME_GRID, kind='next', bounds_error=False, fill_value=0.0
+    # Age of universe at this galaxy's redshift → physical time grid
+    t_universe_myr = float(COSMO.age(z).to('Myr').value)
+    phys_grid      = SFH_T_FRAC * t_universe_myr   # (SFH_N_BINS,) in Myr
+
+    sfh_obj        = SFH(lb_time, sfr, err)
+    sfr_interp, _  = sfh_obj.interpolate_sfh(
+        phys_grid, kind='next', bounds_error=False, fill_value=0.0
     )
-    return np.log10(sfr_interp + SFH_EPS).astype(np.float32)
+    sfh_log = np.log10(sfr_interp + SFH_EPS).astype(np.float32)
+    return sfh_log, t_universe_myr
 
 
 # ── image helpers ──────────────────────────────────────────────────────────────
@@ -329,14 +355,16 @@ def main() -> None:
         kw      = dict(maxshape=(None,), chunks=True)
         img_kw  = dict(maxshape=(None, 3, sz, sz), chunks=(64, 3, sz, sz))
 
-        ds_img  = f.create_dataset('images',    shape=(n_max, 3, sz, sz), dtype='f4', **img_kw)
-        ds_sfh  = f.create_dataset('sfh',       shape=(n_max, SFH_N_BINS), dtype='f4',
-                                   maxshape=(None, SFH_N_BINS), chunks=(256, SFH_N_BINS))
-        ds_id   = f.create_dataset('galaxy_id', shape=(n_max,), dtype='i8', **kw)
-        ds_ra   = f.create_dataset('ra',        shape=(n_max,), dtype='f8', **kw)
-        ds_dec  = f.create_dataset('dec',       shape=(n_max,), dtype='f8', **kw)
-        ds_z    = f.create_dataset('redshift',  shape=(n_max,), dtype='f4', **kw)
-        f.create_dataset('sfh_time_grid', data=SFH_TIME_GRID.astype(np.float32))
+        ds_img   = f.create_dataset('images',       shape=(n_max, 3, sz, sz), dtype='f4', **img_kw)
+        ds_sfh   = f.create_dataset('sfh',          shape=(n_max, SFH_N_BINS), dtype='f4',
+                                    maxshape=(None, SFH_N_BINS), chunks=(256, SFH_N_BINS))
+        ds_tnorm = f.create_dataset('sfh_time_norm', shape=(n_max,), dtype='f4', **kw)
+        ds_id    = f.create_dataset('galaxy_id',    shape=(n_max,), dtype='i8', **kw)
+        ds_ra    = f.create_dataset('ra',           shape=(n_max,), dtype='f8', **kw)
+        ds_dec   = f.create_dataset('dec',          shape=(n_max,), dtype='f8', **kw)
+        ds_z     = f.create_dataset('redshift',     shape=(n_max,), dtype='f4', **kw)
+        # Common fractional grid ∈ [0, 1]; multiply by sfh_time_norm[i] to get Myr
+        f.create_dataset('sfh_time_grid', data=SFH_T_FRAC.astype(np.float32))
 
         f.attrs['filters']    = ','.join(FILTERS)
         f.attrs['stamp_size'] = sz
@@ -368,10 +396,13 @@ def main() -> None:
 
                 tile_ok = 0
                 for _, row in tile_df.iterrows():
+                    z = float(row.get('zfinal', -1.0))
+
                     # ── SFH ──────────────────────────────────────────────────
-                    sfh_vec = sfh_to_common_grid(row)
-                    if sfh_vec is None:
+                    result = sfh_to_common_grid(row, z)
+                    if result is None:
                         continue
+                    sfh_vec, t_universe_myr = result
 
                     # ── stamps ───────────────────────────────────────────────
                     stamps, ok = [], True
@@ -387,12 +418,13 @@ def main() -> None:
                     if not ok:
                         continue
 
-                    ds_img[written]  = np.stack(stamps, axis=0)    # (3, sz, sz)
-                    ds_sfh[written]  = sfh_vec
-                    ds_id[written]   = int(row['id'])
-                    ds_ra[written]   = float(row['ra'])
-                    ds_dec[written]  = float(row['dec'])
-                    ds_z[written]    = float(row.get('zfinal', -1.0))
+                    ds_img[written]   = np.stack(stamps, axis=0)    # (3, sz, sz)
+                    ds_sfh[written]   = sfh_vec
+                    ds_tnorm[written] = t_universe_myr
+                    ds_id[written]    = int(row['id'])
+                    ds_ra[written]    = float(row['ra'])
+                    ds_dec[written]   = float(row['dec'])
+                    ds_z[written]     = z
                     written += 1
                     tile_ok += 1
 
@@ -403,7 +435,7 @@ def main() -> None:
                     hdul.close()
 
         # ── truncate datasets to actual size ──────────────────────────────
-        for ds in [ds_img, ds_sfh, ds_id, ds_ra, ds_dec, ds_z]:
+        for ds in [ds_img, ds_sfh, ds_tnorm, ds_id, ds_ra, ds_dec, ds_z]:
             ds.resize(written, axis=0)
 
         f.attrs['n_galaxies'] = written
