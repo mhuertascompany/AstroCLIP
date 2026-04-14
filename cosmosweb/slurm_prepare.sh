@@ -24,7 +24,7 @@ CAT_DIR=/n23data2/cosmosweb/catalogs/DR1/data/catalog
 
 # ── run ───────────────────────────────────────────────────────────────────────
 python cosmosweb/prepare_dataset.py \
-    --morpho_db   /n07data/ilbert/COSMOS-Web/photoz_MASTER_v3.1.0/MORPHO/visualmorpho_COSMOSWeb_v7.db \
+    --morpho_cat  /n03data/huertas/COSMOS-Web/ilbert_finetune/ilbert_visual_zoobot_morphology.fits \
     --photom_cat  ${CAT_DIR}/COSMOSWeb_mastercatalog_v1_photom_primary.fits \
     --lephare_cat ${CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits \
     --cigale_cat  ${CAT_DIR}/COSMOSWeb_mastercatalog_v1_cigale.fits \

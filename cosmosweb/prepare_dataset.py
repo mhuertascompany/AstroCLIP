@@ -32,7 +32,6 @@ Notes:
 """
 
 import sys
-import sqlite3
 import argparse
 import logging
 from pathlib import Path
@@ -62,55 +61,28 @@ log = logging.getLogger(__name__)
 
 # ── catalog helpers ────────────────────────────────────────────────────────────
 
-def load_morpho_db(db_path: str) -> pd.DataFrame:
-    """Read the visual morphology SQLite DB; return galaxies passing basic QC."""
-    con = sqlite3.connect(db_path)
-    # Read native column names directly from the SQLite schema
-    cursor = con.execute('SELECT * FROM morphology LIMIT 0')
-    db_col_names = [desc[0] for desc in cursor.description]
-    df  = pd.read_sql_query('SELECT * FROM morphology', con)
-    con.close()
+def load_morpho_catalog(fits_path: str) -> pd.DataFrame:
+    """
+    Load the morphology selection catalog (FITS).
 
-    # The DB already carries column names; only rename if they are positional
-    # integers (older DB versions that lack a schema).  Otherwise keep as-is.
-    if df.columns[0] == 0 or str(df.columns[0]).isdigit():
-        known = [
-            'id',
-            'FAKE', 'PHOTOMETRY_OFF', 'SERSIC_OFF', 'SUBCOMPONENT', 'BLENDED',
-            'TOO_FAINT', 'TOO_SMALL', 'UNCERTAIN', 'BRIGHT_FOREGROUND',
-            'ELL_REGULAR', 'ELL_INTER', 'ELL_DISTURB',
-            'S0_REGULAR', 'S0_INTER', 'S0_DISTURB',
-            'EDISK_REGULAR', 'EDISK_INTER', 'EDISK_DISTURB',
-            'LDISK_REGULAR', 'LDISK_INTER', 'LDISK_DISTURB',
-            'EDGE_ON', 'ASYMETRY', 'ARMS', 'BAR', 'LSB_DISK',
-            'CLUMP', 'MANY_CLUMPS', 'IS_A_CLUMP', 'CHAIN', 'COMPACT',
-            'IRR', 'POINT_LIKE', 'POWERLAW',
-            'MINOR_MERGER', 'MINOR_CLOSE', 'MINOR_PAIR',
-            'MAJOR_MERGER', 'MAJOR_CLOSE', 'MAJOR_PAIR',
-            'IS_SMALL_COMPANION', 'CONSISTENT_Z', 'DRY', 'REMNANT',
-            'LENS', 'GROUPE', 'INFO', 'ADDI', 'VERSION',
-        ]
-        # Pad with generic names for any extra columns beyond the known list
-        padded = known + [f'_COL{i}' for i in range(len(known), len(df.columns))]
-        df.columns = padded
-    else:
-        log.info(f'Morpho DB native columns: {list(df.columns)}')
+    Expects a column named 'id' (or 'ID') matching galaxy IDs in the
+    photometry catalog.  All rows are used as the base selection —
+    apply any desired morphological cuts before calling this function,
+    or extend the body below.
+    """
+    df = _fits_to_df(fits_path)
+    log.info(f'Morpho catalog: {len(df)} rows, columns: {list(df.columns)}')
 
-    log.info(f'Morpho DB: {len(df)} total columns={len(df.columns)}')
+    # Normalise id column name to lowercase
+    col_map = {c: c.lower() for c in df.columns}
+    df = df.rename(columns=col_map)
 
-    qc_cols = ['FAKE', 'TOO_FAINT', 'TOO_SMALL', 'BRIGHT_FOREGROUND', 'POINT_LIKE']
-    missing = [c for c in qc_cols if c not in df.columns]
-    if missing:
-        log.warning(f'QC columns not found (skipping): {missing}')
-        qc_cols = [c for c in qc_cols if c in df.columns]
-
-    if qc_cols:
-        keep = (df[qc_cols] == 0).all(axis=1)
-    else:
-        keep = pd.Series(True, index=df.index)
-
-    log.info(f'  {keep.sum()} / {len(df)} pass QC cuts')
-    return df[keep].copy()
+    if 'id' not in df.columns:
+        raise ValueError(
+            f"No 'id' column found in {fits_path}.  "
+            f"Available columns: {list(df.columns)}"
+        )
+    return df
 
 
 def _fits_to_df(fits_path: str, hdu_index: int = 1, cols: list | None = None) -> pd.DataFrame:
@@ -225,6 +197,14 @@ def _img_path(img_dir: str, filt: str, tile: str) -> Path:
             f'mosaic_nircam_{filt}_COSMOS-Web_30mas_{tile}_v0_8_sci.fits')
 
 
+def _data_hdu_index(hdul) -> int:
+    """Return the index of the first HDU that contains 2D image data."""
+    for i, hdu in enumerate(hdul):
+        if hdu.data is not None and hasattr(hdu.data, 'ndim') and hdu.data.ndim == 2:
+            return i
+    raise ValueError(f'No 2D image data found in {hdul.filename()}')
+
+
 def cut_stamp(
     data: np.ndarray, wcs: WCS, ra: float, dec: float, size: int
 ) -> np.ndarray | None:
@@ -258,9 +238,9 @@ def main() -> None:
     global _COL_MAP
 
     parser = argparse.ArgumentParser(description='Build CosmosWeb image+SFH HDF5 dataset')
-    parser.add_argument('--morpho_db',
-                        default='/n07data/ilbert/COSMOS-Web/photoz_MASTER_v3.1.0/MORPHO/visualmorpho_COSMOSWeb_v7.db',
-                        help='Path to visualmorpho_COSMOSWeb_v7.db')
+    parser.add_argument('--morpho_cat',
+                        default='/n03data/huertas/COSMOS-Web/ilbert_finetune/ilbert_visual_zoobot_morphology.fits',
+                        help='Morphology selection FITS catalog (must contain an id column)')
     parser.add_argument('--photom_cat',
                         default=f'{_CAT_DIR}/COSMOSWeb_mastercatalog_v1_photom_primary.fits',
                         help='Photometry FITS file (primary)')
@@ -278,9 +258,9 @@ def main() -> None:
     args = parser.parse_args()
 
     # ── load & merge catalogs ────────────────────────────────────────────────
-    log.info('Loading visual morphology DB…')
-    df_morpho   = load_morpho_db(args.morpho_db)
-    morpho_ids  = set(df_morpho['id'])
+    log.info('Loading morphology catalog…')
+    df_morpho  = load_morpho_catalog(args.morpho_cat)
+    morpho_ids = set(df_morpho['id'])
 
     # The three FITS catalogs are row-aligned (same 784016 rows, same order).
     # Only the photom file carries 'id'; lephare and cigale have no id column.
@@ -347,22 +327,27 @@ def main() -> None:
         written = 0
 
         # ── tile loop ────────────────────────────────────────────────────────
+        tile_counts = df_merged['tile'].value_counts()
+        log.info(f'Tile distribution (top 10): {tile_counts.head(10).to_dict()}')
+
         for tile_name, tile_df in df_merged.groupby('tile'):
-            log.info(f'Tile {tile_name}: {len(tile_df)} candidates…')
+            log.info(f'Tile {tile_name!r}: {len(tile_df)} candidates…')
 
             paths = {filt: _img_path(args.img_dir, filt, tile_name)
                      for filt in FILTERS}
             missing = [str(p) for p in paths.values() if not p.exists()]
             if missing:
-                log.warning(f'  Skipping tile {tile_name}: missing {missing}')
+                log.warning(f'  Skipping tile {tile_name!r}: missing {missing}')
                 continue
 
             # Open all 3 FITS files; keep memmap open for the whole tile
             hduls  = {filt: fits.open(paths[filt], memmap=True) for filt in FILTERS}
             try:
-                arrays = {filt: hduls[filt][1].data             for filt in FILTERS}
-                wcss   = {filt: WCS(hduls[filt][1].header, naxis=2)
+                ext    = {filt: _data_hdu_index(hduls[filt]) for filt in FILTERS}
+                arrays = {filt: hduls[filt][ext[filt]].data             for filt in FILTERS}
+                wcss   = {filt: WCS(hduls[filt][ext[filt]].header, naxis=2)
                           for filt in FILTERS}
+                log.info(f'  HDU indices: { {f: ext[f] for f in FILTERS} }')
 
                 tile_ok = 0
                 for _, row in tile_df.iterrows():
