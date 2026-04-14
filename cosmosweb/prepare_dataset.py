@@ -113,85 +113,110 @@ def load_morpho_db(db_path: str) -> pd.DataFrame:
     return df[keep].copy()
 
 
-def load_master_catalog(fits_path: str) -> pd.DataFrame:
-    """
-    Load position, tile, photo-z, and CIGALE SFH from the COSMOS2025 master catalog.
-
-    HDU layout (COSMOSWeb_mastercatalog_v1.fits):
-        HDU 1 – photometry  (id, tile, ra, dec, flags, …)
-        HDU 2 – LePhare     (zfinal, …)
-        HDU 4 – CIGALE      (sfh_sfr_bin1..9, sfh_time_bin1..9, sfh_integrated, …)
-    """
-    photom_cols = ['id', 'tile', 'ra', 'dec', 'radius_sersic',
-                   'flag_star', 'flag_blend', 'warn_flag']
-    lephare_cols = ['zfinal', 'zpdf_l68', 'zpdf_u68']
-    cigale_cols  = (
-        [f'sfh_sfr_bin{i}'     for i in range(1, 10)] +
-        [f'sfh_sfr_bin{i}_err' for i in range(1, 10)] +
-        [f'sfh_time_bin{i}'    for i in range(1, 10)] +
-        ['sfh_integrated', 'mass', 'sfr_100myr', 'sfr_inst']
-    )
-
-    def _read(hdu_data, cols):
-        tbl   = Table(hdu_data)
-        valid = [c for c in cols if c in tbl.colnames and len(tbl[c].shape) <= 1]
-        return tbl[valid].to_pandas()
-
+def _fits_to_df(fits_path: str, hdu_index: int = 1, cols: list | None = None) -> pd.DataFrame:
+    """Read a single HDU from a FITS file into a DataFrame, keeping only scalar columns."""
     with fits.open(fits_path, memmap=True) as hdu:
-        phot    = _read(hdu[1].data, photom_cols)
-        lp      = _read(hdu[2].data, lephare_cols)
-        cigale  = _read(hdu[4].data, cigale_cols)
+        tbl = Table(hdu[hdu_index].data)
+    scalar_cols = [c for c in tbl.colnames if len(tbl[c].shape) <= 1]
+    if cols is not None:
+        scalar_cols = [c for c in cols if c in scalar_cols]
+    return tbl[scalar_cols].to_pandas()
 
-    df = pd.concat(
-        [phot.reset_index(drop=True),
-         lp.reset_index(drop=True),
-         cigale.reset_index(drop=True)],
-        axis=1,
-    )
 
-    # Basic photometric quality cuts
+def load_photom(photom_path: str) -> pd.DataFrame:
+    """Load photometry + quality flags from the primary photometry FITS file."""
+    want = ['id', 'tile', 'ra', 'dec', 'radius_sersic',
+            'flag_star', 'flag_blend', 'warn_flag']
+    df = _fits_to_df(photom_path, cols=want)
     keep = (
-        (df['flag_star']  == 0) &
-        (df['warn_flag']  == 0) &
-        (df['ra'].notna()) &
-        (df['tile'].notna())
+        (df['flag_star'] == 0) &
+        (df['warn_flag'] == 0) &
+        df['ra'].notna() &
+        df['tile'].notna()
     )
-    log.info(f'Master catalog: {len(df)} total, {keep.sum()} pass photometric cuts')
+    log.info(f'Photom catalog: {len(df)} total, {keep.sum()} pass quality cuts')
     return df[keep].copy()
+
+
+def load_lephare(lephare_path: str) -> pd.DataFrame:
+    """Load LePhare photo-z from its dedicated FITS file."""
+    want = ['id', 'zfinal', 'zpdf_l68', 'zpdf_u68']
+    return _fits_to_df(lephare_path, cols=want)
+
+
+def load_cigale(cigale_path: str) -> tuple[pd.DataFrame, dict]:
+    """
+    Load CIGALE SFH data and auto-detect the column naming convention.
+
+    COSMOS2025 DR1 may use either:
+      - 'sfh_sfr_bin{i}' / 'sfh_time_bin{i}' / 'sfh_integrated'   (DR1 style)
+      - 'bayes.sfh.sfr_bin{i}' / 'bayes.sfh.time_bin{i}' / 'bayes.sfh.integrated'
+        (raw CIGALE output style)
+
+    Returns the DataFrame and a dict with the resolved column-name lists.
+    """
+    df = _fits_to_df(cigale_path)
+    cols = set(df.columns)
+    log.info(f'CIGALE catalog: {len(df)} rows, {len(cols)} columns')
+
+    # ── detect naming convention ──────────────────────────────────────────────
+    if f'sfh_sfr_bin1' in cols:
+        sfr_cols  = [f'sfh_sfr_bin{i}'     for i in range(1, 10)]
+        err_cols  = [f'sfh_sfr_bin{i}_err' for i in range(1, 10)]
+        time_cols = [f'sfh_time_bin{i}'    for i in range(1, 10)]
+        int_col   = 'sfh_integrated'
+        log.info('  Using DR1-style column names  (sfh_sfr_bin{i})')
+    elif 'bayes.sfh.sfr_bin1' in cols:
+        sfr_cols  = [f'bayes.sfh.sfr_bin{i}'     for i in range(1, 10)]
+        err_cols  = [f'bayes.sfh.sfr_bin{i}_err' for i in range(1, 10)]
+        time_cols = [f'bayes.sfh.time_bin{i}'    for i in range(1, 10)]
+        int_col   = 'bayes.sfh.integrated'
+        log.info('  Using raw-CIGALE column names  (bayes.sfh.sfr_bin{i})')
+    else:
+        # Print a sample so the user can identify the correct names
+        sfr_like = [c for c in cols if 'sfr' in c.lower() and 'bin' in c.lower()]
+        log.error(
+            f'Cannot detect SFH column naming.  '
+            f'Columns containing "sfr" and "bin": {sorted(sfr_like)[:20]}\n'
+            f'First 40 column names: {sorted(cols)[:40]}'
+        )
+        raise ValueError('Unknown CIGALE column naming convention; see log above.')
+
+    missing = [c for c in sfr_cols + err_cols + time_cols + [int_col] if c not in cols]
+    if missing:
+        raise ValueError(f'Expected CIGALE columns not found: {missing}')
+
+    col_map = dict(sfr=sfr_cols, err=err_cols, time=time_cols, integrated=int_col)
+    return df, col_map
 
 
 # ── SFH helpers ────────────────────────────────────────────────────────────────
 
-_SFR_COLS  = [f'sfh_sfr_bin{i}'     for i in range(1, 10)]
-_TIME_COLS = [f'sfh_time_bin{i}'    for i in range(1, 10)]
-_ERR_COLS  = [f'sfh_sfr_bin{i}_err' for i in range(1, 10)]
-_INT_COL   = 'sfh_integrated'
+# Populated at runtime after load_cigale() resolves the naming convention
+_COL_MAP: dict = {}
 
 
 def sfh_to_common_grid(row: pd.Series) -> np.ndarray | None:
     """
     Extract and interpolate one galaxy's CIGALE SFH to SFH_TIME_GRID.
 
-    Returns log10(SFR + SFH_EPS) array of shape (SFH_N_BINS,), or None if the
-    row does not contain valid SFH data.
+    Returns log10(SFR + SFH_EPS) array of shape (SFH_N_BINS,), or None if
+    the row does not contain valid SFH data.  Requires _COL_MAP to be set.
     """
-    required = _SFR_COLS + _TIME_COLS + [_INT_COL]
-    if not all(c in row.index for c in required):
-        return None
-
-    integrated = float(row[_INT_COL])
+    int_col = _COL_MAP['integrated']
+    integrated = float(row.get(int_col, np.nan))
     if not (np.isfinite(integrated) and integrated > 0):
         return None
 
-    lb_time = np.array([row[c] for c in _TIME_COLS], dtype=np.float64)
-    sfr     = np.array([row[c] for c in _SFR_COLS],  dtype=np.float64) * integrated
-    err     = np.array([row[c] for c in _ERR_COLS],  dtype=np.float64) * integrated
+    lb_time = np.array([row[c] for c in _COL_MAP['time']], dtype=np.float64)
+    sfr     = np.array([row[c] for c in _COL_MAP['sfr']],  dtype=np.float64) * integrated
+    err     = np.array([row[c] for c in _COL_MAP['err']],  dtype=np.float64) * integrated
 
     if not (np.all(np.isfinite(lb_time)) and np.all(np.isfinite(sfr))):
         return None
 
-    sfh_obj           = SFH(lb_time, sfr, err)
-    sfr_interp, _     = sfh_obj.interpolate_sfh(
+    sfh_obj       = SFH(lb_time, sfr, err)
+    sfr_interp, _ = sfh_obj.interpolate_sfh(
         SFH_TIME_GRID, kind='next', bounds_error=False, fill_value=0.0
     )
     return np.log10(sfr_interp + SFH_EPS).astype(np.float32)
@@ -230,13 +255,25 @@ def cut_stamp(
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+_CAT_DIR = '/n23data2/cosmosweb/catalogs/DR1/data/catalog'
+
+
 def main() -> None:
+    global _COL_MAP
+
     parser = argparse.ArgumentParser(description='Build CosmosWeb image+SFH HDF5 dataset')
-    parser.add_argument('--morpho_db',  required=True,
+    parser.add_argument('--morpho_db',
+                        default='/n07data/ilbert/COSMOS-Web/photoz_MASTER_v3.1.0/MORPHO/visualmorpho_COSMOSWeb_v7.db',
                         help='Path to visualmorpho_COSMOSWeb_v7.db')
-    parser.add_argument('--master_cat',
-                        default='/n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits',
-                        help='Path to COSMOSWeb_mastercatalog_v1.fits (COSMOS2025 DR1)')
+    parser.add_argument('--photom_cat',
+                        default=f'{_CAT_DIR}/COSMOSWeb_mastercatalog_v1_photom_primary.fits',
+                        help='Photometry FITS file (primary)')
+    parser.add_argument('--lephare_cat',
+                        default=f'{_CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits',
+                        help='LePhare photo-z FITS file')
+    parser.add_argument('--cigale_cat',
+                        default=f'{_CAT_DIR}/COSMOSWeb_mastercatalog_v1_cigale.fits',
+                        help='CIGALE SFH FITS file')
     parser.add_argument('--img_dir',
                         default='/n17data/shuntov/COSMOS-Web/Images_NIRCam/v0.8/',
                         help='Directory containing NIRCam tile mosaics')
@@ -246,16 +283,28 @@ def main() -> None:
 
     # ── load & merge catalogs ────────────────────────────────────────────────
     log.info('Loading visual morphology DB…')
-    df_morpho = load_morpho_db(args.morpho_db)
+    df_morpho   = load_morpho_db(args.morpho_db)
+    morpho_ids  = set(df_morpho['id'])
 
-    log.info('Loading master catalog (photometry + LePhare + CIGALE SFH)…')
-    df_merged = load_master_catalog(args.master_cat)
-    df_merged = df_merged[df_merged['id'].isin(set(df_morpho['id']))].copy()
-    log.info(f'After morpho cross-match: {len(df_merged)} galaxies')
+    log.info('Loading photometry catalog…')
+    df_phot = load_photom(args.photom_cat)
+    df_phot = df_phot[df_phot['id'].isin(morpho_ids)].copy()
+    log.info(f'  {len(df_phot)} galaxies after morpho cross-match')
 
-    # Drop rows with missing SFH data
-    sfh_required = _SFR_COLS + _TIME_COLS + [_INT_COL]
-    has_sfh = df_merged[sfh_required].notna().all(axis=1)
+    log.info('Loading LePhare catalog…')
+    df_lp = load_lephare(args.lephare_cat)
+
+    log.info('Loading CIGALE catalog…')
+    df_cigale, _COL_MAP = load_cigale(args.cigale_cat)
+
+    # Merge on 'id' — inner join keeps only galaxies present in all catalogs
+    df_merged = df_phot.merge(df_lp,      on='id', how='left')
+    df_merged = df_merged.merge(df_cigale, on='id', how='inner')
+    log.info(f'After full cross-match: {len(df_merged)} galaxies')
+
+    # Drop rows where any SFH column is null
+    sfh_cols = _COL_MAP['sfr'] + _COL_MAP['time'] + [_COL_MAP['integrated']]
+    has_sfh  = df_merged[sfh_cols].notna().all(axis=1)
     df_merged = df_merged[has_sfh].copy()
     log.info(f'After SFH completeness filter: {len(df_merged)} galaxies')
 
