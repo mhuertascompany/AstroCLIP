@@ -27,7 +27,7 @@ ROWS_PER_PAGE  = 4   # rows of pairs per PDF page
 PAIRS_PER_PAGE = PAIRS_PER_ROW * ROWS_PER_PAGE   # 12
 
 SFH_EPS    = 1e-10   # must match prepare_dataset.py
-SFH_N_BINS = 50
+SFH_N_BINS = 9
 
 
 def parse_args() -> argparse.Namespace:

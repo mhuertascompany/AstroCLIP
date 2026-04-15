@@ -55,7 +55,7 @@ from SFHandle.sfh import SFH
 
 FILTERS    = ['f150w', 'f277w', 'f444w']
 STAMP_SIZE = 64
-SFH_N_BINS = 50
+SFH_N_BINS = 9    # matches CIGALE's sfh_sfr_bin1..9 native resolution
 SFH_EPS    = 1e-10   # avoids log10(0) for quiescent galaxies
 
 # Fractional lookback-time grid ∈ [0, 1].

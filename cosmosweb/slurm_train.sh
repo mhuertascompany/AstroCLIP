@@ -29,7 +29,7 @@ python -m cosmosweb.train \
     --output       ${OUTPUT_DIR}/checkpoints/cosmosweb_clip_v2.ckpt \
     --log_dir      ${OUTPUT_DIR}/logs_v2 \
     --embed_dim    256 \
-    --sfh_input_dim 50 \
+    --sfh_input_dim 9 \
     --batch_size   256 \
     --max_epochs   50 \
     --lr           1e-4 \
