@@ -17,7 +17,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
-CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v1-epoch=029-val_loss=4.0436.ckpt
+CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v1-epoch=048-val_loss=4.0277.ckpt
 
 cd ${REPO_DIR}
 
