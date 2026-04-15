@@ -20,7 +20,7 @@ import argparse
 from pathlib import Path
 
 import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
 from .dataset import CosmosWebDataModule
@@ -104,6 +104,12 @@ def main() -> None:
         save_top_k=3,
         save_last=True,
     )
+    early_stop_cb = EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        mode='min',
+        verbose=True,
+    )
     lr_monitor_cb = LearningRateMonitor(logging_interval='epoch')
 
     logger = CSVLogger(save_dir=str(args.log_dir), name=args.run_name)
@@ -114,7 +120,7 @@ def main() -> None:
         devices=args.devices,
         max_epochs=args.max_epochs,
         precision=args.precision,
-        callbacks=[checkpoint_cb, lr_monitor_cb],
+        callbacks=[checkpoint_cb, early_stop_cb, lr_monitor_cb],
         logger=logger,
         log_every_n_steps=20,
         gradient_clip_val=1.0,

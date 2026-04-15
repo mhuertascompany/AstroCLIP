@@ -31,7 +31,7 @@ python -m cosmosweb.train \
     --embed_dim    256 \
     --sfh_input_dim 50 \
     --batch_size   256 \
-    --max_epochs   100 \
+    --max_epochs   50 \
     --lr           1e-4 \
     --weight_decay 0.05 \
     --warmup_epochs 5 \
