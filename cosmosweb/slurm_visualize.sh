@@ -18,7 +18,7 @@ OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
 
 # ── run ───────────────────────────────────────────────────────────────────────
 python cosmosweb/visualize_pairs.py \
-    --dataset  ${OUTPUT_DIR}/cosmosweb_dataset.h5 \
-    --output   ${OUTPUT_DIR}/pair_examples.pdf \
+    --dataset  ${OUTPUT_DIR}/cosmosweb_dataset_v2.h5 \
+    --output   ${OUTPUT_DIR}/pair_examples_v2.pdf \
     --n_pages  5 \
     --seed     42
