@@ -3,15 +3,18 @@ PyTorch Dataset and LightningDataModule for the COSMOS-Web image + SFH dataset.
 
 Each sample is a dict:
     {
-        "image": Tensor (3, 64, 64)   – per-channel z-scored (mean/std from HDF5 attrs)
-        "sfh":   Tensor (N_TIME,)     – per-bin z-scored log10-shape vector
+        "image": Tensor (3, 64, 64)   – per-image z-scored (shape-focused)
+        "sfh":   Tensor (N_TIME,)     – log10(normalised shape + eps), raw
     }
 
 Normalisation:
-    Images : (arcsinh_flux - img_mean) / img_std   per channel
-    SFHs   : (log10_shape - sfh_mean) / sfh_std    per time bin
-    Both sets of statistics are computed over the full dataset by
-    prepare_dataset.py and stored as HDF5 attributes.
+    Images : (arcsinh_flux - image.mean()) / image.std()  computed per image
+             This removes absolute brightness so the encoder focuses on
+             morphological shape rather than relative flux levels.
+    SFHs   : used as-is from the HDF5 (log10 of the sum-normalised shape
+             vector).  No further rescaling is applied so the relative
+             heights of the SFH bins — the star-formation history shape —
+             are preserved exactly.
 
 Augmentations applied to images:
     - Random horizontal / vertical flip
@@ -59,13 +62,8 @@ class CosmosWebDataset(Dataset):
         self.augment       = augment
         self.sfh_noise_std = sfh_noise_std
 
-        # Read normalisation stats and dataset size from HDF5 attributes
         with h5py.File(self.h5_path, 'r') as f:
-            n             = f.attrs['n_galaxies']
-            self.img_mean = torch.tensor(f.attrs['img_mean'], dtype=torch.float32)
-            self.img_std  = torch.tensor(f.attrs['img_std'],  dtype=torch.float32)
-            self.sfh_mean = torch.tensor(f.attrs['sfh_mean'], dtype=torch.float32)
-            self.sfh_std  = torch.tensor(f.attrs['sfh_std'],  dtype=torch.float32)
+            n = f.attrs['n_galaxies']
 
         # 90 / 10 split on contiguous blocks (reproducible without shuffling)
         split_idx = int(0.9 * n)
@@ -74,7 +72,6 @@ class CosmosWebDataset(Dataset):
         else:
             self.indices = list(range(split_idx, n))
 
-        # Keep HDF5 file handle open (lazy loading via memmap-style indexing)
         # h5py file is opened per-worker in __getitem__ to be multiprocessing-safe
         self._h5 = None
 
@@ -93,29 +90,26 @@ class CosmosWebDataset(Dataset):
         image = torch.tensor(f['images'][i], dtype=torch.float32)  # (3, H, W)
         sfh   = torch.tensor(f['sfh'][i],    dtype=torch.float32)  # (N_TIME,)
 
-        # ── normalise image ──────────────────────────────────────────────────
-        # img_mean / img_std have shape (3,); broadcast over spatial dims
-        image = (image - self.img_mean[:, None, None]) / self.img_std[:, None, None]
+        # ── normalise image (per-image) ──────────────────────────────────────
+        # Z-score over all pixels and channels of this single image so that
+        # the encoder sees only morphological shape, not absolute brightness.
+        mu    = image.mean()
+        sigma = image.std()
+        image = (image - mu) / (sigma + 1e-8)
 
         # ── augmentations ────────────────────────────────────────────────────
         if self.augment:
-            # Random horizontal flip
             if torch.rand(1).item() > 0.5:
                 image = image.flip(-1)
-            # Random vertical flip
             if torch.rand(1).item() > 0.5:
                 image = image.flip(-2)
-            # Random 90° rotation (0 / 90 / 180 / 270)
             k = torch.randint(0, 4, (1,)).item()
             if k > 0:
                 image = torch.rot90(image, k, dims=(-2, -1))
 
-        # ── SFH augmentation (noise in raw log10 space, before z-score) ─────
+        # ── SFH noise (optional, in log10 space) ────────────────────────────
         if self.sfh_noise_std > 0:
             sfh = sfh + torch.randn_like(sfh) * self.sfh_noise_std
-
-        # ── normalise SFH ────────────────────────────────────────────────────
-        sfh = (sfh - self.sfh_mean) / self.sfh_std
 
         return {'image': image, 'sfh': sfh}
 
