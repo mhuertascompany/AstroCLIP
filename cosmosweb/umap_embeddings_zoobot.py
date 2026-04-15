@@ -233,7 +233,30 @@ def main():
     log.info('Fitting UMAP on SFH embeddings…')
     xy_sfh   = fit_umap(sfh_emb,    n_neighbors=args.n_neighbors, min_dist=args.min_dist)
 
-    # ── step 4: render PDF ────────────────────────────────────────────────────
+    # ── step 4: save companion npz for explore.py (done BEFORE PDF) ──────────
+    npz_path = args.npz_output or args.output.with_suffix('.npz')
+    npz_data = dict(
+        xy_joint   = xy_joint.astype(np.float32),
+        xy_img     = xy_img.astype(np.float32),
+        xy_sfh     = xy_sfh.astype(np.float32),
+        galaxy_ids = galaxy_ids,
+        h5_indices = h5_indices,           # ← HDF5 row for each point
+        redshifts  = redshifts.astype(np.float32),
+    )
+    for col, key in [('zfinal', 'zfinal'), ('radius_sersic', 'radius_sersic'),
+                     ('sersic', 'sersic'), ('axratio_sersic', 'axratio_sersic'),
+                     ('_log_mass', 'log_mass'), ('_log_sfr', 'log_sfr'),
+                     ('_log_ssfr', 'log_ssfr')]:
+        if col in prop_aligned.columns:
+            npz_data[key] = prop_aligned[col].values.astype(np.float32)
+    for col in sorted(c for c in prop_aligned.columns if 'family' in c):
+        npz_data[col] = prop_aligned[col].values.astype(np.float32)
+
+    np.savez_compressed(npz_path, **npz_data)
+    log.info('Companion npz → %s', npz_path)
+    log.info('  Download this + the h5 file to run explore.py locally')
+
+    # ── step 5: render PDF ────────────────────────────────────────────────────
     family_panels = [
         (col.replace('family_', 'P(').replace('_', ' ').capitalize() + ')',
          col, False, 'RdBu_r')
@@ -266,30 +289,7 @@ def main():
         pdf.savefig(fig, dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-    log.info('Saved %s', args.output)
-
-    # ── step 5: save companion npz for explore.py ─────────────────────────────
-    npz_path = args.npz_output or args.output.with_suffix('.npz')
-    npz_data = dict(
-        xy_joint   = xy_joint.astype(np.float32),
-        xy_img     = xy_img.astype(np.float32),
-        xy_sfh     = xy_sfh.astype(np.float32),
-        galaxy_ids = galaxy_ids,
-        h5_indices = h5_indices,           # ← HDF5 row for each point
-        redshifts  = redshifts.astype(np.float32),
-    )
-    for col, key in [('zfinal', 'zfinal'), ('radius_sersic', 'radius_sersic'),
-                     ('sersic', 'sersic'), ('axratio_sersic', 'axratio_sersic'),
-                     ('_log_mass', 'log_mass'), ('_log_sfr', 'log_sfr'),
-                     ('_log_ssfr', 'log_ssfr')]:
-        if col in prop_aligned.columns:
-            npz_data[key] = prop_aligned[col].values.astype(np.float32)
-    for col in sorted(c for c in prop_aligned.columns if 'family' in c):
-        npz_data[col] = prop_aligned[col].values.astype(np.float32)
-
-    np.savez_compressed(npz_path, **npz_data)
-    log.info('Companion npz → %s', npz_path)
-    log.info('  Download this + the h5 file to run explore.py locally')
+    log.info('Saved PDF → %s', args.output)
 
 
 if __name__ == '__main__':
