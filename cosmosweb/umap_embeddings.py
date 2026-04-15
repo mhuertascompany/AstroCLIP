@@ -391,6 +391,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--device',       type=str,   default='cuda')
     p.add_argument('--max_galaxies', type=int,   default=0,
                    help='Cap at N galaxies for quick tests (0 = all)')
+    p.add_argument('--npz_output',   type=Path,  default=None,
+                   help='If set, save UMAP coords + metadata to this .npz '
+                        '(download alongside the h5 to run explore.py locally)')
     return p.parse_args()
 
 
@@ -405,6 +408,9 @@ def main():
         device=args.device if torch.cuda.is_available() else 'cpu',
     )
 
+    # h5_indices[i] = row in the HDF5 file that corresponds to embedding i
+    h5_indices = np.arange(len(galaxy_ids))
+
     if args.max_galaxies > 0:
         n = min(args.max_galaxies, len(galaxy_ids))
         idx = np.random.default_rng(0).choice(len(galaxy_ids), n, replace=False)
@@ -412,6 +418,7 @@ def main():
         sfh_emb    = sfh_emb[idx]
         galaxy_ids = galaxy_ids[idx]
         redshifts  = redshifts[idx]
+        h5_indices = h5_indices[idx]
 
     # Joint embedding: average of L2-normalised modalities
     joint_emb = F.normalize(
@@ -522,6 +529,32 @@ def main():
         plt.close(fig)
 
     log.info(f'Saved {args.output}')
+
+    # ── step 6: save companion npz for the interactive explorer ──────────────
+    npz_path = args.npz_output or args.output.with_suffix('.npz')
+    npz_data = dict(
+        xy_joint   = xy_joint.astype(np.float32),
+        xy_img     = xy_img.astype(np.float32),
+        xy_sfh     = xy_sfh.astype(np.float32),
+        galaxy_ids = galaxy_ids,
+        h5_indices = h5_indices,
+        redshifts  = redshifts.astype(np.float32),
+    )
+    # Include a small set of physical properties so the explorer can color
+    # the UMAP without needing the full catalog files locally
+    for col, key in [('zfinal', 'zfinal'), ('radius_sersic', 'radius_sersic'),
+                     ('sersic', 'sersic'), ('axratio_sersic', 'axratio_sersic'),
+                     ('_log_mass', 'log_mass'), ('_log_sfr', 'log_sfr'),
+                     ('_log_ssfr', 'log_ssfr')]:
+        if col in prop_aligned.columns:
+            npz_data[key] = prop_aligned[col].values.astype(np.float32)
+    # Family morphology columns
+    for col in sorted(c for c in prop_aligned.columns if 'family' in c):
+        npz_data[col] = prop_aligned[col].values.astype(np.float32)
+
+    np.savez_compressed(npz_path, **npz_data)
+    log.info(f'Companion npz saved to {npz_path}')
+    log.info(f'  → download this + the h5 file to run explore.py locally')
 
 
 if __name__ == '__main__':

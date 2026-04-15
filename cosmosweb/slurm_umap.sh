@@ -27,6 +27,7 @@ python -m cosmosweb.umap_embeddings \
     --checkpoint  ${CKPT} \
     --dataset     ${OUTPUT_DIR}/cosmosweb_dataset.h5 \
     --output      ${OUTPUT_DIR}/umap_plots.pdf \
+    --npz_output  ${OUTPUT_DIR}/cosmosweb_umap.npz \
     --batch_size  512 \
     --n_neighbors 15 \
     --min_dist    0.1 \
