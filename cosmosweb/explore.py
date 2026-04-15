@@ -271,21 +271,22 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     # ── callbacks ─────────────────────────────────────────────────────────
     def _update_embed(event):
         xy = d['xy'][embed_w.value]
-        src.data = dict(src.data,
-                        x=xy[:, 0].tolist(),
-                        y=xy[:, 1].tolist())
+        # In-place update preserves the current selection state
+        src.data['x'] = xy[:, 0].tolist()
+        src.data['y'] = xy[:, 1].tolist()
+        src.selected.indices = []          # reset selection on space change
         plot.title.text = f'UMAP ({embed_w.value}) — draw to select'
 
     def _update_color(event):
         vals = d['color_props'].get(color_w.value, np.zeros(len(xy0)))
         safe = np.where(np.isfinite(vals), vals,
                         np.nanmedian(vals[np.isfinite(vals)]))
-        src.data = dict(src.data, c=safe.tolist())
+        # In-place update: does NOT reset src.selected.indices
+        src.data['c'] = safe.tolist()
         mapper.low  = float(np.nanpercentile(safe, 1))
         mapper.high = float(np.nanpercentile(safe, 99))
 
-    def _refresh(event=None):
-        sel = src.selected.indices
+    def _refresh(sel):
         if not sel:
             info_md.object = '_No galaxies selected._'
             img_pane.object = _blank('No selection')
@@ -300,10 +301,13 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         sfh_pane.object = fig_sfh
         plt.close('all')
 
+    def _on_resample(event):
+        _refresh(list(src.selected.indices))
+
     embed_w.param.watch(_update_embed, 'value')
     color_w.param.watch(_update_color, 'value')
-    resample_btn.on_click(_refresh)
-    src.selected.on_change('indices', lambda attr, old, new: _refresh())
+    resample_btn.on_click(_on_resample)
+    src.selected.on_change('indices', lambda attr, old, new: _refresh(new))
 
     # ── layout ────────────────────────────────────────────────────────────
     sidebar = pn.Column(
