@@ -102,6 +102,7 @@ def load_properties(photom_path: str, lephare_path: str,
         pass
 
     df_all = df_all[df_all['id'].isin(id_set)].copy()
+    df_all['id'] = df_all['id'].astype(np.int64)   # guarantee int64 before indexing
     df_all.set_index('id', inplace=True)
     log.info(f'  After filtering to dataset galaxies: {len(df_all)}')
 
@@ -251,13 +252,22 @@ def _scatter(ax, xy, values, label, cmap='viridis',
              point_size=1.5, alpha=0.6):
     """Single UMAP scatter panel."""
     mask = np.isfinite(values)
-    if mask.sum() < 10:
-        ax.set_visible(False)
-        return
 
-    v = values[mask]
+    # Apply log transform before re-masking, so zeros/negatives are excluded
     if log_scale:
-        v = np.log10(np.maximum(v, 1e-30))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            lv = np.where(values > 0, np.log10(values), np.nan)
+        mask = np.isfinite(lv)
+        v = lv[mask]
+    else:
+        v = values[mask]
+
+    if mask.sum() < 10:
+        ax.text(0.5, 0.5, f'{label}\n(no valid data\n{mask.sum()} points)',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=7, color='grey', style='italic')
+        ax.set_xticks([]); ax.set_yticks([])
+        return
 
     vmin = np.percentile(v, vmin_p)
     vmax = np.percentile(v, vmax_p)
@@ -272,8 +282,7 @@ def _scatter(ax, xy, values, label, cmap='viridis',
 
     cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=6)
-    pre = 'log10 ' if log_scale else ''
-    cbar.set_label(pre + label, fontsize=6)
+    cbar.set_label(label, fontsize=6)
 
     ax.set_xticks([]); ax.set_yticks([])
     ax.set_title(label, fontsize=7, pad=3)
@@ -342,11 +351,11 @@ SED_PANELS = [
     ('log M★ [M⊙]',        '_log_mass',  False, 'inferno'),
     ('log SFR [M⊙/yr]',    '_log_sfr',   False, 'magma'),
     ('log sSFR [yr⁻¹]',    '_log_ssfr',  False, 'coolwarm'),
-    ('SFR bin9/bin1',       '_sfh_ratio', True,  'RdBu_r'),
-    ('sfh_sfr_bin1 (frac)', 'sfh_sfr_bin1', True, 'hot'),
-    ('sfh_sfr_bin5 (frac)', 'sfh_sfr_bin5', True, 'hot'),
-    ('sfh_sfr_bin9 (frac)', 'sfh_sfr_bin9', True, 'hot'),
-    ('sfh_integrated [M⊙]', 'sfh_integrated', True, 'viridis'),
+    ('log SFR ratio bin9/bin1', '_sfh_ratio', True,  'RdBu_r'),
+    ('SFR frac bin1 (recent)',  'sfh_sfr_bin1', False, 'hot'),
+    ('SFR frac bin5 (mid)',     'sfh_sfr_bin5', False, 'hot'),
+    ('SFR frac bin9 (old)',     'sfh_sfr_bin9', False, 'hot'),
+    ('log sfh_integrated [M⊙]', 'sfh_integrated', True, 'viridis'),
 ]
 
 # Extra CIGALE columns to try (DR1 or raw CIGALE naming)
@@ -423,7 +432,22 @@ def main():
 
     # Align prop_df rows to the embedding order
     gid_int = galaxy_ids.astype(np.int64)
+    # Force index to int64 to prevent dtype-mismatch NaN rows after reindex
+    prop_df.index = prop_df.index.astype(np.int64)
     prop_aligned = prop_df.reindex(gid_int)
+
+    # Diagnostic: report how many valid (non-NaN) values each key column has
+    key_cols = ['zfinal', 'radius_sersic', 'sersic', 'axratio_sersic',
+                '_log_mass', '_log_sfr', '_log_ssfr',
+                'sfh_integrated', 'sfh_sfr_bin1'] + \
+               [c for c in prop_aligned.columns if 'family' in c]
+    log.info('Column availability in prop_aligned (non-NaN counts):')
+    for c in key_cols:
+        if c in prop_aligned.columns:
+            n_valid = prop_aligned[c].notna().sum()
+            log.info(f'  {c:30s}  {n_valid:6d} / {len(prop_aligned)}')
+        else:
+            log.info(f'  {c:30s}  NOT FOUND')
 
     # ── step 3: build UMAP projections ───────────────────────────────────────
     log.info('Fitting UMAP on joint embeddings…')
