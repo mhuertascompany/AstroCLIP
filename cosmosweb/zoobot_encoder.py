@@ -63,9 +63,11 @@ class ZooBotImageEncoder(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad_(False)
 
-        # Probe backbone output dimension with a dummy forward pass
+        # Probe backbone output dimension with a dummy forward pass.
+        # Move dummy to the same device as the backbone weights.
         with torch.no_grad():
-            dummy = torch.zeros(1, 3, 224, 224)
+            _device = next(self.backbone.parameters()).device
+            dummy = torch.zeros(1, 3, 224, 224, device=_device)
             out   = self.backbone(dummy)
             backbone_dim = out.flatten(1).shape[1]
 
