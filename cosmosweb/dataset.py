@@ -3,14 +3,20 @@ PyTorch Dataset and LightningDataModule for the COSMOS-Web image + SFH dataset.
 
 Each sample is a dict:
     {
-        "image": Tensor (3, 64, 64)   – per-channel normalised, augmented
-        "sfh":   Tensor (N_TIME,)     – log10(SFR + eps) on common grid
+        "image": Tensor (3, 64, 64)   – per-channel z-scored (mean/std from HDF5 attrs)
+        "sfh":   Tensor (N_TIME,)     – per-bin z-scored log10-shape vector
     }
+
+Normalisation:
+    Images : (arcsinh_flux - img_mean) / img_std   per channel
+    SFHs   : (log10_shape - sfh_mean) / sfh_std    per time bin
+    Both sets of statistics are computed over the full dataset by
+    prepare_dataset.py and stored as HDF5 attributes.
 
 Augmentations applied to images:
     - Random horizontal / vertical flip
     - Random 90° rotation (physically meaningful for galaxies)
-    - Optional per-channel Gaussian noise on SFH (disabled by default)
+    - Optional Gaussian noise on SFH in log10 space (disabled by default)
 """
 
 from pathlib import Path
@@ -55,9 +61,11 @@ class CosmosWebDataset(Dataset):
 
         # Read normalisation stats and dataset size from HDF5 attributes
         with h5py.File(self.h5_path, 'r') as f:
-            n            = f.attrs['n_galaxies']
+            n             = f.attrs['n_galaxies']
             self.img_mean = torch.tensor(f.attrs['img_mean'], dtype=torch.float32)
             self.img_std  = torch.tensor(f.attrs['img_std'],  dtype=torch.float32)
+            self.sfh_mean = torch.tensor(f.attrs['sfh_mean'], dtype=torch.float32)
+            self.sfh_std  = torch.tensor(f.attrs['sfh_std'],  dtype=torch.float32)
 
         # 90 / 10 split on contiguous blocks (reproducible without shuffling)
         split_idx = int(0.9 * n)
@@ -102,9 +110,12 @@ class CosmosWebDataset(Dataset):
             if k > 0:
                 image = torch.rot90(image, k, dims=(-2, -1))
 
-        # ── SFH noise ────────────────────────────────────────────────────────
+        # ── SFH augmentation (noise in raw log10 space, before z-score) ─────
         if self.sfh_noise_std > 0:
             sfh = sfh + torch.randn_like(sfh) * self.sfh_noise_std
+
+        # ── normalise SFH ────────────────────────────────────────────────────
+        sfh = (sfh - self.sfh_mean) / self.sfh_std
 
         return {'image': image, 'sfh': sfh}
 

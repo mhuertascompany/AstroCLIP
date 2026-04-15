@@ -462,16 +462,26 @@ def main() -> None:
         f.attrs['n_galaxies'] = written
         log.info(f'Wrote {written} galaxies total')
 
-        # ── compute per-channel normalization stats ────────────────────────
+        # ── compute per-channel image stats and per-bin SFH stats ────────────
         if written > 0:
             log.info('Computing per-channel image statistics…')
             imgs      = f['images'][:]               # (N, 3, sz, sz)
             img_mean  = imgs.mean(axis=(0, 2, 3))    # (3,)
             img_std   = imgs.std (axis=(0, 2, 3))    # (3,)
             img_std[img_std == 0] = 1.0
-            f.attrs['img_mean'] = img_mean
-            f.attrs['img_std']  = img_std
-            log.info(f'  mean={img_mean}  std={img_std}')
+            f.attrs['img_mean'] = img_mean.astype(np.float32)
+            f.attrs['img_std']  = img_std.astype(np.float32)
+            log.info(f'  img mean={img_mean}  std={img_std}')
+
+            log.info('Computing per-bin SFH statistics…')
+            sfhs     = f['sfh'][:]                   # (N, SFH_N_BINS)
+            sfh_mean = sfhs.mean(axis=0)             # (SFH_N_BINS,)
+            sfh_std  = sfhs.std (axis=0)             # (SFH_N_BINS,)
+            sfh_std[sfh_std < 1e-6] = 1.0            # constant bins → no-op after z-score
+            f.attrs['sfh_mean'] = sfh_mean.astype(np.float32)
+            f.attrs['sfh_std']  = sfh_std.astype(np.float32)
+            log.info(f'  sfh mean range [{sfh_mean.min():.3f}, {sfh_mean.max():.3f}]  '
+                     f'std range [{sfh_std.min():.3f}, {sfh_std.max():.3f}]')
 
     log.info(f'Dataset saved to {args.output}')
 
