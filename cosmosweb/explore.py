@@ -26,6 +26,8 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import sys
 from pathlib import Path
 
@@ -154,12 +156,24 @@ def _render_sfh(ax, sfh_log: np.ndarray, time_grid: np.ndarray,
     ax.set_ylabel(r'SFR [M$_\odot$/yr]', fontsize=4)
 
 
-def _blank(msg: str = '') -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(5, 3))
-    ax.text(0.5, 0.5, msg, ha='center', va='center',
-            transform=ax.transAxes, fontsize=10, color='#999999')
-    ax.set_axis_off()
-    return fig
+_BLANK_HTML = (
+    '<div style="height:220px;display:flex;align-items:center;'
+    'justify-content:center;color:#aaaaaa;font-size:13px">'
+    'Draw a selection on the UMAP.'
+    '</div>'
+)
+
+
+def _fig_to_html(fig: plt.Figure) -> str:
+    """Render *fig* to a base64 PNG img tag, then close the figure."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return (
+        f'<img src="data:image/png;base64,{b64}" '
+        'style="width:100%;max-width:600px"/>'
+    )
 
 
 def _make_gallery(h5_path: Path, h5_rows: np.ndarray, d: dict,
@@ -263,51 +277,62 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     resample_btn = pn.widgets.Button(
         name='New random sample', button_type='primary', width=200)
 
-    img_pane = pn.pane.Matplotlib(
-        _blank('Draw a selection on the UMAP'), tight=True, width=550)
-    sfh_pane = pn.pane.Matplotlib(
-        _blank('Draw a selection on the UMAP'), tight=True, width=550)
+    # HTML panes are used instead of Matplotlib panes so that every update
+    # is a fresh object (new bytes) — Panel detects the change reliably.
+    img_pane = pn.pane.HTML(_BLANK_HTML, width=550)
+    sfh_pane = pn.pane.HTML(_BLANK_HTML, width=550)
 
     # ── callbacks ─────────────────────────────────────────────────────────
     def _update_embed(event):
         xy = d['xy'][embed_w.value]
-        # In-place update preserves the current selection state
         src.data['x'] = xy[:, 0].tolist()
         src.data['y'] = xy[:, 1].tolist()
-        src.selected.indices = []          # reset selection on space change
+        src.selected.indices = []
         plot.title.text = f'UMAP ({embed_w.value}) — draw to select'
 
     def _update_color(event):
         vals = d['color_props'].get(color_w.value, np.zeros(len(xy0)))
         safe = np.where(np.isfinite(vals), vals,
                         np.nanmedian(vals[np.isfinite(vals)]))
-        # In-place update: does NOT reset src.selected.indices
         src.data['c'] = safe.tolist()
         mapper.low  = float(np.nanpercentile(safe, 1))
         mapper.high = float(np.nanpercentile(safe, 99))
 
     def _refresh(sel):
+        sel = list(sel)
         if not sel:
             info_md.object = '_No galaxies selected._'
-            img_pane.object = _blank('No selection')
-            sfh_pane.object = _blank('No selection')
+            img_pane.object = _BLANK_HTML
+            sfh_pane.object = _BLANK_HTML
             return
         h5_rows = d['h5_indices'][np.array(sel, dtype=int)]
         n_show  = min(N_DISPLAY, len(h5_rows))
         info_md.object = (f'**{len(sel):,}** selected '
                           f'— showing {n_show} random examples')
         fig_img, fig_sfh = _make_gallery(h5_path, h5_rows, d, rng)
-        img_pane.object = fig_img
-        sfh_pane.object = fig_sfh
-        plt.close('all')
+        img_pane.object = _fig_to_html(fig_img)   # closes fig after encoding
+        sfh_pane.object = _fig_to_html(fig_sfh)
 
     def _on_resample(event):
+        _refresh(src.selected.indices)
+
+    # Poll for selection changes every 350 ms.  This is more reliable than
+    # src.selected.on_change in Panel's server context because slow HDF5 I/O
+    # inside a Bokeh on_change callback can block the Tornado IOLoop and cause
+    # subsequent selection events to be silently dropped.
+    _prev_key: list[tuple] = [()]
+
+    def _poll():
+        key = tuple(sorted(src.selected.indices))
+        if key == _prev_key[0]:
+            return
+        _prev_key[0] = key
         _refresh(list(src.selected.indices))
 
     embed_w.param.watch(_update_embed, 'value')
     color_w.param.watch(_update_color, 'value')
     resample_btn.on_click(_on_resample)
-    src.selected.on_change('indices', lambda attr, old, new: _refresh(new))
+    pn.state.add_periodic_callback(_poll, period=350)
 
     # ── layout ────────────────────────────────────────────────────────────
     sidebar = pn.Column(
