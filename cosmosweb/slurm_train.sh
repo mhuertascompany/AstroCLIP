@@ -25,9 +25,9 @@ cd ${REPO_DIR}
 # ── run ───────────────────────────────────────────────────────────────────────
 # train.py uses relative imports so must be invoked as a module from repo root
 python -m cosmosweb.train \
-    --dataset      ${OUTPUT_DIR}/cosmosweb_dataset.h5 \
-    --output       ${OUTPUT_DIR}/checkpoints/cosmosweb_clip.ckpt \
-    --log_dir      ${OUTPUT_DIR}/logs \
+    --dataset      ${OUTPUT_DIR}/cosmosweb_dataset_v2.h5 \
+    --output       ${OUTPUT_DIR}/checkpoints/cosmosweb_clip_v2.ckpt \
+    --log_dir      ${OUTPUT_DIR}/logs_v2 \
     --embed_dim    256 \
     --sfh_input_dim 50 \
     --batch_size   256 \

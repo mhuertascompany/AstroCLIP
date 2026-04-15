@@ -29,5 +29,5 @@ python cosmosweb/prepare_dataset.py \
     --lephare_cat ${CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits \
     --cigale_cat  ${CAT_DIR}/COSMOSWeb_mastercatalog_v1_cigale.fits \
     --img_dir     /n17data/shuntov/COSMOS-Web/Images_NIRCam/v0.8/ \
-    --output      ${OUTPUT_DIR}/cosmosweb_dataset.h5 \
+    --output      ${OUTPUT_DIR}/cosmosweb_dataset_v2.h5 \
     --stamp_size  64

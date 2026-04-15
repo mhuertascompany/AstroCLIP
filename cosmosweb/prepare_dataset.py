@@ -182,8 +182,15 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     ``SFH_T_FRAC * t_universe(z)`` so that all SFHs live on the same
     normalized [0, 1] lookback-time axis independent of redshift.
 
+    The CIGALE columns sfh_sfr_bin{i} are fractional weights (0–1, summing to
+    ~1), NOT absolute SFR values.  We do NOT multiply by sfh_integrated here:
+    that multiplication would inject log10(M_star) as an additive offset into
+    every SFH, creating a spurious mass → redshift signal in the embedding.
+    Instead we normalise the interpolated shape so that it sums to 1, making
+    the encoder see only the temporal distribution of star formation.
+
     Returns (sfh_log, t_universe_myr) where
-      sfh_log        – float32 array of shape (SFH_N_BINS,), log10(SFR + EPS)
+      sfh_log        – float32 array of shape (SFH_N_BINS,), log10(frac + EPS)
       t_universe_myr – age of universe at z in Myr (stored per galaxy in HDF5)
 
     Returns None if the row does not contain valid SFH data or z is invalid.
@@ -192,26 +199,40 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     if not (np.isfinite(z) and z > 0):
         return None
 
-    int_col    = _COL_MAP['integrated']
-    integrated = float(row.get(int_col, np.nan))
-    if not (np.isfinite(integrated) and integrated > 0):
-        return None
-
+    # Use the fractional SFH weights directly — do NOT multiply by sfh_integrated.
+    # sfh_sfr_bin{i} are dimensionless fractions; sfh_integrated is stellar mass
+    # (M_sun).  The product would give stellar mass per bin, adding log10(M_star)
+    # as an amplitude offset that correlates with redshift.
     lb_time = np.array([row[c] for c in _COL_MAP['time']], dtype=np.float64)
-    sfr     = np.array([row[c] for c in _COL_MAP['sfr']],  dtype=np.float64) * integrated
-    err     = np.array([row[c] for c in _COL_MAP['err']],  dtype=np.float64) * integrated
+    sfr_frac = np.array([row[c] for c in _COL_MAP['sfr']],  dtype=np.float64)
+    err_frac = np.array([row[c] for c in _COL_MAP['err']],  dtype=np.float64)
 
-    if not (np.all(np.isfinite(lb_time)) and np.all(np.isfinite(sfr))):
+    if not (np.all(np.isfinite(lb_time)) and np.all(np.isfinite(sfr_frac))):
         return None
 
-    # Age of universe at this galaxy's redshift → physical time grid
+    # Sort bins by ascending lookback time (interp1d requires monotonic x).
+    # CIGALE bins can be stored oldest-first (descending lb_time); if so,
+    # fill_value=0 would zero out the RECENT end instead of the ancient end.
+    sort_idx = np.argsort(lb_time)
+    lb_time  = lb_time[sort_idx]
+    sfr_frac = sfr_frac[sort_idx]
+    err_frac = err_frac[sort_idx]
+
+    # Age of universe at this galaxy's redshift → physical time grid [0, t_u] Myr
     t_universe_myr = float(COSMO.age(z).to('Myr').value)
     phys_grid      = SFH_T_FRAC * t_universe_myr   # (SFH_N_BINS,) in Myr
 
-    sfh_obj        = SFH(lb_time, sfr, err)
-    sfr_interp, _  = sfh_obj.interpolate_sfh(
+    sfh_obj       = SFH(lb_time, sfr_frac, err_frac)
+    sfr_interp, _ = sfh_obj.interpolate_sfh(
         phys_grid, kind='next', bounds_error=False, fill_value=0.0
     )
+
+    # Normalise to unit sum so the encoder sees only the SHAPE of the SFH,
+    # not its overall amplitude (which would otherwise encode stellar mass).
+    sfr_total = sfr_interp.sum()
+    if sfr_total > SFH_EPS:
+        sfr_interp = sfr_interp / sfr_total
+
     sfh_log = np.log10(sfr_interp + SFH_EPS).astype(np.float32)
     return sfh_log, t_universe_myr
 
