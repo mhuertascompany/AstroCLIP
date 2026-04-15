@@ -49,13 +49,12 @@ def load_random_sample(h5_path: Path, n: int, rng: np.random.Generator):
         n = min(n, n_total)
         idx = np.sort(rng.choice(n_total, size=n, replace=False))
 
-        images        = f['images'][idx]          # (n, 3, 64, 64)  arcsinh flux
-        sfhs          = f['sfh'][idx]             # (n, N_BINS)     log10(norm. shape + eps)
-        sfh_time_norm = f['sfh_time_norm'][idx]   # (n,)            t_universe(z) in Myr
-        redshifts     = f['redshift'][idx]        # (n,)
-        gal_ids       = f['galaxy_id'][idx]       # (n,)
+        images    = f['images'][idx]   # (n, 3, 64, 64)  arcsinh flux
+        sfhs      = f['sfh'][idx]      # (n, N_BINS)     log10(norm. shape + eps)
+        redshifts = f['redshift'][idx] # (n,)
+        gal_ids   = f['galaxy_id'][idx]# (n,)
 
-    return images, sfhs, sfh_time_norm, redshifts, gal_ids
+    return images, sfhs, redshifts, gal_ids
 
 
 def render_image(ax, img: np.ndarray):
@@ -70,28 +69,26 @@ def render_image(ax, img: np.ndarray):
     ax.set_xticks([]); ax.set_yticks([])
 
 
-def render_sfh(ax, sfh_log: np.ndarray, t_universe_myr: float):
+def render_sfh(ax, sfh_log: np.ndarray):
     """
-    Plot SFH as a step function: normalised weight vs lookback time (Gyr).
+    Plot SFH as a step function: normalised weight vs fractional lookback time.
 
     sfh_log stores log10(w + eps) where w is the sum-normalised SFH shape
-    (all bins sum to 1).  The time axis is recovered by multiplying the
-    fractional grid [0, 1] by t_universe_myr.
+    (all bins sum to 1).  The x-axis is the fractional lookback time [0, 1]
+    used during training — 0 is the galaxy's epoch, 1 is the Big Bang.
     """
     w      = 10.0 ** sfh_log - SFH_EPS        # normalised shape weights
     w      = np.maximum(w, SFH_EPS)
-    t_frac   = np.linspace(0, 1, SFH_N_BINS)
-    time_gyr = t_frac * t_universe_myr / 1e3  # fractional → Gyr
+    t_frac = np.linspace(0, 1, SFH_N_BINS)
 
-    ax.step(time_gyr[1:], w[1:], where='post', color='steelblue', lw=1.2)
-    ax.fill_between(time_gyr[1:], w[1:], step='post', alpha=0.25, color='steelblue')
+    ax.step(t_frac[1:], w[1:], where='post', color='steelblue', lw=1.2)
+    ax.fill_between(t_frac[1:], w[1:], step='post', alpha=0.25, color='steelblue')
 
-    ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_xlim(time_gyr[1] * 0.9, time_gyr[-1] * 1.1)
+    ax.set_xlim(0, 1)
     ax.set_ylim(bottom=max(w[w > SFH_EPS].min() * 0.1, 1e-11)
                 if (w > SFH_EPS).any() else 1e-11)
-    ax.set_xlabel('Lookback time [Gyr]', fontsize=6)
+    ax.set_xlabel('Fractional lookback time', fontsize=6)
     ax.set_ylabel('SFH weight (norm.)', fontsize=6)
     ax.tick_params(labelsize=5)
 
@@ -105,7 +102,7 @@ def make_page(fig, pairs: list):
         hspace=0.45, wspace=0.15,
     )
 
-    for i, (img, sfh, t_univ, z, gid) in enumerate(pairs):
+    for i, (img, sfh, z, gid) in enumerate(pairs):
         row = i // PAIRS_PER_ROW
         col = (i %  PAIRS_PER_ROW) * 2
 
@@ -113,7 +110,7 @@ def make_page(fig, pairs: list):
         ax_sfh = fig.add_subplot(gs[row, col + 1])
 
         render_image(ax_img, img)
-        render_sfh(ax_sfh, sfh, t_univ)
+        render_sfh(ax_sfh, sfh)
 
         ax_img.set_title(
             f'id={gid}  z={z:.2f}\n'
@@ -130,7 +127,7 @@ def main():
     n_total = args.n_pages * PAIRS_PER_PAGE
 
     print(f'Loading {n_total} random pairs from {args.dataset}…')
-    images, sfhs, sfh_time_norm, redshifts, gal_ids = \
+    images, sfhs, redshifts, gal_ids = \
         load_random_sample(args.dataset, n_total, rng)
 
     print(f'Rendering {args.n_pages} pages → {args.output}')
@@ -142,7 +139,7 @@ def main():
                 break
 
             pairs = [
-                (images[j], sfhs[j], sfh_time_norm[j], redshifts[j], gal_ids[j])
+                (images[j], sfhs[j], redshifts[j], gal_ids[j])
                 for j in range(start, end)
             ]
 
