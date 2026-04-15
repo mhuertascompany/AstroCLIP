@@ -18,7 +18,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
 # Update CKPT to the best v2 checkpoint after retraining
-CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_clip_v2-epoch=NNN-val_loss=N.NNNN.ckpt
+CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_clip_v2-epoch=026-val_loss=3.5533.ckpt
 
 cd ${REPO_DIR}
 
