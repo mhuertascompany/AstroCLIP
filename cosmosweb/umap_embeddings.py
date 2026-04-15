@@ -76,8 +76,11 @@ def load_properties(photom_path: str, lephare_path: str,
 
     # ── photometry (carries 'id') ────────────────────────────────────────
     log.info('Loading photometry catalog…')
-    want_phot = ['id', 'tile', 'ra', 'dec', 'radius_sersic',
-                 'n_sersic', 'q_sersic', 'flag_star', 'flag_blend']
+    want_phot = ['id', 'tile', 'ra', 'dec',
+                 'sersic',          # Sersic index n
+                 'radius_sersic',   # effective radius
+                 'axratio_sersic',  # minor/major axis ratio
+                 'flag_star', 'flag_blend']
     df_phot = _fits_to_df(photom_path, cols=want_phot)
     log.info(f'  {len(df_phot)} rows; cols={list(df_phot.columns)}')
 
@@ -105,15 +108,16 @@ def load_properties(photom_path: str, lephare_path: str,
     # ── morphology catalog (has its own 'id') ─────────────────────────────
     log.info('Loading morphology catalog…')
     df_morph = _fits_to_df(morpho_path)
-    col_map   = {c: c.lower() for c in df_morph.columns}
-    df_morph  = df_morph.rename(columns=col_map)
+    col_map  = {c: c.lower() for c in df_morph.columns}
+    df_morph = df_morph.rename(columns=col_map)
     try:
         df_morph['id'] = df_morph['id'].astype(np.int64)
     except Exception:
         pass
     df_morph = df_morph[df_morph['id'].isin(id_set)].copy()
     df_morph.set_index('id', inplace=True)
-    log.info(f'  Morpho overlap with dataset: {len(df_morph)}')
+    family_cols = sorted(c for c in df_morph.columns if 'family' in c)
+    log.info(f'  Morpho overlap: {len(df_morph)} rows; family cols: {family_cols}')
 
     df_merged = df_all.join(df_morph, how='left', rsuffix='_morph')
     return df_merged
@@ -276,55 +280,61 @@ def _scatter(ax, xy, values, label, cmap='viridis',
     ax.set_aspect('equal', 'datalim')
 
 
-def _make_page(pdf, xy, prop_df, panels, page_title):
-    """Render one PDF page of UMAP scatter plots."""
-    fig, axes = plt.subplots(
-        ROWS_PER_PAGE, COLS_PER_ROW,
-        figsize=(11, 8.5),
-        squeeze=False,
-    )
-    fig.suptitle(page_title, fontsize=10, y=0.99)
+def _make_pages(pdf, xy, prop_df, panels, section_title):
+    """
+    Render as many PDF pages as needed to display all panels (9 per page).
+    """
+    total = len(panels)
+    n_pages = max(1, (total + PANELS_PER_PAGE - 1) // PANELS_PER_PAGE)
 
-    flat = axes.flatten()
-    # Hide all panels first
-    for ax in flat:
-        ax.set_visible(False)
+    for page_idx in range(n_pages):
+        chunk = panels[page_idx * PANELS_PER_PAGE:
+                       (page_idx + 1) * PANELS_PER_PAGE]
 
-    for i, (label, col, log_sc, cmap) in enumerate(panels[:PANELS_PER_PAGE]):
-        ax = flat[i]
-        ax.set_visible(True)
+        suffix = f' ({page_idx + 1}/{n_pages})' if n_pages > 1 else ''
+        page_title = section_title + suffix
 
-        if col == '_z_from_array':
-            # Special: redshift injected externally via prop_df
-            col = 'zfinal'
+        fig, axes = plt.subplots(
+            ROWS_PER_PAGE, COLS_PER_ROW,
+            figsize=(11, 8.5),
+            squeeze=False,
+        )
+        fig.suptitle(page_title, fontsize=10, y=0.99)
 
-        if col not in prop_df.columns:
-            ax.text(0.5, 0.5, f'{label}\n(not found)', ha='center', va='center',
-                    transform=ax.transAxes, fontsize=8, color='grey')
-            ax.set_xticks([]); ax.set_yticks([])
-            continue
+        flat = axes.flatten()
+        for ax in flat:
+            ax.set_visible(False)
 
-        values = prop_df[col].values.astype(float)
-        _scatter(ax, xy, values, label=label, cmap=cmap, log_scale=log_sc)
+        for i, (label, col, log_sc, cmap) in enumerate(chunk):
+            ax = flat[i]
+            ax.set_visible(True)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-    pdf.savefig(fig, dpi=150, bbox_inches='tight')
-    plt.close(fig)
+            if col not in prop_df.columns:
+                ax.text(0.5, 0.5, f'{label}\n(not found)',
+                        ha='center', va='center', transform=ax.transAxes,
+                        fontsize=8, color='grey')
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
+
+            values = prop_df[col].values.astype(float)
+            _scatter(ax, xy, values, label=label, cmap=cmap, log_scale=log_sc)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
+        pdf.savefig(fig, dpi=150, bbox_inches='tight')
+        plt.close(fig)
 
 
 # ── panel definitions ─────────────────────────────────────────────────────────
 
-MORPH_PANELS = [
+# Fixed structural panels (Sersic quantities from the photometry catalog).
+# Family morphology panels are discovered dynamically at runtime from the
+# columns of ilbert_visual_zoobot_morphology.fits that contain "family".
+MORPH_PANELS_FIXED = [
     # (display_label, df_column, log_scale, cmap)
-    ('Redshift z',          'zfinal',             False, 'plasma'),
-    ('Sersic radius [px]',  'radius_sersic',      False, 'viridis'),
-    ('Sersic n',            'n_sersic',            False, 'viridis'),
-    ('P(Elliptical)',       'regular_ell',         False, 'RdBu_r'),
-    ('P(S0/Lenticular)',    'regular_s0',          False, 'RdBu_r'),
-    ('P(Early Disk)',       'regular_early_disk',  False, 'RdBu_r'),
-    ('P(Late Disk)',        'regular_late_disk',   False, 'RdBu_r'),
-    ('P(Irregular)',        'regular_irr',         False, 'RdBu_r'),
-    ('P(Merger)',           'binary_merger',       False, 'Reds'),
+    ('Redshift z',            'zfinal',          False, 'plasma'),
+    ('Sersic index n',        'sersic',          False, 'viridis'),
+    ('Sersic radius [px]',    'radius_sersic',   False, 'viridis'),
+    ('Axis ratio (b/a)',      'axratio_sersic',  False, 'viridis'),
 ]
 
 SED_PANELS = [
@@ -431,8 +441,16 @@ def main():
                         n_neighbors=args.n_neighbors,
                         min_dist=args.min_dist)
 
-    # ── step 4: build panel list, adding extra CIGALE cols if present ────────
-    morph_panels = MORPH_PANELS[:]
+    # ── step 4: build panel lists ─────────────────────────────────────────
+    # Morphology: fixed Sersic columns + all family_* columns from morpho catalog
+    family_panels = [
+        (col.replace('family_', 'P(').replace('_', ' ').capitalize() + ')',
+         col, False, 'RdBu_r')
+        for col in sorted(c for c in prop_aligned.columns if 'family' in c)
+    ]
+    morph_panels = MORPH_PANELS_FIXED + family_panels
+
+    # SED: base + any extra CIGALE columns that exist in the catalog
     sed_panels   = SED_PANELS[:]
 
     for entry in _EXTRA_CIGALE:
@@ -446,18 +464,16 @@ def main():
 
     with PdfPages(args.output) as pdf:
 
-        # ── page 1: morphological properties (joint UMAP) ───────────────────
-        _make_page(
+        # ── pages 1+: morphological properties (joint UMAP) ─────────────────
+        _make_pages(
             pdf, xy_joint, prop_aligned, morph_panels,
-            f'UMAP (joint embedding, N={n_gal:,})  ·  Morphological properties\n'
-            f'{ckpt_name}',
+            f'UMAP (joint, N={n_gal:,})  ·  Morphological properties  ·  {ckpt_name}',
         )
 
-        # ── page 2: SED / CIGALE properties (joint UMAP) ────────────────────
-        _make_page(
+        # ── pages N+: SED / CIGALE properties (joint UMAP) ──────────────────
+        _make_pages(
             pdf, xy_joint, prop_aligned, sed_panels,
-            f'UMAP (joint embedding, N={n_gal:,})  ·  SED / CIGALE properties\n'
-            f'{ckpt_name}',
+            f'UMAP (joint, N={n_gal:,})  ·  SED / CIGALE properties  ·  {ckpt_name}',
         )
 
         # ── page 3: modality comparison ──────────────────────────────────────
