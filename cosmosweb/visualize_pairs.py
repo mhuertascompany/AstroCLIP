@@ -113,8 +113,7 @@ def make_page(fig, pairs: list):
         render_sfh(ax_sfh, sfh)
 
         ax_img.set_title(
-            f'id={gid}  z={z:.2f}\n'
-            f't$_{{univ}}$={t_univ/1e3:.1f} Gyr',
+            f'id={gid}  z={z:.2f}',
             fontsize=5.5, pad=2,
         )
 
