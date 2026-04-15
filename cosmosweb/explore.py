@@ -106,54 +106,35 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     # Default color: first available
     default_color = next(iter(color_props), None)
 
-    # HDF5 metadata
-    with h5py.File(h5_path, 'r') as f:
-        img_mean     = f.attrs['img_mean'].astype(np.float32)
-        img_std      = f.attrs['img_std'].astype(np.float32)
-        time_grid    = f['sfh_time_grid'][:]
-        time_is_frac = time_grid.max() <= 1.0
-        has_tnorm    = 'sfh_time_norm' in f
-
     return dict(
         xy           = xy,
         color_props  = color_props,
         default_color= default_color,
         h5_indices   = npz['h5_indices'].astype(int),
         galaxy_ids   = npz['galaxy_ids'],
-        img_mean     = img_mean,
-        img_std      = img_std,
-        time_grid    = time_grid,
-        time_is_frac = time_is_frac,
-        has_tnorm    = has_tnorm,
     )
 
 
 # ── rendering helpers ─────────────────────────────────────────────────────────
 
-def _render_stamp(ax, img: np.ndarray, img_mean: np.ndarray, img_std: np.ndarray):
-    ch = img[0] * img_std[0] + img_mean[0]          # un-normalise channel 0 (F150W)
+def _render_stamp(ax, img: np.ndarray):
+    ch = img[0]   # F150W channel, raw arcsinh flux
     vmin, vmax = np.percentile(ch, [0.5, 99.5])
     ax.imshow(ch, origin='lower', cmap='gray',
               vmin=vmin, vmax=vmax, interpolation='nearest')
     ax.set_xticks([]); ax.set_yticks([])
 
 
-def _render_sfh(ax, sfh_log: np.ndarray, time_grid: np.ndarray,
-                time_is_frac: bool, t_norm: float | None):
-    sfr = np.maximum(10.0 ** sfh_log - SFH_EPS, SFH_EPS)
-    if time_is_frac and t_norm is not None:
-        tx = time_grid * float(t_norm) / 1e3   # fractional → Gyr
-    else:
-        tx = time_grid / 1e3                   # Myr → Gyr
-    t, s = tx[1:], sfr[1:]                     # skip t=0 (log-axis)
-    ax.step(t, s, where='post', color='steelblue', lw=0.9)
-    ax.fill_between(t, s, step='post', alpha=0.2, color='steelblue')
-    ax.set_xscale('log')
+def _render_sfh(ax, sfh_log: np.ndarray):
+    w = np.maximum(10.0 ** sfh_log - SFH_EPS, SFH_EPS)
+    t = np.linspace(0, 1, len(sfh_log))
+    ax.step(t[1:], w[1:], where='post', color='steelblue', lw=0.9)
+    ax.fill_between(t[1:], w[1:], step='post', alpha=0.2, color='steelblue')
     ax.set_yscale('log')
-    ax.set_xlim(t[0] * 0.9, t[-1] * 1.1)
+    ax.set_xlim(0, 1)
     ax.tick_params(labelsize=4)
-    ax.set_xlabel('Lookback time [Gyr]', fontsize=4)
-    ax.set_ylabel(r'SFR [M$_\odot$/yr]', fontsize=4)
+    ax.set_xlabel('Fractional lookback time', fontsize=4)
+    ax.set_ylabel('SFH weight (norm.)', fontsize=4)
 
 
 _BLANK_HTML = (
@@ -183,11 +164,9 @@ def _make_gallery(h5_path: Path, h5_rows: np.ndarray, d: dict,
     rows   = h5_rows[sample]
 
     with h5py.File(h5_path, 'r') as f:
-        imgs    = f['images'][list(rows)]           # (n, 3, 64, 64)
-        sfhs    = f['sfh'][list(rows)]              # (n, 50)
-        zs      = f['redshift'][list(rows)]         # (n,)
-        t_norms = (f['sfh_time_norm'][list(rows)]   # (n,) or None
-                   if d['has_tnorm'] else [None] * n)
+        imgs = f['images'][list(rows)]    # (n, 3, 64, 64)
+        sfhs = f['sfh'][list(rows)]       # (n, N_BINS)
+        zs   = f['redshift'][list(rows)]  # (n,)
 
     nrows = max(1, (n + NCOLS - 1) // NCOLS)
     kw    = dict(figsize=(NCOLS * 1.7, nrows * 1.7), squeeze=False)
@@ -201,13 +180,11 @@ def _make_gallery(h5_path: Path, h5_rows: np.ndarray, d: dict,
 
     for i in range(n):
         axs_img.flatten()[i].set_visible(True)
-        _render_stamp(axs_img.flatten()[i], imgs[i],
-                      d['img_mean'], d['img_std'])
+        _render_stamp(axs_img.flatten()[i], imgs[i])
         axs_img.flatten()[i].set_title(f'z={zs[i]:.2f}', fontsize=5, pad=1)
 
         axs_sfh.flatten()[i].set_visible(True)
-        _render_sfh(axs_sfh.flatten()[i], sfhs[i],
-                    d['time_grid'], d['time_is_frac'], t_norms[i])
+        _render_sfh(axs_sfh.flatten()[i], sfhs[i])
         axs_sfh.flatten()[i].set_title(f'z={zs[i]:.2f}', fontsize=5, pad=1)
 
     for fig in (fig_img, fig_sfh):
