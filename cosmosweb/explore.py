@@ -118,7 +118,7 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
 # ── rendering helpers ─────────────────────────────────────────────────────────
 
 def _render_stamp(ax, img: np.ndarray):
-    ch = img[0]   # F150W channel, raw arcsinh flux
+    ch = img[1]   # F277W channel, raw arcsinh flux
     vmin, vmax = np.percentile(ch, [0.5, 99.5])
     ax.imshow(ch, origin='lower', cmap='gray',
               vmin=vmin, vmax=vmax, interpolation='nearest')
@@ -333,7 +333,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         pn.Row(pn.pane.Bokeh(plot), sidebar),
         pn.layout.Divider(),
         pn.Row(
-            pn.Column(pn.pane.Markdown('#### F150W stamps'), img_pane),
+            pn.Column(pn.pane.Markdown('#### F277W stamps'), img_pane),
             pn.Column(pn.pane.Markdown('#### CIGALE SFHs'),  sfh_pane),
         ),
     )
