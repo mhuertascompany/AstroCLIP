@@ -50,8 +50,8 @@ N_DISPLAY  = 16    # max stamps / SFHs shown at once
 NCOLS      = 4     # columns in each gallery grid
 
 # Fractional lookback-time grid matching prepare_dataset.py
-# bin 0 = most recent (t_frac=0.02), bin 49 = oldest (t_frac=1.0)
-_T_FRAC = np.linspace(0, 1, SFH_N_BINS + 1)[1:]   # (50,)
+# bin 0 = observation epoch (t_frac=0.0), bin 49 = Big Bang (t_frac=1.0)
+_T_FRAC = np.linspace(0, 1, SFH_N_BINS)   # (50,)  matches SFH_T_FRAC in prepare_dataset.py
 
 _PALETTES = {
     'plasma':  Plasma256,
