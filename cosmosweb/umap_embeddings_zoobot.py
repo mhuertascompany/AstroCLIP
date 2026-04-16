@@ -44,7 +44,7 @@ from .umap_embeddings import (
     load_properties, _derive_cigale,
     fit_umap, _make_pages, _scatter,
     MORPH_PANELS_FIXED, SED_PANELS, _EXTRA_CIGALE,
-    _CAT_DIR,
+    _CAT_DIR, _save_cigale_extras,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -249,6 +249,7 @@ def main():
                      ('_log_ssfr', 'log_ssfr')]:
         if col in prop_aligned.columns:
             npz_data[key] = prop_aligned[col].values.astype(np.float32)
+    _save_cigale_extras(npz_data, prop_aligned)
     for col in sorted(c for c in prop_aligned.columns if 'family' in c):
         npz_data[col] = prop_aligned[col].values.astype(np.float32)
 

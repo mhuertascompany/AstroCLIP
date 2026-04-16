@@ -44,9 +44,14 @@ from bokeh.plotting import figure as bk_figure
 pn.extension(sizing_mode='stretch_width')
 
 # ── constants ─────────────────────────────────────────────────────────────────
-SFH_EPS   = 1e-10
-N_DISPLAY = 16    # max stamps / SFHs shown at once
-NCOLS     = 4     # columns in each gallery grid
+SFH_EPS    = 1e-10
+SFH_N_BINS = 50
+N_DISPLAY  = 16    # max stamps / SFHs shown at once
+NCOLS      = 4     # columns in each gallery grid
+
+# Fractional lookback-time grid matching prepare_dataset.py
+# bin 0 = most recent (t_frac=0.02), bin 49 = oldest (t_frac=1.0)
+_T_FRAC = np.linspace(0, 1, SFH_N_BINS + 1)[1:]   # (50,)
 
 _PALETTES = {
     'plasma':  Plasma256,
@@ -69,6 +74,53 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
+# ── SFH shape parameters ─────────────────────────────────────────────────────
+
+def _sfh_properties(h5_path: Path, h5_indices: np.ndarray) -> dict[str, np.ndarray]:
+    """
+    Derive scalar SFH shape descriptors from the log10 SFH vectors in the HDF5.
+
+    The SFH array has shape (N, 50) in log10 of normalised fractions.
+    Bin 0 = most recent lookback time (t_frac=0.02).
+    Bin 49 = oldest lookback time   (t_frac=1.0).
+    """
+    with h5py.File(h5_path, 'r') as f:
+        sfh_log = f['sfh'][list(h5_indices)].astype(np.float64)  # (N, 50)
+
+    # Convert to linear fractions; re-normalise to correct for log rounding
+    sfr = np.maximum(10.0 ** sfh_log - SFH_EPS, 0.0)
+    sfr_sum = sfr.sum(axis=1, keepdims=True)
+    sfr_sum = np.where(sfr_sum > 0, sfr_sum, 1.0)
+    sfr = sfr / sfr_sum                                  # (N, 50), sums to 1
+
+    t = _T_FRAC[np.newaxis, :]                           # (1, 50)
+
+    # ── 1. log ratio: old SFR / recent SFR ───────────────────────────────────
+    # Positive → dominated by old stars (quiescent / early-type)
+    # Negative → dominated by recent SF (star-forming / late-type)
+    log_old_recent = sfh_log[:, -1] - sfh_log[:, 0]
+
+    # ── 2. Mass-weighted mean formation epoch (fractional lookback time) ──────
+    # High (→1) = formed mostly at early times = old stellar population
+    # Low  (→0) = formed mostly recently       = young stellar population
+    mean_t = (sfr * t).sum(axis=1)
+
+    # ── 3. Fraction of SFH in most recent 20% of lookback time (bins 0–9) ────
+    n_recent = max(1, SFH_N_BINS // 5)
+    f_recent = sfr[:, :n_recent].sum(axis=1)
+
+    # ── 4. Fractional lookback time of the SFH peak ───────────────────────────
+    peak_bin = np.argmax(sfr, axis=1)
+    peak_t   = _T_FRAC[peak_bin]
+
+    return {
+        'SFH: log(old/recent)':     log_old_recent,
+        'SFH: mean formation epoch': mean_t,
+        'SFH: f(recent 20%)':        f_recent,
+        'SFH: peak lookback t_frac': peak_t,
+    }
+
+
 # ── data loading ──────────────────────────────────────────────────────────────
 
 def _load(h5_path: Path, umap_path: Path) -> dict:
@@ -84,14 +136,20 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     # Physical properties available for coloring
     color_props: dict[str, np.ndarray] = {}
     _prop_map = {
-        'redshifts':     'Redshift z',
-        'zfinal':        'Redshift z (LePhare)',
-        'radius_sersic': 'Sersic radius',
-        'sersic':        'Sersic index n',
-        'axratio_sersic':'Axis ratio b/a',
-        'log_mass':      'log M★',
-        'log_sfr':       'log SFR',
-        'log_ssfr':      'log sSFR',
+        'redshifts':          'Redshift z',
+        'zfinal':             'Redshift z (LePhare)',
+        'radius_sersic':      'Sersic radius',
+        'sersic':             'Sersic index n',
+        'axratio_sersic':     'Axis ratio b/a',
+        'log_mass':           'log M★',
+        'log_sfr':            'log SFR',
+        'log_ssfr':           'log sSFR',
+        # CIGALE SFH properties
+        'age_form':           'Formation age [Myr]',
+        'log_sfr_inst':       'log SFR_inst',
+        'log_sfr_100myr':     'log SFR_100Myr',
+        'sfr_mass_vector_dir':  'SFR–M★ vector dir.',
+        'sfr_mass_vector_norm': 'SFR–M★ vector norm',
     }
     for npz_key, label in _prop_map.items():
         if npz_key in npz:
@@ -103,6 +161,11 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
             label = key.replace('family_', 'P(').upper() + ')'
             color_props[label] = npz[key].astype(float)
 
+    # SFH shape descriptors computed directly from the HDF5
+    h5_indices = npz['h5_indices'].astype(int)
+    sfh_props  = _sfh_properties(h5_path, h5_indices)
+    color_props.update(sfh_props)
+
     # Default color: first available
     default_color = next(iter(color_props), None)
 
@@ -110,7 +173,7 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
         xy           = xy,
         color_props  = color_props,
         default_color= default_color,
-        h5_indices   = npz['h5_indices'].astype(int),
+        h5_indices   = h5_indices,
         galaxy_ids   = npz['galaxy_ids'],
     )
 

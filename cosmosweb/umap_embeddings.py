@@ -369,6 +369,33 @@ _EXTRA_CIGALE = [
 ]
 
 
+# ── extra CIGALE columns for the npz / explorer ───────────────────────────────
+#
+# Each entry: (candidate column names in catalog, npz key, log10-transform?)
+# We try plain names first, then the bayes.* naming convention.
+_CIGALE_EXTRA_COLS = [
+    (['age_form',             'bayes.sfh.age_form'],              'age_form',             False),
+    (['sfr_inst',             'bayes.sfh.sfr_inst'],              'log_sfr_inst',         True),
+    (['sfr_100myr',           'bayes.sfh.sfr_100myr'],            'log_sfr_100myr',       True),
+    (['sfr_mass_vector_dir',  'bayes.sfh.sfr_mass_vector_dir'],   'sfr_mass_vector_dir',  False),
+    (['sfr_mass_vector_norm', 'bayes.sfh.sfr_mass_vector_norm'],  'sfr_mass_vector_norm', False),
+]
+
+
+def _save_cigale_extras(npz_data: dict, prop_aligned: 'pd.DataFrame') -> None:
+    """Add extra CIGALE SFH columns to the npz data dict (in-place)."""
+    for candidates, key, do_log in _CIGALE_EXTRA_COLS:
+        for col in candidates:
+            if col not in prop_aligned.columns:
+                continue
+            vals = prop_aligned[col].values.astype(np.float64)
+            if do_log:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    vals = np.where(vals > 0, np.log10(vals), np.nan)
+            npz_data[key] = vals.astype(np.float32)
+            break   # found; no need to try the next candidate name
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -548,6 +575,8 @@ def main():
                      ('_log_ssfr', 'log_ssfr')]:
         if col in prop_aligned.columns:
             npz_data[key] = prop_aligned[col].values.astype(np.float32)
+    # Extra CIGALE SFH properties (try both plain and bayes.* naming conventions)
+    _save_cigale_extras(npz_data, prop_aligned)
     # Family morphology columns
     for col in sorted(c for c in prop_aligned.columns if 'family' in c):
         npz_data[col] = prop_aligned[col].values.astype(np.float32)
