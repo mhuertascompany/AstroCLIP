@@ -7,7 +7,7 @@
 #SBATCH --nodelist=n03
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --chdir=/n03data/huertas/python/AstroCLIP
 
 # ── environment ───────────────────────────────────────────────────────────────

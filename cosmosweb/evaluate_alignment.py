@@ -59,16 +59,30 @@ def regression_metrics(y_true, y_pred):
                 mae=float(np.abs(yt - yp).mean()))
 
 
-def knn_predict_chunked(query_emb, gallery_emb, gallery_vals, k, chunk=1000):
-    """k-NN prediction in chunks; peak memory ~ chunk*N*4 bytes."""
-    N     = len(query_emb)
-    preds = np.empty(N, dtype=np.float32)
+def knn_topk_chunked(query_emb, gallery_emb, k, chunk=1000):
+    """
+    Compute top-k gallery indices for every query in chunks.
+    Returns int32 array of shape (N, k).  Store once, reuse for all properties.
+    Peak memory: chunk*N*4 bytes (similarity) + N*k*4 bytes (indices).
+    """
+    N      = len(query_emb)
+    topk   = np.empty((N, k), dtype=np.int32)
     for s in range(0, N, chunk):
-        e      = min(s + chunk, N)
-        sim    = query_emb[s:e] @ gallery_emb.T
-        top_k  = np.argpartition(sim, -k, axis=1)[:, -k:]
-        preds[s:e] = np.nanmean(gallery_vals[top_k], axis=1)
-    return preds
+        e = min(s + chunk, N)
+        sim = query_emb[s:e] @ gallery_emb.T
+        topk[s:e] = np.argpartition(sim, -k, axis=1)[:, -k:].astype(np.int32)
+    return topk
+
+
+def knn_predict_from_topk(topk_indices, gallery_vals):
+    """Predict property values from precomputed top-k indices (no similarity pass)."""
+    return np.nanmean(gallery_vals[topk_indices], axis=1)
+
+
+def knn_predict_chunked(query_emb, gallery_emb, gallery_vals, k, chunk=1000):
+    """k-NN prediction in chunks; kept for compatibility."""
+    topk = knn_topk_chunked(query_emb, gallery_emb, k, chunk)
+    return knn_predict_from_topk(topk, gallery_vals)
 
 
 def recall_at_ks_chunked(query_emb, gallery_emb, ks, chunk=1000):
@@ -247,11 +261,15 @@ def main():
              np.mean(r1_i2s), np.mean(r1_s2i), 1 / args.batch_eval)
 
     # 4. k-NN property prediction
-    log.info('k-NN property prediction (k=%d)...', args.k)
-    knn_sfh   = {lbl: knn_predict_chunked(
-        img_emb, sfh_emb, props[lbl], args.k, args.chunk) for lbl in SFH_PROPS}
-    knn_morph = {lbl: knn_predict_chunked(
-        sfh_emb, img_emb, props[lbl], args.k, args.chunk) for lbl in MORPH_PROPS}
+    # Compute top-k indices ONCE per direction, then apply to all properties.
+    # This reduces 38 similarity passes to 2 (one per direction).
+    log.info('k-NN property prediction (k=%d): computing top-k indices img->sfh...', args.k)
+    topk_i2s = knn_topk_chunked(img_emb, sfh_emb, args.k, args.chunk)
+    log.info('  computing top-k indices sfh->img...')
+    topk_s2i = knn_topk_chunked(sfh_emb, img_emb, args.k, args.chunk)
+    log.info('  predicting properties...')
+    knn_sfh   = {lbl: knn_predict_from_topk(topk_i2s, props[lbl]) for lbl in SFH_PROPS}
+    knn_morph = {lbl: knn_predict_from_topk(topk_s2i, props[lbl]) for lbl in MORPH_PROPS}
 
     df_sfh   = pd.DataFrame([{'property': lbl,
                                **regression_metrics(props[lbl], knn_sfh[lbl])}
@@ -390,22 +408,21 @@ def main():
 
         # page 4: scatter plots for key properties
         SCATTER_PAIRS = [
-            (img_emb, sfh_emb, knn_sfh,   'img->sfh', 'log M*'),
-            (img_emb, sfh_emb, knn_sfh,   'img->sfh', 'log sSFR'),
-            (img_emb, sfh_emb, knn_sfh,   'img->sfh', 'SFH: mean formation epoch'),
-            (img_emb, sfh_emb, knn_sfh,   'img->sfh', 'SFH: log(old/recent)'),
-            (sfh_emb, img_emb, knn_morph, 'sfh->img', 'Sersic n'),
-            (sfh_emb, img_emb, knn_morph, 'sfh->img', 'P(Elliptical)'),
-            (sfh_emb, img_emb, knn_morph, 'sfh->img', 'Axis ratio b/a'),
-            (sfh_emb, img_emb, knn_morph, 'sfh->img', 'P(Late disk)'),
+            (knn_sfh,   'img->sfh', 'log M*'),
+            (knn_sfh,   'img->sfh', 'log sSFR'),
+            (knn_sfh,   'img->sfh', 'SFH: mean formation epoch'),
+            (knn_sfh,   'img->sfh', 'SFH: log(old/recent)'),
+            (knn_morph, 'sfh->img', 'Sersic n'),
+            (knn_morph, 'sfh->img', 'P(Elliptical)'),
+            (knn_morph, 'sfh->img', 'Axis ratio b/a'),
+            (knn_morph, 'sfh->img', 'P(Late disk)'),
         ]
-        SCATTER_PAIRS = [t for t in SCATTER_PAIRS if t[4] in props]
+        SCATTER_PAIRS = [t for t in SCATTER_PAIRS if t[2] in props]
         ncols = 4
         nrows = max(1, (len(SCATTER_PAIRS) + ncols - 1) // ncols)
         fig, axes = plt.subplots(nrows, ncols,
                                  figsize=(ncols * 3.2, nrows * 3.0), squeeze=False)
-        for ax, (q_emb, g_emb, knn_dict, direction, prop) in zip(
-                axes.flatten(), SCATTER_PAIRS):
+        for ax, (knn_dict, direction, prop) in zip(axes.flatten(), SCATTER_PAIRS):
             y      = props[prop]
             y_pred = knn_dict[prop]
             mask   = np.isfinite(y) & np.isfinite(y_pred)
