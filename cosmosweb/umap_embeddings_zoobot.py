@@ -239,6 +239,9 @@ def main():
         xy_joint   = xy_joint.astype(np.float32),
         xy_img     = xy_img.astype(np.float32),
         xy_sfh     = xy_sfh.astype(np.float32),
+        # Raw L2-normalised embeddings (needed for downstream evaluation)
+        img_emb    = img_emb.astype(np.float32),
+        sfh_emb    = sfh_emb.astype(np.float32),
         galaxy_ids = galaxy_ids,
         h5_indices = h5_indices,           # ← HDF5 row for each point
         redshifts  = redshifts.astype(np.float32),
