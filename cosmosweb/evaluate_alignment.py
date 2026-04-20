@@ -31,8 +31,8 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.neighbors import NearestNeighbors
 
 # ── paths — edit these ────────────────────────────────────────────────────────
-NPZ_PATH = Path('cosmosweb_umap_zoobot_v1.npz')
-H5_PATH  = Path('cosmosweb_dataset_v2.h5')
+NPZ_PATH = Path('/Users/marchuertascompany/Documents/python_scripts/cosmosweb_SFHs/cosmosweb_umap_zoobot_v1.npz')
+H5_PATH  = Path('/Users/marchuertascompany/Documents/python_scripts/cosmosweb_SFHs/cosmosweb_dataset_v2.h5')
 
 # ── SFH grid (must match prepare_dataset.py) ──────────────────────────────────
 SFH_N_BINS = 50
@@ -109,61 +109,138 @@ MORPH_PROPS = [p for p in MORPH_PROPS if p in props]
 SFH_PROPS   = [p for p in SFH_PROPS   if p in props]
 
 # %% [markdown]
-# ## 2. Cross-modal rank-1 retrieval accuracy
+# ## 2. Alignment diagnostics
 #
-# For each galaxy *i*, find the nearest neighbor of `img_emb[i]` in the SFH
-# embedding space.  If alignment is perfect, the answer is always `sfh_emb[i]`
-# (rank-1 accuracy = 1.0).  Repeat in the opposite direction.
+# Rank-1 accuracy over the *full* dataset is an extremely strict metric:
+# the model was trained to distinguish **batch_size=128 negatives**, not N≈100k.
+# The right questions are:
+#
+# 1. **Matched vs random cosine similarity** — are (img[i], sfh[i]) pairs more
+#    similar than random cross-modal pairs?
+# 2. **Rank percentile** — where does the correct SFH rank in the sorted similarity
+#    list for each image query? (0 = best, 1 = worst)
+# 3. **Within-batch retrieval** — rank-1 evaluated in random batches of 128,
+#    matching training conditions.
+# 4. **Recall@k** at larger k to see if there is any signal.
 
 # %%
-print('Computing cross-modal rank-1 retrieval…')
+# ── 2a. Matched vs random cosine similarity ───────────────────────────────────
+matched_sim  = (img_emb * sfh_emb).sum(axis=1)           # cos-sim of each pair
 
-knn1 = NearestNeighbors(n_neighbors=1, metric='cosine', algorithm='brute', n_jobs=-1)
+rng = np.random.default_rng(42)
+rand_idx     = rng.permutation(N)
+random_sim   = (img_emb * sfh_emb[rand_idx]).sum(axis=1) # shuffled → random pairs
 
-# img → sfh
-knn1.fit(sfh_emb)
-_, nn_img2sfh = knn1.kneighbors(img_emb)
-rank1_img2sfh = (nn_img2sfh[:, 0] == np.arange(N)).mean()
-
-# sfh → img
-knn1.fit(img_emb)
-_, nn_sfh2img = knn1.kneighbors(sfh_emb)
-rank1_sfh2img = (nn_sfh2img[:, 0] == np.arange(N)).mean()
-
-print(f'  Rank-1 accuracy  img→sfh : {rank1_img2sfh:.3f}')
-print(f'  Rank-1 accuracy  sfh→img : {rank1_sfh2img:.3f}')
-print(f'  (random baseline ≈ {1/N:.2e})')
-
-# Recall@k for several k values
-kmax = 50
-knn_k = NearestNeighbors(n_neighbors=kmax, metric='cosine', algorithm='brute', n_jobs=-1)
-ks    = [1, 5, 10, 20, 50]
-recall_img2sfh, recall_sfh2img = [], []
-
-knn_k.fit(sfh_emb)
-_, nn = knn_k.kneighbors(img_emb)
-for k in ks:
-    recall_img2sfh.append((nn[:, :k] == np.arange(N)[:, None]).any(axis=1).mean())
-
-knn_k.fit(img_emb)
-_, nn = knn_k.kneighbors(sfh_emb)
-for k in ks:
-    recall_sfh2img.append((nn[:, :k] == np.arange(N)[:, None]).any(axis=1).mean())
-
-recall_df = pd.DataFrame({
-    'k':           ks,
-    'Recall@k  img→sfh': recall_img2sfh,
-    'Recall@k  sfh→img': recall_sfh2img,
-}).set_index('k')
-print('\nRetrieval recall:')
-print(recall_df.to_string(float_format='{:.3f}'.format))
+print('Cosine similarity  (img, sfh):')
+print(f'  matched pairs  : mean={matched_sim.mean():.4f}  std={matched_sim.std():.4f}')
+print(f'  random  pairs  : mean={random_sim.mean():.4f}  std={random_sim.std():.4f}')
+t_stat, p_val = stats.ttest_ind(matched_sim, random_sim)
+print(f'  t-test  t={t_stat:.1f}  p={p_val:.2e}')
 
 fig, ax = plt.subplots(figsize=(5, 3.5))
-ax.semilogx(ks, recall_img2sfh, 'o-', label='img → sfh')
-ax.semilogx(ks, recall_sfh2img, 's--', label='sfh → img')
-ax.axhline(1/N * np.array(ks).max(), color='grey', lw=0.8, ls=':', label='random@50')
-ax.set_xlabel('k'); ax.set_ylabel('Recall@k'); ax.set_title('Cross-modal retrieval recall')
+bins = np.linspace(-0.2, 1.0, 80)
+ax.hist(matched_sim, bins=bins, alpha=0.6, label='matched pairs',  density=True)
+ax.hist(random_sim,  bins=bins, alpha=0.6, label='random pairs',   density=True)
+ax.axvline(matched_sim.mean(), color='tab:blue',   ls='--', lw=1.2)
+ax.axvline(random_sim.mean(),  color='tab:orange', ls='--', lw=1.2)
+ax.set_xlabel('Cosine similarity'); ax.set_ylabel('Density')
+ax.set_title('Matched vs random cross-modal similarity')
 ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('cosine_sim_dist.pdf', dpi=150); plt.show()
+
+# %%
+# ── 2b. Rank percentile of the correct SFH embedding ─────────────────────────
+# For a random subsample (full N²  matrix is too large):
+N_SAMPLE = min(5_000, N)
+sample   = rng.choice(N, N_SAMPLE, replace=False)
+
+img_s = img_emb[sample]   # (N_SAMPLE, D)
+sfh_s = sfh_emb[sample]   # (N_SAMPLE, D)
+
+sim_matrix   = img_s @ sfh_emb.T          # (N_SAMPLE, N) — query against ALL sfh
+correct_sims = sim_matrix[np.arange(N_SAMPLE), sample]   # diagonal scores
+
+# rank percentile: fraction of gallery items ABOVE the correct match
+rank_pctile = (sim_matrix > correct_sims[:, None]).mean(axis=1)   # 0=best, 1=worst
+median_pctile = np.median(rank_pctile)
+print(f'\nRank percentile of correct pair (img→sfh, subsample={N_SAMPLE}):')
+print(f'  median = {median_pctile:.4f}  (0=always top, 0.5=random)')
+print(f'  mean   = {rank_pctile.mean():.4f}')
+print(f'  % in top 1%  : {(rank_pctile < 0.01).mean()*100:.1f}%')
+print(f'  % in top 5%  : {(rank_pctile < 0.05).mean()*100:.1f}%')
+print(f'  % in top 10% : {(rank_pctile < 0.10).mean()*100:.1f}%')
+
+fig, ax = plt.subplots(figsize=(5, 3.5))
+ax.hist(rank_pctile, bins=50, density=True, alpha=0.8)
+ax.axvline(0.5, color='grey', ls='--', lw=1, label='random baseline')
+ax.axvline(median_pctile, color='tab:red', ls='-', lw=1.5,
+           label=f'median={median_pctile:.3f}')
+ax.set_xlabel('Rank percentile of correct pair\n(lower = better)')
+ax.set_ylabel('Density'); ax.set_title('Retrieval rank distribution')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('rank_percentile.pdf', dpi=150); plt.show()
+
+# %%
+# ── 2c. Within-batch retrieval  (matches training conditions) ─────────────────
+BATCH_EVAL = 128
+N_BATCHES  = 200
+rank1_batch_img2sfh, rank1_batch_sfh2img = [], []
+
+for _ in range(N_BATCHES):
+    idx  = rng.choice(N, BATCH_EVAL, replace=False)
+    iemb = img_emb[idx]   # (128, D)
+    semb = sfh_emb[idx]   # (128, D)
+
+    # img → sfh: row i should be most similar to column i
+    logits_i2s = iemb @ semb.T   # (128, 128)
+    preds_i2s  = logits_i2s.argmax(axis=1)
+    rank1_batch_img2sfh.append((preds_i2s == np.arange(BATCH_EVAL)).mean())
+
+    logits_s2i = semb @ iemb.T
+    preds_s2i  = logits_s2i.argmax(axis=1)
+    rank1_batch_sfh2img.append((preds_s2i == np.arange(BATCH_EVAL)).mean())
+
+r1_i2s = np.mean(rank1_batch_img2sfh)
+r1_s2i = np.mean(rank1_batch_sfh2img)
+print(f'\nWithin-batch rank-1  (batch={BATCH_EVAL}, {N_BATCHES} random batches):')
+print(f'  img→sfh : {r1_i2s:.3f}  (random baseline = {1/BATCH_EVAL:.3f})')
+print(f'  sfh→img : {r1_s2i:.3f}')
+
+# %%
+# ── 2d. Recall@k across a wider range ────────────────────────────────────────
+# Use the subsample similarity matrix already computed above
+ks = [1, 5, 10, 50, 100, 500, 1000]
+ks = [k for k in ks if k <= N]
+recall_img2sfh, recall_sfh2img = [], []
+
+for k in ks:
+    top_k = np.argsort(sim_matrix, axis=1)[:, -k:]
+    recall_img2sfh.append((top_k == sample[:, None]).any(axis=1).mean())
+
+# sfh → img direction
+sim_s2i = sfh_s @ img_emb.T   # (N_SAMPLE, N)
+for k in ks:
+    top_k = np.argsort(sim_s2i, axis=1)[:, -k:]
+    recall_sfh2img.append((top_k == sample[:, None]).any(axis=1).mean())
+
+recall_df = pd.DataFrame({
+    'k': ks,
+    'Recall@k img→sfh': recall_img2sfh,
+    'Recall@k sfh→img': recall_sfh2img,
+    'Random baseline':  [k / N for k in ks],
+}).set_index('k')
+print('\nRetrieval recall (subsampled queries):')
+print(recall_df.to_string(float_format='{:.4f}'.format))
+
+fig, ax = plt.subplots(figsize=(5, 3.5))
+ax.semilogx(ks, recall_img2sfh,           'o-',  label='img → sfh')
+ax.semilogx(ks, recall_sfh2img,           's--', label='sfh → img')
+ax.semilogx(ks, [k / N for k in ks],     'k:',  lw=0.8, label='random')
+ax.set_xlabel('k'); ax.set_ylabel('Recall@k')
+ax.set_title('Cross-modal retrieval recall')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3); ax.set_ylim(0, 1)
 plt.tight_layout()
 plt.savefig('recall_at_k.pdf', dpi=150); plt.show()
 
