@@ -1,17 +1,24 @@
 """
 Alignment evaluation for COSMOS-Web ZooBOT CLIP.
 
-Predicts physical / morphological properties cross-modally (image <-> SFH)
-using k-NN retrieval and linear probes, then writes all diagnostics and
-plots to a single multi-page PDF.
+For each physical / morphological property we compute:
+  - k-NN cross-modal prediction   (img->sfh or sfh->img)
+  - k-NN in-modality baseline     (sfh->sfh or img->img, excluding self)
+  - Linear probe cross-modal      (Ridge, 5-fold CV)
+  - Linear probe in-modality
+  - MLP probe cross-modal         (2-layer, 5-fold CV)
+  - MLP probe in-modality
+
+All results saved to a multi-page PDF.
 
 Usage (from repo root):
     python -m cosmosweb.evaluate_alignment \
         --npz    /n03data/huertas/COSMOS-Web/cosmosweb_clip/cosmosweb_umap_zoobot_v1.npz \
         --h5     /n03data/huertas/COSMOS-Web/cosmosweb_clip/cosmosweb_dataset_v2.h5 \
         --output /n03data/huertas/COSMOS-Web/cosmosweb_clip/alignment_eval_zoobot_v1.pdf \
-        --n_eval 20000 \
-        --k      10
+        --n_eval 0 \
+        --n_probe 30000 \
+        --k 10
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
 from scipy import stats
 from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.metrics import r2_score, roc_auc_score
@@ -51,38 +59,32 @@ T_FRAC     = np.linspace(0, 1, SFH_N_BINS)
 def regression_metrics(y_true, y_pred):
     mask = np.isfinite(y_true) & np.isfinite(y_pred)
     if mask.sum() < 20:
-        return dict(pearson_r=np.nan, spearman_r=np.nan, r2=np.nan, mae=np.nan)
+        return dict(pearson_r=np.nan, r2=np.nan)
     yt, yp = y_true[mask], y_pred[mask]
     return dict(pearson_r=float(stats.pearsonr(yt, yp)[0]),
-                spearman_r=float(stats.spearmanr(yt, yp)[0]),
-                r2=float(r2_score(yt, yp)),
-                mae=float(np.abs(yt - yp).mean()))
+                r2=float(r2_score(yt, yp)))
 
 
-def knn_topk_chunked(query_emb, gallery_emb, k, chunk=1000):
+def knn_topk_chunked(query_emb, gallery_emb, k, chunk=1000, exclude_self=False):
     """
-    Compute top-k gallery indices for every query in chunks.
-    Returns int32 array of shape (N, k).  Store once, reuse for all properties.
-    Peak memory: chunk*N*4 bytes (similarity) + N*k*4 bytes (indices).
+    Top-k gallery indices for every query, computed in chunks.
+    If exclude_self=True, assumes query_emb is gallery_emb (same-modality)
+    and masks the diagonal so a galaxy is not its own neighbour.
+    Returns int32 array (N, k).
     """
-    N      = len(query_emb)
-    topk   = np.empty((N, k), dtype=np.int32)
+    N    = len(query_emb)
+    topk = np.empty((N, k), dtype=np.int32)
     for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        sim = query_emb[s:e] @ gallery_emb.T
+        e   = min(s + chunk, N)
+        sim = query_emb[s:e] @ gallery_emb.T          # (chunk, N)
+        if exclude_self:
+            sim[np.arange(e - s), np.arange(s, e)] = -np.inf
         topk[s:e] = np.argpartition(sim, -k, axis=1)[:, -k:].astype(np.int32)
     return topk
 
 
 def knn_predict_from_topk(topk_indices, gallery_vals):
-    """Predict property values from precomputed top-k indices (no similarity pass)."""
     return np.nanmean(gallery_vals[topk_indices], axis=1)
-
-
-def knn_predict_chunked(query_emb, gallery_emb, gallery_vals, k, chunk=1000):
-    """k-NN prediction in chunks; kept for compatibility."""
-    topk = knn_topk_chunked(query_emb, gallery_emb, k, chunk)
-    return knn_predict_from_topk(topk, gallery_vals)
 
 
 def recall_at_ks_chunked(query_emb, gallery_emb, ks, chunk=1000):
@@ -131,21 +133,35 @@ def linear_probe(X, y, cv=5, alpha=1.0):
                                  cv=cv, scoring='r2', n_jobs=-1).mean())
 
 
+def mlp_probe(X, y, cv=5):
+    """2-layer MLP probe with early stopping; returns cross-val R²."""
+    mask = np.isfinite(y)
+    if mask.sum() < 50:
+        return np.nan
+    Xs  = StandardScaler().fit_transform(X[mask])
+    mlp = MLPRegressor(hidden_layer_sizes=(256, 128), activation='relu',
+                       max_iter=300, early_stopping=True, n_iter_no_change=15,
+                       random_state=42)
+    return float(cross_val_score(mlp, Xs, y[mask],
+                                 cv=cv, scoring='r2', n_jobs=-1).mean())
+
+
 # ── argument parsing ──────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--npz',       type=Path, required=True)
-    p.add_argument('--h5',        type=Path, required=True)
-    p.add_argument('--output',    type=Path,
+    p.add_argument('--npz',        type=Path, required=True)
+    p.add_argument('--h5',         type=Path, required=True)
+    p.add_argument('--output',     type=Path,
                    default=Path('alignment_eval_zoobot_v1.pdf'))
-    p.add_argument('--n_eval',    type=int, default=0,
-                   help='Subsample size (0 = all)')
-    p.add_argument('--k',         type=int, default=10)
-    p.add_argument('--batch_eval',  type=int, default=128)
-    p.add_argument('--n_batches',   type=int, default=200)
-    p.add_argument('--chunk',     type=int, default=1000,
-                   help='Row chunk for similarity passes (memory control)')
+    p.add_argument('--n_eval',     type=int, default=0,
+                   help='Subsample for retrieval metrics (0 = all)')
+    p.add_argument('--n_probe',    type=int, default=30000,
+                   help='Subsample for linear/MLP probes (0 = same as n_eval)')
+    p.add_argument('--k',          type=int, default=10)
+    p.add_argument('--batch_eval', type=int, default=128)
+    p.add_argument('--n_batches',  type=int, default=200)
+    p.add_argument('--chunk',      type=int, default=1000)
     return p.parse_args()
 
 
@@ -164,13 +180,14 @@ def main():
     N_FULL, D    = img_emb_full.shape
     log.info('  Full dataset: %d galaxies  dim=%d', N_FULL, D)
 
+    # subsample for retrieval metrics
     if args.n_eval > 0 and args.n_eval < N_FULL:
         eval_idx = rng.choice(N_FULL, args.n_eval, replace=False)
         eval_idx.sort()
     else:
         eval_idx = np.arange(N_FULL)
     N = len(eval_idx)
-    log.info('  Evaluating on %d galaxies', N)
+    log.info('  Retrieval eval on %d galaxies', N)
 
     img_emb = img_emb_full[eval_idx]
     sfh_emb = sfh_emb_full[eval_idx]
@@ -225,10 +242,9 @@ def main():
                    if p in props]
     log.info('Properties: %s', list(props.keys()))
 
-    # 3. alignment diagnostics
+    # 3. alignment diagnostics (all N)
     log.info('Matched vs random cosine similarity...')
-    matched_sim, random_sim = matched_vs_random_sim(
-        img_emb, sfh_emb, rng, args.chunk)
+    matched_sim, random_sim = matched_vs_random_sim(img_emb, sfh_emb, rng, args.chunk)
     t_stat, p_val = stats.ttest_ind(matched_sim, random_sim)
     log.info('  matched mean=%.4f std=%.4f  random mean=%.4f std=%.4f  t=%.1f p=%.2e',
              matched_sim.mean(), matched_sim.std(),
@@ -260,61 +276,114 @@ def main():
     log.info('  img->sfh=%.3f  sfh->img=%.3f  random=%.3f',
              np.mean(r1_i2s), np.mean(r1_s2i), 1 / args.batch_eval)
 
-    # 4. k-NN property prediction
-    # Compute top-k indices ONCE per direction, then apply to all properties.
-    # This reduces 38 similarity passes to 2 (one per direction).
-    log.info('k-NN property prediction (k=%d): computing top-k indices img->sfh...', args.k)
-    topk_i2s = knn_topk_chunked(img_emb, sfh_emb, args.k, args.chunk)
-    log.info('  computing top-k indices sfh->img...')
-    topk_s2i = knn_topk_chunked(sfh_emb, img_emb, args.k, args.chunk)
-    log.info('  predicting properties...')
-    knn_sfh   = {lbl: knn_predict_from_topk(topk_i2s, props[lbl]) for lbl in SFH_PROPS}
-    knn_morph = {lbl: knn_predict_from_topk(topk_s2i, props[lbl]) for lbl in MORPH_PROPS}
+    # 4. k-NN property prediction — cross-modal and in-modality
+    # One similarity pass per direction (cross-modal) + one per modality (in-modality).
+    log.info('Computing top-k indices (4 passes)...')
+    topk_i2s  = knn_topk_chunked(img_emb, sfh_emb, args.k, args.chunk)               # img -> sfh space
+    topk_s2i  = knn_topk_chunked(sfh_emb, img_emb, args.k, args.chunk)               # sfh -> img space
+    topk_img  = knn_topk_chunked(img_emb, img_emb, args.k, args.chunk, exclude_self=True)  # img -> img
+    topk_sfh  = knn_topk_chunked(sfh_emb, sfh_emb, args.k, args.chunk, exclude_self=True)  # sfh -> sfh
 
-    df_sfh   = pd.DataFrame([{'property': lbl,
-                               **regression_metrics(props[lbl], knn_sfh[lbl])}
-                              for lbl in SFH_PROPS]).set_index('property')
-    df_morph = pd.DataFrame([{'property': lbl,
-                               **regression_metrics(props[lbl], knn_morph[lbl])}
-                              for lbl in MORPH_PROPS]).set_index('property')
-    fmt = '{:.3f}'.format
-    log.info('\n-- SFH/SED from image --\n%s',
-             df_sfh[['pearson_r','spearman_r','r2','mae']].to_string(float_format=fmt))
-    log.info('\n-- Morphology from SFH --\n%s',
-             df_morph[['pearson_r','spearman_r','r2','mae']].to_string(float_format=fmt))
+    log.info('Predicting properties...')
+    knn_cross_sfh   = {lbl: knn_predict_from_topk(topk_i2s, props[lbl]) for lbl in SFH_PROPS}
+    knn_cross_morph = {lbl: knn_predict_from_topk(topk_s2i, props[lbl]) for lbl in MORPH_PROPS}
+    knn_self_sfh    = {lbl: knn_predict_from_topk(topk_sfh, props[lbl]) for lbl in SFH_PROPS}
+    knn_self_morph  = {lbl: knn_predict_from_topk(topk_img, props[lbl]) for lbl in MORPH_PROPS}
 
-    # 5. linear probes
-    log.info('Linear probes...')
-    lp_sfh   = {p: linear_probe(img_emb, props[p]) for p in SFH_PROPS}
-    lp_morph = {p: linear_probe(sfh_emb, props[p]) for p in MORPH_PROPS}
-    for lbl, r2 in {**lp_sfh, **lp_morph}.items():
-        log.info('  %s%-35s  R2=%.3f',
-                 'img->' if lbl in lp_sfh else 'sfh->', lbl, r2)
+    def build_knn_df(cross_dict, self_dict, prop_list):
+        rows = []
+        for lbl in prop_list:
+            cm = regression_metrics(props[lbl], cross_dict[lbl])
+            sm = regression_metrics(props[lbl], self_dict[lbl])
+            rows.append({'property': lbl,
+                         'r_cross': cm['pearson_r'], 'r2_cross': cm['r2'],
+                         'r_self':  sm['pearson_r'], 'r2_self':  sm['r2']})
+        return pd.DataFrame(rows).set_index('property')
 
-    # 6. morphology AUC-ROC
+    df_knn_sfh   = build_knn_df(knn_cross_sfh,   knn_self_sfh,   SFH_PROPS)
+    df_knn_morph = build_knn_df(knn_cross_morph, knn_self_morph, MORPH_PROPS)
+
+    log.info('\n-- k-NN SFH props (img->sfh cross  |  sfh->sfh self) --\n%s',
+             df_knn_sfh.to_string(float_format='{:.3f}'.format))
+    log.info('\n-- k-NN Morph props (sfh->img cross  |  img->img self) --\n%s',
+             df_knn_morph.to_string(float_format='{:.3f}'.format))
+
+    # 5. Linear + MLP probes  (on n_probe subsample to keep runtime sane)
+    n_probe = args.n_probe if (args.n_probe > 0 and args.n_probe < N) else N
+    if n_probe < N:
+        probe_idx = rng.choice(N, n_probe, replace=False)
+        probe_idx.sort()
+        img_p = img_emb[probe_idx]
+        sfh_p = sfh_emb[probe_idx]
+        props_p = {k: v[probe_idx] for k, v in props.items()}
+    else:
+        img_p, sfh_p, props_p = img_emb, sfh_emb, props
+    log.info('Probes on %d galaxies (linear + MLP)...', n_probe)
+
+    def run_probes(X_cross, X_self, prop_list, label):
+        rows = []
+        for lbl in prop_list:
+            y = props_p[lbl]
+            log.info('  %s: %s', label, lbl)
+            rows.append({'property': lbl,
+                         'lin_cross': linear_probe(X_cross, y),
+                         'lin_self':  linear_probe(X_self,  y),
+                         'mlp_cross': mlp_probe(X_cross,    y),
+                         'mlp_self':  mlp_probe(X_self,     y)})
+        return pd.DataFrame(rows).set_index('property')
+
+    df_probe_sfh   = run_probes(img_p, sfh_p, SFH_PROPS,   'SFH props')
+    df_probe_morph = run_probes(sfh_p, img_p, MORPH_PROPS, 'Morph props')
+
+    log.info('\n-- Probes SFH props --\n%s',
+             df_probe_sfh.to_string(float_format='{:.3f}'.format))
+    log.info('\n-- Probes Morph props --\n%s',
+             df_probe_morph.to_string(float_format='{:.3f}'.format))
+
+    # 6. morphology AUC-ROC (cross-modal + in-modality, linear + MLP)
     log.info('Morphology AUC-ROC...')
     class_rows = []
     for prop, thresh in [('P(Elliptical)', 0.5), ('P(S0)', 0.5),
                          ('P(Early disk)', 0.5), ('P(Late disk)', 0.5)]:
-        if prop not in props:
+        if prop not in props_p:
             continue
-        y_bin = (props[prop] > thresh).astype(int)
-        mask  = np.isfinite(props[prop])
+        y_full = props_p[prop]
+        y_bin  = (y_full > thresh).astype(int)
+        mask   = np.isfinite(y_full)
         if y_bin[mask].mean() < 0.02 or y_bin[mask].mean() > 0.98:
             continue
-        try:    auc_knn = roc_auc_score(y_bin[mask], knn_morph[prop][mask])
-        except: auc_knn = np.nan
-        Xs = StandardScaler().fit_transform(sfh_emb[mask])
-        try:
-            y_prob = cross_val_predict(
-                LogisticRegression(max_iter=500), Xs, y_bin[mask],
-                cv=5, method='predict_proba', n_jobs=-1)[:, 1]
-            auc_lr = roc_auc_score(y_bin[mask], y_prob)
-        except:
-            auc_lr = np.nan
-        class_rows.append(dict(morphology=prop,
-                               prevalence=float(y_bin[mask].mean()),
-                               AUC_kNN=auc_knn, AUC_linear=auc_lr))
+
+        row = dict(morphology=prop, prevalence=float(y_bin[mask].mean()))
+
+        # k-NN (uses full-N topk_s2i, need to remap to probe subset)
+        for tag, knn_dict in [('kNN_cross', knn_cross_morph),
+                               ('kNN_self',  knn_self_morph)]:
+            try:
+                scores = knn_dict[prop]
+                if n_probe < N:
+                    scores = scores[probe_idx]
+                row[tag] = roc_auc_score(y_bin[mask], scores[mask])
+            except:
+                row[tag] = np.nan
+
+        # linear + MLP
+        for tag, X in [('lin_cross', sfh_p), ('lin_self', img_p),
+                        ('mlp_cross', sfh_p), ('mlp_self', img_p)]:
+            model = (LogisticRegression(max_iter=500) if tag.startswith('lin')
+                     else MLPRegressor(hidden_layer_sizes=(256, 128),
+                                       max_iter=300, early_stopping=True,
+                                       random_state=42))
+            Xs = StandardScaler().fit_transform(X[mask])
+            try:
+                y_prob = cross_val_predict(model, Xs, y_bin[mask],
+                                           cv=5, method='predict_proba',
+                                           n_jobs=-1)[:, 1]
+                row[tag] = roc_auc_score(y_bin[mask], y_prob)
+            except:
+                row[tag] = np.nan
+
+        class_rows.append(row)
+
     df_class = pd.DataFrame(class_rows).set_index('morphology')
     log.info('\n%s', df_class.to_string(float_format='{:.3f}'.format))
 
@@ -375,47 +444,59 @@ def main():
         plt.tight_layout()
         pdf.savefig(fig, dpi=150, bbox_inches='tight'); plt.close(fig)
 
-        # page 3: k-NN Pearson r + linear probe R2
-        n_props   = len(df_sfh) + len(df_morph)
-        fig_h     = max(5, 0.38 * n_props + 1.5)
+        # page 3: k-NN cross-modal vs in-modality Pearson r
+        def grouped_bar(ax, df, col_cross, col_self, xlabel, title):
+            labels = list(df.index)
+            x      = np.arange(len(labels))
+            w      = 0.38
+            b1 = ax.barh(x + w/2, df[col_cross], w, label='cross-modal',
+                         color='tab:blue', alpha=0.8, edgecolor='white')
+            b2 = ax.barh(x - w/2, df[col_self],  w, label='in-modality',
+                         color='tab:green', alpha=0.8, edgecolor='white')
+            ax.set_yticks(x); ax.set_yticklabels(labels, fontsize=7)
+            ax.axvline(0, color='k', lw=0.8)
+            ax.set_xlabel(xlabel); ax.set_title(title, fontsize=9)
+            ax.legend(fontsize=7); ax.set_xlim(-0.1, 1.0); ax.grid(axis='x', alpha=0.3)
+
+        n_sfh   = len(df_knn_sfh)
+        n_morph = len(df_knn_morph)
+        fig_h   = max(5, 0.4 * (n_sfh + n_morph) + 1.5)
         fig, axes = plt.subplots(1, 2, figsize=(13, fig_h))
-        labels_all = list(df_sfh.index) + list(df_morph.index)
-        r_all      = list(df_sfh['pearson_r']) + list(df_morph['pearson_r'])
-        colors     = ['tab:blue'] * len(df_sfh) + ['tab:orange'] * len(df_morph)
-        yp = np.arange(len(labels_all))
-        ax = axes[0]
-        ax.barh(yp, r_all, color=colors, alpha=0.8, edgecolor='white')
-        ax.set_yticks(yp); ax.set_yticklabels(labels_all, fontsize=7)
-        ax.axvline(0, color='k', lw=0.8)
-        ax.set_xlabel('Pearson r  (k-NN cross-modal)')
-        ax.set_title(f'k-NN prediction  k={args.k}', fontsize=9)
-        ax.legend(handles=[Patch(color='tab:blue',   label='img -> SFH props'),
-                           Patch(color='tab:orange', label='sfh -> Morph props')],
-                  fontsize=7)
-        ax.set_xlim(-0.1, 1.0); ax.grid(axis='x', alpha=0.3)
-        lp_all  = {**lp_sfh, **lp_morph}
-        lp_cols = ['tab:blue'] * len(lp_sfh) + ['tab:orange'] * len(lp_morph)
-        yp = np.arange(len(lp_all))
-        ax = axes[1]
-        ax.barh(yp, list(lp_all.values()), color=lp_cols, alpha=0.8, edgecolor='white')
-        ax.set_yticks(yp); ax.set_yticklabels(list(lp_all.keys()), fontsize=7)
-        ax.axvline(0, color='k', lw=0.8)
-        ax.set_xlabel('R2  (5-fold CV Ridge)'); ax.set_title('Linear probe', fontsize=9)
-        ax.set_xlim(-0.1, 1.0); ax.grid(axis='x', alpha=0.3)
-        fig.suptitle(f'Property prediction  N={N:,}', fontsize=11)
+        grouped_bar(axes[0], df_knn_sfh,   'r_cross', 'r_self',
+                    'Pearson r', f'k-NN SFH props (k={args.k})\nimg->sfh vs sfh->sfh')
+        grouped_bar(axes[1], df_knn_morph, 'r_cross', 'r_self',
+                    'Pearson r', f'k-NN Morph props (k={args.k})\nsfh->img vs img->img')
+        fig.suptitle(f'k-NN: cross-modal vs in-modality  N={N:,}', fontsize=11)
         plt.tight_layout()
         pdf.savefig(fig, dpi=150, bbox_inches='tight'); plt.close(fig)
 
-        # page 4: scatter plots for key properties
+        # page 4: probe R2 (linear + MLP, cross vs self) — 4-panel grouped bar
+        fig, axes = plt.subplots(2, 2, figsize=(13, fig_h * 1.1))
+        grouped_bar(axes[0, 0], df_probe_sfh,   'lin_cross', 'lin_self',
+                    'R²', 'Linear probe — SFH props\n(img->sfh vs sfh->sfh)')
+        grouped_bar(axes[0, 1], df_probe_morph, 'lin_cross', 'lin_self',
+                    'R²', 'Linear probe — Morph props\n(sfh->img vs img->img)')
+        grouped_bar(axes[1, 0], df_probe_sfh,   'mlp_cross', 'mlp_self',
+                    'R²', 'MLP probe — SFH props\n(img->sfh vs sfh->sfh)')
+        grouped_bar(axes[1, 1], df_probe_morph, 'mlp_cross', 'mlp_self',
+                    'R²', 'MLP probe — Morph props\n(sfh->img vs img->img)')
+        for ax in axes.flatten():
+            ax.set_xlabel('R²  (5-fold CV)')
+        fig.suptitle(f'Linear & MLP probes: cross-modal vs in-modality  '
+                     f'N_probe={n_probe:,}', fontsize=11)
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=150, bbox_inches='tight'); plt.close(fig)
+
+        # page 5: scatter plots — cross-modal k-NN predictions
         SCATTER_PAIRS = [
-            (knn_sfh,   'img->sfh', 'log M*'),
-            (knn_sfh,   'img->sfh', 'log sSFR'),
-            (knn_sfh,   'img->sfh', 'SFH: mean formation epoch'),
-            (knn_sfh,   'img->sfh', 'SFH: log(old/recent)'),
-            (knn_morph, 'sfh->img', 'Sersic n'),
-            (knn_morph, 'sfh->img', 'P(Elliptical)'),
-            (knn_morph, 'sfh->img', 'Axis ratio b/a'),
-            (knn_morph, 'sfh->img', 'P(Late disk)'),
+            (knn_cross_sfh,   'img->sfh [cross]', 'log M*'),
+            (knn_cross_sfh,   'img->sfh [cross]', 'log sSFR'),
+            (knn_cross_sfh,   'img->sfh [cross]', 'SFH: mean formation epoch'),
+            (knn_cross_sfh,   'img->sfh [cross]', 'SFH: log(old/recent)'),
+            (knn_cross_morph, 'sfh->img [cross]', 'Sersic n'),
+            (knn_cross_morph, 'sfh->img [cross]', 'P(Elliptical)'),
+            (knn_cross_morph, 'sfh->img [cross]', 'Axis ratio b/a'),
+            (knn_cross_morph, 'sfh->img [cross]', 'P(Late disk)'),
         ]
         SCATTER_PAIRS = [t for t in SCATTER_PAIRS if t[2] in props]
         ncols = 4
@@ -434,58 +515,71 @@ def main():
             ax.tick_params(labelsize=6); ax.grid(True, alpha=0.2)
         for ax in axes.flatten()[len(SCATTER_PAIRS):]:
             ax.set_visible(False)
-        fig.suptitle(f'k-NN scatter plots  N={N:,}', fontsize=10)
+        fig.suptitle(f'k-NN cross-modal scatter plots  N={N:,}', fontsize=10)
         plt.tight_layout()
         pdf.savefig(fig, dpi=150, bbox_inches='tight'); plt.close(fig)
 
-        # page 5: AUC-ROC table
+        # page 6: AUC-ROC table
         if not df_class.empty:
-            fig, ax = plt.subplots(figsize=(7, max(2, 0.6 * len(df_class) + 1.5)))
+            fig, ax = plt.subplots(figsize=(10, max(2, 0.7 * len(df_class) + 2)))
             ax.axis('off')
             tbl = ax.table(
                 cellText=df_class.reset_index().round(3).values.tolist(),
                 colLabels=['Morphology class'] + list(df_class.columns),
                 loc='center', cellLoc='center')
-            tbl.auto_set_font_size(False); tbl.set_fontsize(9)
+            tbl.auto_set_font_size(False); tbl.set_fontsize(8)
             tbl.auto_set_column_width(list(range(len(df_class.columns) + 1)))
-            ax.set_title('Morphology AUC-ROC from SFH embeddings',
+            ax.set_title('Morphology AUC-ROC  (cross-modal vs in-modality)',
                          fontsize=10, pad=15)
             plt.tight_layout()
             pdf.savefig(fig, dpi=150, bbox_inches='tight'); plt.close(fig)
 
-        # page 6: text summary
+        # page 7: text summary
         lines = [
-            f'COSMOS-Web ZooBOT CLIP -- Alignment Evaluation',
-            f'N = {N:,} galaxies   (full: {N_FULL:,})',
+            'COSMOS-Web ZooBOT CLIP -- Alignment Evaluation',
+            f'N_eval={N:,}   N_probe={n_probe:,}   full={N_FULL:,}   k={args.k}',
             '',
             '-- Cosine similarity (img . sfh) --',
-            f'  matched  mean={matched_sim.mean():.4f}  std={matched_sim.std():.4f}',
-            f'  random   mean={random_sim.mean():.4f}  std={random_sim.std():.4f}',
+            f'  matched mean={matched_sim.mean():.4f} std={matched_sim.std():.4f}',
+            f'  random  mean={random_sim.mean():.4f} std={random_sim.std():.4f}',
             f'  t={t_stat:.1f}  p={p_val:.2e}',
             '',
-            '-- Rank percentile (img->sfh, lower=better) --',
-            f'  median={np.median(rank_pctile):.4f}   (0.5 = random)',
-            f'  top 1%: {pct_top1:.1f}%   top 5%: {pct_top5:.1f}%'
-            f'   top 10%: {pct_top10:.1f}%',
+            '-- Rank percentile (img->sfh) --',
+            f'  median={np.median(rank_pctile):.4f}  (0.5=random)',
+            f'  top1%={pct_top1:.1f}%  top5%={pct_top5:.1f}%  top10%={pct_top10:.1f}%',
             '',
             f'-- Within-batch rank-1 (batch={args.batch_eval}) --',
-            f'  img->sfh: {np.mean(r1_i2s):.3f}   sfh->img: {np.mean(r1_s2i):.3f}'
-            f'   random: {1/args.batch_eval:.3f}',
+            f'  img->sfh={np.mean(r1_i2s):.3f}  sfh->img={np.mean(r1_s2i):.3f}'
+            f'  random={1/args.batch_eval:.3f}',
             '',
-            f'-- k-NN Pearson r (k={args.k}) --',
+            f'{"Property":<35s} {"r_cross":>8} {"r_self":>8}'
+            f'  {"lin_cross":>9} {"lin_self":>9}'
+            f'  {"mlp_cross":>9} {"mlp_self":>9}',
+            '-' * 95,
+            '  -- SFH props (cross=img->sfh, self=sfh->sfh) --',
         ]
-        for lbl, row in df_sfh.iterrows():
-            lines.append(f'  img->{lbl:<35s}  r={row["pearson_r"]:.3f}')
-        for lbl, row in df_morph.iterrows():
-            lines.append(f'  sfh->{lbl:<35s}  r={row["pearson_r"]:.3f}')
-        lines += ['', '-- Linear probe R2 --']
-        for lbl, r2 in {**lp_sfh, **lp_morph}.items():
-            direction = 'img->' if lbl in lp_sfh else 'sfh->'
-            lines.append(f'  {direction}{lbl:<35s}  R2={r2:.3f}')
-        fig, ax = plt.subplots(figsize=(9, max(6, 0.24 * len(lines))))
+        for lbl in SFH_PROPS:
+            rc  = df_knn_sfh.loc[lbl,   'r_cross']   if lbl in df_knn_sfh.index   else np.nan
+            rs  = df_knn_sfh.loc[lbl,   'r_self']    if lbl in df_knn_sfh.index   else np.nan
+            lc  = df_probe_sfh.loc[lbl, 'lin_cross'] if lbl in df_probe_sfh.index else np.nan
+            ls  = df_probe_sfh.loc[lbl, 'lin_self']  if lbl in df_probe_sfh.index else np.nan
+            mc  = df_probe_sfh.loc[lbl, 'mlp_cross'] if lbl in df_probe_sfh.index else np.nan
+            ms  = df_probe_sfh.loc[lbl, 'mlp_self']  if lbl in df_probe_sfh.index else np.nan
+            lines.append(f'  {lbl:<33s} {rc:8.3f} {rs:8.3f}  {lc:9.3f} {ls:9.3f}  {mc:9.3f} {ms:9.3f}')
+        lines.append('  -- Morph props (cross=sfh->img, self=img->img) --')
+        for lbl in MORPH_PROPS:
+            rc  = df_knn_morph.loc[lbl,   'r_cross']   if lbl in df_knn_morph.index   else np.nan
+            rs  = df_knn_morph.loc[lbl,   'r_self']    if lbl in df_knn_morph.index   else np.nan
+            lc  = df_probe_morph.loc[lbl, 'lin_cross'] if lbl in df_probe_morph.index else np.nan
+            ls  = df_probe_morph.loc[lbl, 'lin_self']  if lbl in df_probe_morph.index else np.nan
+            mc  = df_probe_morph.loc[lbl, 'mlp_cross'] if lbl in df_probe_morph.index else np.nan
+            ms  = df_probe_morph.loc[lbl, 'mlp_self']  if lbl in df_probe_morph.index else np.nan
+            lines.append(f'  {lbl:<33s} {rc:8.3f} {rs:8.3f}  {lc:9.3f} {ls:9.3f}  {mc:9.3f} {ms:9.3f}')
+
+        fig, ax = plt.subplots(figsize=(11, max(7, 0.22 * len(lines))))
         ax.axis('off')
-        ax.text(0.02, 0.98, '\n'.join(lines), transform=ax.transAxes,
-                va='top', ha='left', fontsize=8.5, fontfamily='monospace',
+        ax.text(0.01, 0.99, '\n'.join(lines), transform=ax.transAxes,
+                va='top', ha='left', fontsize=7.5, fontfamily='monospace',
                 bbox=dict(boxstyle='round', fc='#f9f9f9', ec='#cccccc', alpha=0.9))
         plt.tight_layout()
         pdf.savefig(fig, dpi=150, bbox_inches='tight'); plt.close(fig)
