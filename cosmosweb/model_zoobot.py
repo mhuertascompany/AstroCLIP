@@ -178,8 +178,6 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         # ── within-batch rank-1 (cheap training-time diagnostic) ─────────────
         with torch.no_grad():
             labels   = torch.arange(B, device=images.device)
-            r1_i2s   = (all_sfh[:B][img_q.argmax(dim=-1)] == sfh_k).all(-1).float().mean()
-            # simpler: argmax of logits over the batch block only
             logits_b = img_q @ sfh_k.T / T              # (B, B) batch-only
             r1       = ((logits_b.argmax(1) == labels).float().mean() +
                         (logits_b.T.argmax(1) == labels).float().mean()) / 2
