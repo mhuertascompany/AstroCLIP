@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--sfh_input_dim', type=int,   default=50,
                    help='Length of SFH vector (= SFH_N_BINS in prepare_dataset.py)')
     p.add_argument('--temperature',   type=float, default=0.07)
+    p.add_argument('--queue_size',    type=int,   default=4096,
+                   help='MoCo queue length (must be divisible by batch_size)')
+    p.add_argument('--momentum',      type=float, default=0.995,
+                   help='EMA momentum for momentum encoders')
 
     # Optimiser
     p.add_argument('--lr',           type=float, default=1e-4)
@@ -92,6 +96,8 @@ def main() -> None:
         embed_dim=args.embed_dim,
         sfh_input_dim=args.sfh_input_dim,
         temperature=args.temperature,
+        queue_size=args.queue_size,
+        momentum=args.momentum,
         lr=args.lr,
         weight_decay=args.weight_decay,
         epochs=args.max_epochs,
