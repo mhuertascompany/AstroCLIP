@@ -136,7 +136,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         T:        torch.Tensor,
     ) -> torch.Tensor:
         """Cross-entropy over logits (B, B+Q); positives at indices 0..B-1."""
-        logits = queries @ all_keys.T / T          # (B, B+Q)
+        logits = queries @ all_keys.T * T          # (B, B+Q)  T = logit_scale = 1/temp
         labels = torch.arange(queries.size(0),
                               device=queries.device, dtype=torch.long)
         return F.cross_entropy(logits, labels)
@@ -153,7 +153,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 f'batch_size ({B}) > queue_size ({Q}). '
                 'Reduce batch_size or increase queue_size.')
 
-        T = self.log_temp.exp().clamp(min=1.0, max=np.log(20))
+        T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 
         # ── query embeddings (main encoders, receive gradients) ───────────────
         img_q = F.normalize(self.encode_image(images), dim=-1)   # (B, D)
@@ -178,7 +178,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         # ── within-batch rank-1 (cheap training-time diagnostic) ─────────────
         with torch.no_grad():
             labels   = torch.arange(B, device=images.device)
-            logits_b = img_q @ sfh_k.T / T              # (B, B) batch-only
+            logits_b = img_q @ sfh_k.T * T              # (B, B) batch-only
             r1       = ((logits_b.argmax(1) == labels).float().mean() +
                         (logits_b.T.argmax(1) == labels).float().mean()) / 2
 
@@ -194,7 +194,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         images, sfhs = batch['image'], batch['sfh']
-        T = self.log_temp.exp().clamp(min=1.0, max=np.log(20))
+        T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 
         img_e = F.normalize(self.encode_image(images), dim=-1)
         sfh_e = F.normalize(self.encode_sfh(sfhs),    dim=-1)
