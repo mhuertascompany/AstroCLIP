@@ -199,7 +199,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         img_e = F.normalize(self.encode_image(images), dim=-1)
         sfh_e = F.normalize(self.encode_sfh(sfhs),    dim=-1)
 
-        logits  = T * img_e @ sfh_e.T
+        logits  = T * (img_e @ sfh_e.T)
         labels  = torch.arange(logits.size(0), device=logits.device, dtype=torch.long)
         val_loss = (F.cross_entropy(logits,   labels) +
                     F.cross_entropy(logits.T, labels)) / 2.0
