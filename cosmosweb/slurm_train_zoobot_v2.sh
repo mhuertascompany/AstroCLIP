@@ -26,11 +26,13 @@ ZOOBOT_CKPT=/n03data/huertas/COSMOS-Web/zoobot/models/ilbert_finetune/checkpoint
 
 # ── run ───────────────────────────────────────────────────────────────────────
 # Key changes vs v1:
-#   --queue_size 4096  : 32x more negatives per step (was batch_size-1 = 127)
-#   --momentum   0.995 : EMA rate for key encoders
-#   --batch_size 128   : unchanged (queue handles the effective negative count)
-#   --max_epochs 100   : more epochs; with harder negatives convergence is slower
-#   --warmup_epochs 10 : longer warmup to let queue fill and stabilise
+#   --queue_size 4096      : 32x more negatives per step (was batch_size-1=127)
+#   --momentum   0.995     : EMA rate for key encoders
+#   --lr         1e-4      : conservative lr (3e-4 caused temperature collapse)
+#   --max_epochs 100       : more epochs; harder negatives → slower convergence
+#   --warmup_epochs 10     : longer warmup to let queue fill and stabilise
+#   --patience   20        : more patience (early epochs settle temperature)
+# Temperature is now clamped to [1.0, ln(20)] so logit_scale stays in [1, ~3].
 python -m cosmosweb.train_zoobot \
     --dataset       ${OUTPUT_DIR}/cosmosweb_dataset_v2.h5 \
     --stamp_root    /n03data/huertas/COSMOS-Web/zoobot/stamps_ilbert \
@@ -45,8 +47,9 @@ python -m cosmosweb.train_zoobot \
     --momentum      0.995 \
     --batch_size    128 \
     --max_epochs    100 \
-    --lr            3e-4 \
+    --lr            1e-4 \
     --weight_decay  0.05 \
     --warmup_epochs 10 \
+    --patience      20 \
     --num_workers   8 \
     --precision     16-mixed

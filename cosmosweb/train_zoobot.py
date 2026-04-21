@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--log_dir',     type=Path, default=Path('logs/cosmosweb_zoobot'))
     p.add_argument('--run_name',    type=str,  default='cosmosweb_zoobot')
     p.add_argument('--resume_from', type=Path, default=None)
+    p.add_argument('--patience',   type=int,  default=15,
+                   help='Early stopping patience (epochs)')
 
     return p.parse_args()
 
@@ -118,7 +120,7 @@ def main() -> None:
     )
     early_stop_cb = EarlyStopping(
         monitor='val_loss',
-        patience=10,
+        patience=args.patience,
         mode='min',
         verbose=True,
     )

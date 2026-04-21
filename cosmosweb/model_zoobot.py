@@ -153,7 +153,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 f'batch_size ({B}) > queue_size ({Q}). '
                 'Reduce batch_size or increase queue_size.')
 
-        T = self.log_temp.exp().clamp(max=np.log(100))
+        T = self.log_temp.exp().clamp(min=1.0, max=np.log(20))
 
         # ── query embeddings (main encoders, receive gradients) ───────────────
         img_q = F.normalize(self.encode_image(images), dim=-1)   # (B, D)
@@ -194,7 +194,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         images, sfhs = batch['image'], batch['sfh']
-        T = self.log_temp.exp().clamp(max=np.log(100))
+        T = self.log_temp.exp().clamp(min=1.0, max=np.log(20))
 
         img_e = F.normalize(self.encode_image(images), dim=-1)
         sfh_e = F.normalize(self.encode_sfh(sfhs),    dim=-1)
