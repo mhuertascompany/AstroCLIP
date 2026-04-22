@@ -34,6 +34,10 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from PIL import Image
 import umap
+try:
+    from hdbscan import HDBSCAN
+except ImportError:
+    from sklearn.cluster import HDBSCAN
 
 from astropy.io import fits
 from astropy.table import Table
@@ -179,6 +183,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--device',      type=str,   default='cuda')
     p.add_argument('--max_galaxies', type=int,  default=0,
                    help='Cap at N galaxies for quick tests (0 = all)')
+    p.add_argument('--min_cluster_size', type=int, default=200,
+                   help='HDBSCAN min_cluster_size (smaller → more clusters)')
+    p.add_argument('--min_samples',      type=int, default=50,
+                   help='HDBSCAN min_samples (larger → more conservative clusters)')
     return p.parse_args()
 
 
@@ -233,6 +241,20 @@ def main():
     log.info('Fitting UMAP on SFH embeddings…')
     xy_sfh   = fit_umap(sfh_emb,    n_neighbors=args.n_neighbors, min_dist=args.min_dist)
 
+    # ── step 3.5: HDBSCAN clustering on native joint embeddings (256D) ──────
+    # Clustering in embedding space rather than UMAP 2D avoids distortions
+    # introduced by the projection.  L2-normalised vectors → L2 ≈ cosine dist.
+    log.info('Running HDBSCAN on joint embeddings (%dD, min_cluster_size=%d, min_samples=%d)…',
+             joint_emb.shape[1], args.min_cluster_size, args.min_samples)
+    clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
+                         min_samples=args.min_samples,
+                         metric='euclidean')
+    hdb_labels = clusterer.fit_predict(joint_emb).astype(np.int32)
+    n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
+    n_noise    = int((hdb_labels == -1).sum())
+    log.info('  %d clusters found, %d noise points (%.1f%%)',
+             n_clusters, n_noise, 100.0 * n_noise / len(hdb_labels))
+
     # ── step 4: save companion npz for explore.py (done BEFORE PDF) ──────────
     npz_path = args.npz_output or args.output.with_suffix('.npz')
     npz_data = dict(
@@ -255,6 +277,7 @@ def main():
     _save_cigale_extras(npz_data, prop_aligned)
     for col in sorted(c for c in prop_aligned.columns if 'family' in c):
         npz_data[col] = prop_aligned[col].values.astype(np.float32)
+    npz_data['hdbscan_labels'] = hdb_labels
 
     np.savez_compressed(npz_path, **npz_data)
     log.info('Companion npz → %s', npz_path)
@@ -289,6 +312,24 @@ def main():
                                  ['Image (ZooBOT)', 'SFH encoder', 'Joint (avg)']):
             _scatter(ax, xy, redshifts.astype(float), label='redshift z', cmap='plasma')
             ax.set_title(title, fontsize=9, pad=4)
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+        # HDBSCAN cluster map
+        fig, ax = plt.subplots(figsize=(8, 7))
+        noise_mask   = hdb_labels == -1
+        cluster_mask = hdb_labels >= 0
+        ax.scatter(xy_joint[noise_mask, 0], xy_joint[noise_mask, 1],
+                   c='#cccccc', s=1, alpha=0.3, linewidths=0, label='noise')
+        if cluster_mask.any():
+            sc = ax.scatter(xy_joint[cluster_mask, 0], xy_joint[cluster_mask, 1],
+                            c=hdb_labels[cluster_mask], cmap='tab20',
+                            s=2, alpha=0.7, linewidths=0)
+            plt.colorbar(sc, ax=ax, label='Cluster ID')
+        ax.set_title(f'HDBSCAN clusters (N={n_clusters}, noise={n_noise:,})\n{ckpt_name}',
+                     fontsize=9)
+        ax.set_xlabel('UMAP 1'); ax.set_ylabel('UMAP 2')
         plt.tight_layout()
         pdf.savefig(fig, dpi=150, bbox_inches='tight')
         plt.close(fig)

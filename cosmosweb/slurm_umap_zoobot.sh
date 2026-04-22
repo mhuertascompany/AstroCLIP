@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cweb_umap_zoobot
-#SBATCH --output=/n03data/huertas/COSMOS-Web/cosmosweb_clip/umap_zoobot.out
-#SBATCH --error=/n03data/huertas/COSMOS-Web/cosmosweb_clip/umap_zoobot.err
+#SBATCH --job-name=cweb_umap_zoobot_v2
+#SBATCH --output=/n03data/huertas/COSMOS-Web/cosmosweb_clip/umap_zoobot_v2.out
+#SBATCH --error=/n03data/huertas/COSMOS-Web/cosmosweb_clip/umap_zoobot_v2.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodelist=n03
@@ -17,19 +17,21 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
-CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v1-epoch=048-val_loss=4.0277.ckpt
+CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v2-epoch=012-val_loss=4.3615.ckpt
 
 cd ${REPO_DIR}
 
 # ── run ───────────────────────────────────────────────────────────────────────
 python -m cosmosweb.umap_embeddings_zoobot \
-    --checkpoint  ${CKPT} \
-    --dataset     ${OUTPUT_DIR}/cosmosweb_dataset_v2.h5 \
-    --stamp_root  /n03data/huertas/COSMOS-Web/zoobot/stamps_ilbert \
-    --filter      F277W \
-    --output      ${OUTPUT_DIR}/umap_plots_zoobot_v1.pdf \
-    --npz_output  ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v1.npz \
-    --batch_size  128 \
-    --n_neighbors 15 \
-    --min_dist    0.1 \
-    --device      cuda
+    --checkpoint       ${CKPT} \
+    --dataset          ${OUTPUT_DIR}/cosmosweb_dataset_v2.h5 \
+    --stamp_root       /n03data/huertas/COSMOS-Web/zoobot/stamps_ilbert \
+    --filter           F277W \
+    --output           ${OUTPUT_DIR}/umap_plots_zoobot_v2.pdf \
+    --npz_output       ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz \
+    --batch_size       128 \
+    --n_neighbors      15 \
+    --min_dist         0.1 \
+    --min_cluster_size 200 \
+    --min_samples      50 \
+    --device           cuda

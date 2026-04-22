@@ -166,15 +166,35 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     sfh_props  = _sfh_properties(h5_path, h5_indices)
     color_props.update(sfh_props)
 
+    # HDBSCAN cluster labels (optional — produced by umap_embeddings_zoobot.py)
+    if 'hdbscan_labels' in npz:
+        from bokeh.palettes import Turbo256
+        labels     = npz['hdbscan_labels'].astype(int)
+        n_clusters = int(labels.max()) + 1 if labels.max() >= 0 else 0
+        step       = max(1, 256 // max(n_clusters, 1))
+        palette    = [Turbo256[min(i * step, 255)] for i in range(n_clusters)]
+        cluster_hex = [
+            '#aaaaaa' if lbl < 0 else palette[lbl % len(palette)]
+            for lbl in labels
+        ]
+        color_props['Cluster (HDBSCAN)'] = labels.astype(float)
+    else:
+        labels      = None
+        n_clusters  = 0
+        cluster_hex = ['#888888'] * len(h5_indices)
+
     # Default color: first available
     default_color = next(iter(color_props), None)
 
     return dict(
-        xy           = xy,
-        color_props  = color_props,
-        default_color= default_color,
-        h5_indices   = h5_indices,
-        galaxy_ids   = npz['galaxy_ids'],
+        xy            = xy,
+        color_props   = color_props,
+        default_color = default_color,
+        h5_indices    = h5_indices,
+        galaxy_ids    = npz['galaxy_ids'],
+        cluster_labels = labels,
+        cluster_hex    = cluster_hex,
+        n_clusters     = n_clusters,
     )
 
 
@@ -256,6 +276,30 @@ def _make_gallery(h5_path: Path, h5_rows: np.ndarray, d: dict,
     return fig_img, fig_sfh
 
 
+def _mean_sfh_fig(h5_path: Path, h5_rows: np.ndarray) -> plt.Figure:
+    """Mean ± std SFH across all h5_rows (not just the display subsample)."""
+    with h5py.File(h5_path, 'r') as f:
+        sfhs = f['sfh'][sorted(h5_rows.tolist())].astype(np.float64)   # (N, 50)
+    sfr = np.maximum(10.0 ** sfhs - SFH_EPS, 0.0)
+    sfr /= sfr.sum(axis=1, keepdims=True).clip(min=1e-10)
+    mean = sfr.mean(axis=0)
+    std  = sfr.std(axis=0)
+    t    = _T_FRAC
+    fig, ax = plt.subplots(figsize=(5, 2.5))
+    ax.fill_between(t[1:], (mean - std)[1:], (mean + std)[1:],
+                    step='post', alpha=0.25, color='steelblue')
+    ax.step(t[1:], mean[1:], where='post', color='steelblue', lw=1.5,
+            label=f'mean ± std  (N={len(h5_rows):,})')
+    ax.set_yscale('log')
+    ax.set_xlim(0, 1)
+    ax.set_xlabel('Fractional lookback time', fontsize=8)
+    ax.set_ylabel('SFH weight (norm.)', fontsize=8)
+    ax.legend(fontsize=7)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout(pad=0.6)
+    return fig
+
+
 # ── Panel application ─────────────────────────────────────────────────────────
 
 def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
@@ -268,9 +312,10 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     c0_s   = np.where(np.isfinite(c0), c0, np.nanmedian(c0[np.isfinite(c0)]))
 
     src = ColumnDataSource(dict(
-        x  = xy0[:, 0].tolist(),
-        y  = xy0[:, 1].tolist(),
-        c  = c0_s.tolist(),
+        x           = xy0[:, 0].tolist(),
+        y           = xy0[:, 1].tolist(),
+        c           = c0_s.tolist(),
+        cluster_hex = d['cluster_hex'],
     ))
 
     mapper = LinearColorMapper(
@@ -288,12 +333,20 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         title='Draw a lasso or box to select galaxies',
         output_backend='webgl',
     )
-    plot.scatter(
+    r_cont = plot.scatter(
         'x', 'y', source=src,
         color=dict(field='c', transform=mapper),
         size=2.5, alpha=0.7, line_width=0,
-        selection_color='white',  selection_alpha=1.0,
+        selection_color='white', selection_alpha=1.0,
         nonselection_alpha=0.12,
+    )
+    r_clust = plot.scatter(
+        'x', 'y', source=src,
+        fill_color='cluster_hex', line_width=0,
+        size=2.5, alpha=0.7,
+        selection_fill_color='white', selection_alpha=1.0,
+        nonselection_alpha=0.12,
+        visible=False,
     )
     plot.add_layout(cbar, 'right')
     plot.xaxis.axis_label = 'UMAP 1'
@@ -319,8 +372,38 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
 
     # HTML panes are used instead of Matplotlib panes so that every update
     # is a fresh object (new bytes) — Panel detects the change reliably.
-    img_pane = pn.pane.HTML(_BLANK_HTML, width=550)
-    sfh_pane = pn.pane.HTML(_BLANK_HTML, width=550)
+    img_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
+    sfh_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
+    mean_sfh_pane = pn.pane.HTML(_BLANK_HTML, width=400)
+
+    # Cluster selector widget (only shown when clusters are available)
+    n_clusters = d['n_clusters']
+    if n_clusters > 0 and d['cluster_labels'] is not None:
+        labels = d['cluster_labels']
+        has_noise = bool((labels == -1).any())
+        cl_opts = (['— all —'] +
+                   (['noise'] if has_noise else []) +
+                   [f'cluster {i}' for i in range(n_clusters)])
+        cluster_w = pn.widgets.Select(
+            name='Jump to cluster', options=cl_opts, value='— all —', width=200)
+
+        def _on_cluster_select(event):
+            val = cluster_w.value
+            if val == '— all —':
+                src.selected.indices = []
+                return
+            elif val == 'noise':
+                idx = np.where(labels == -1)[0].tolist()
+            else:
+                cid = int(val.split()[-1])
+                idx = np.where(labels == cid)[0].tolist()
+            src.selected.indices = idx
+            _refresh(idx)
+
+        cluster_w.param.watch(_on_cluster_select, 'value')
+        cluster_widget_row = pn.Column(pn.layout.Divider(), cluster_w)
+    else:
+        cluster_widget_row = pn.pane.Markdown('')
 
     # ── callbacks ─────────────────────────────────────────────────────────
     def _update_embed(event):
@@ -331,6 +414,12 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         plot.title.text = f'UMAP ({embed_w.value}) — draw to select'
 
     def _update_color(event):
+        if color_w.value == 'Cluster (HDBSCAN)':
+            r_cont.visible  = False
+            r_clust.visible = True
+            return
+        r_cont.visible  = True
+        r_clust.visible = False
         vals = d['color_props'].get(color_w.value, np.zeros(len(xy0)))
         safe = np.where(np.isfinite(vals), vals,
                         np.nanmedian(vals[np.isfinite(vals)]))
@@ -342,16 +431,21 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         sel = list(sel)
         if not sel:
             info_md.object = '_No galaxies selected._'
-            img_pane.object = _BLANK_HTML
-            sfh_pane.object = _BLANK_HTML
+            img_pane.object      = _BLANK_HTML
+            sfh_pane.object      = _BLANK_HTML
+            mean_sfh_pane.object = _BLANK_HTML
             return
         h5_rows = d['h5_indices'][np.array(sel, dtype=int)]
         n_show  = min(N_DISPLAY, len(h5_rows))
         info_md.object = (f'**{len(sel):,}** selected '
                           f'— showing {n_show} random examples')
         fig_img, fig_sfh = _make_gallery(h5_path, h5_rows, d, rng)
-        img_pane.object = _fig_to_html(fig_img)   # closes fig after encoding
+        img_pane.object = _fig_to_html(fig_img)
         sfh_pane.object = _fig_to_html(fig_sfh)
+        if len(h5_rows) >= 20:
+            mean_sfh_pane.object = _fig_to_html(_mean_sfh_fig(h5_path, h5_rows))
+        else:
+            mean_sfh_pane.object = _BLANK_HTML
 
     def _on_resample(event):
         _refresh(src.selected.indices)
@@ -380,6 +474,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         pn.layout.Divider(),
         embed_w,
         color_w,
+        cluster_widget_row,
         pn.layout.Divider(),
         info_md,
         resample_btn,
@@ -398,6 +493,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         pn.Row(
             pn.Column(pn.pane.Markdown('#### F277W stamps'), img_pane),
             pn.Column(pn.pane.Markdown('#### CIGALE SFHs'),  sfh_pane),
+            pn.Column(pn.pane.Markdown('#### Mean SFH (all selected)'), mean_sfh_pane),
         ),
     )
     return app
