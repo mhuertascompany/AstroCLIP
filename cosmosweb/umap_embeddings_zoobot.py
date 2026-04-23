@@ -241,15 +241,15 @@ def main():
     log.info('Fitting UMAP on SFH embeddings…')
     xy_sfh   = fit_umap(sfh_emb,    n_neighbors=args.n_neighbors, min_dist=args.min_dist)
 
-    # ── step 3.5: HDBSCAN clustering on native joint embeddings (256D) ──────
-    # Clustering in embedding space rather than UMAP 2D avoids distortions
-    # introduced by the projection.  L2-normalised vectors → L2 ≈ cosine dist.
-    log.info('Running HDBSCAN on joint embeddings (%dD, min_cluster_size=%d, min_samples=%d)…',
-             joint_emb.shape[1], args.min_cluster_size, args.min_samples)
+    # ── step 3.5: HDBSCAN clustering on 2D UMAP coords ───────────────────────
+    # Running on xy_joint (2D) rather than the full 256D embedding for speed.
+    # Not ideal (UMAP distorts global distances) but tractable at 137k galaxies.
+    log.info('Running HDBSCAN on 2D UMAP (min_cluster_size=%d, min_samples=%d)…',
+             args.min_cluster_size, args.min_samples)
     clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
                          min_samples=args.min_samples,
                          metric='euclidean')
-    hdb_labels = clusterer.fit_predict(joint_emb).astype(np.int32)
+    hdb_labels = clusterer.fit_predict(xy_joint).astype(np.int32)
     n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
     n_noise    = int((hdb_labels == -1).sum())
     log.info('  %d clusters found, %d noise points (%.1f%%)',
