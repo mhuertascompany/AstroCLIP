@@ -37,7 +37,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import panel as pn
-from bokeh.models import BasicTicker, ColorBar, ColumnDataSource, LinearColorMapper
+from bokeh.models import BasicTicker, BooleanFilter, CDSView, ColorBar, ColumnDataSource, LinearColorMapper
 from bokeh.palettes import Inferno256, Plasma256, Viridis256
 from bokeh.plotting import figure as bk_figure
 
@@ -196,6 +196,8 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     # Default color: first available
     default_color = next(iter(color_props), None)
 
+    redshifts = npz['redshifts'].astype(float) if 'redshifts' in npz else np.full(len(h5_indices), np.nan)
+
     return dict(
         xy            = xy,
         color_props   = color_props,
@@ -205,6 +207,7 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
         cluster_labels = labels,
         cluster_hex    = cluster_hex,
         n_clusters     = n_clusters,
+        redshifts      = redshifts,
     )
 
 
@@ -343,15 +346,20 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         title='Draw a lasso or box to select galaxies',
         output_backend='webgl',
     )
+    # Redshift filter view — updated by the z RangeSlider
+    z_all  = d['redshifts']
+    z_safe = np.where(np.isfinite(z_all), z_all, -1.0)
+    z_view = CDSView(filter=BooleanFilter(booleans=[True] * len(z_safe)))
+
     r_cont = plot.scatter(
-        'x', 'y', source=src,
+        'x', 'y', source=src, view=z_view,
         color=dict(field='c', transform=mapper),
         size=2.5, alpha=0.7, line_width=0,
         selection_color='white', selection_alpha=1.0,
         nonselection_alpha=0.12,
     )
     r_clust = plot.scatter(
-        'x', 'y', source=src,
+        'x', 'y', source=src, view=z_view,
         fill_color='cluster_hex', line_width=0,
         size=2.5, alpha=0.7,
         selection_fill_color='white', selection_alpha=1.0,
@@ -385,6 +393,23 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     img_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
     sfh_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
     mean_sfh_pane = pn.pane.HTML(_BLANK_HTML, width=400)
+
+    # Redshift range slider
+    z_finite = z_safe[np.isfinite(z_all)]
+    z_lo = float(np.floor(z_finite.min() * 10) / 10) if len(z_finite) else 0.0
+    z_hi = float(np.ceil( z_finite.max() * 10) / 10) if len(z_finite) else 6.0
+    z_slider = pn.widgets.RangeSlider(
+        name='Redshift range', start=z_lo, end=z_hi,
+        value=(z_lo, z_hi), step=0.1, width=200,
+    )
+
+    def _on_z_filter(event):
+        lo, hi = z_slider.value
+        z_view.filter.booleans = [bool(lo <= z <= hi) for z in z_safe]
+        src.selected.indices = []
+        _refresh([])
+
+    z_slider.param.watch(_on_z_filter, 'value')
 
     # Cluster selector widget (only shown when clusters are available)
     n_clusters = d['n_clusters']
@@ -485,6 +510,8 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         embed_w,
         color_w,
         cluster_widget_row,
+        pn.layout.Divider(),
+        z_slider,
         pn.layout.Divider(),
         info_md,
         resample_btn,
