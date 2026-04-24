@@ -183,6 +183,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--device',      type=str,   default='cuda')
     p.add_argument('--max_galaxies', type=int,  default=0,
                    help='Cap at N galaxies for quick tests (0 = all)')
+    p.add_argument('--clustering', type=str, default='kmeans',
+                   choices=['kmeans', 'hdbscan'],
+                   help='Clustering algorithm (default: kmeans)')
+    p.add_argument('--n_clusters',       type=int, default=12,
+                   help='Number of clusters for k-means')
     p.add_argument('--min_cluster_size', type=int, default=200,
                    help='HDBSCAN min_cluster_size (smaller → more clusters)')
     p.add_argument('--min_samples',      type=int, default=50,
@@ -241,19 +246,26 @@ def main():
     log.info('Fitting UMAP on SFH embeddings…')
     xy_sfh   = fit_umap(sfh_emb,    n_neighbors=args.n_neighbors, min_dist=args.min_dist)
 
-    # ── step 3.5: HDBSCAN clustering on 2D UMAP coords ───────────────────────
-    # Running on xy_joint (2D) rather than the full 256D embedding for speed.
-    # Not ideal (UMAP distorts global distances) but tractable at 137k galaxies.
-    log.info('Running HDBSCAN on 2D UMAP (min_cluster_size=%d, min_samples=%d)…',
-             args.min_cluster_size, args.min_samples)
-    clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
-                         min_samples=args.min_samples,
-                         metric='euclidean')
-    hdb_labels = clusterer.fit_predict(xy_joint).astype(np.int32)
-    n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
-    n_noise    = int((hdb_labels == -1).sum())
-    log.info('  %d clusters found, %d noise points (%.1f%%)',
-             n_clusters, n_noise, 100.0 * n_noise / len(hdb_labels))
+    # ── step 3.5: clustering on 2D UMAP coords ───────────────────────────────
+    if args.clustering == 'kmeans':
+        from sklearn.cluster import KMeans
+        log.info('Running k-means (k=%d) on 2D UMAP…', args.n_clusters)
+        km = KMeans(n_clusters=args.n_clusters, random_state=42, n_init='auto')
+        hdb_labels = km.fit_predict(xy_joint).astype(np.int32)
+        n_clusters = args.n_clusters
+        n_noise    = 0
+        log.info('  k-means done — %d clusters, no noise points', n_clusters)
+    else:
+        log.info('Running HDBSCAN on 2D UMAP (min_cluster_size=%d, min_samples=%d)…',
+                 args.min_cluster_size, args.min_samples)
+        clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
+                             min_samples=args.min_samples,
+                             metric='euclidean')
+        hdb_labels = clusterer.fit_predict(xy_joint).astype(np.int32)
+        n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
+        n_noise    = int((hdb_labels == -1).sum())
+        log.info('  %d clusters found, %d noise points (%.1f%%)',
+                 n_clusters, n_noise, 100.0 * n_noise / len(hdb_labels))
 
     # ── step 4: save companion npz for explore.py (done BEFORE PDF) ──────────
     npz_path = args.npz_output or args.output.with_suffix('.npz')

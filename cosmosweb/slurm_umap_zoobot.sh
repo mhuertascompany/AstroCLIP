@@ -32,6 +32,6 @@ python -m cosmosweb.umap_embeddings_zoobot \
     --batch_size       128 \
     --n_neighbors      15 \
     --min_dist         0.1 \
-    --min_cluster_size 200 \
-    --min_samples      50 \
+    --clustering       kmeans \
+    --n_clusters       12 \
     --device           cuda
