@@ -396,6 +396,24 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     sfh_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
     mean_sfh_pane = pn.pane.HTML(_BLANK_HTML, width=400)
 
+    # Colour range slider (synced to current property; user can drag to override)
+    _c0_lo = float(np.nanpercentile(c0_s, 1))
+    _c0_hi = float(np.nanpercentile(c0_s, 99))
+    cbar_slider = pn.widgets.RangeSlider(
+        name='Colour range',
+        start=float(np.nanmin(c0_s)), end=float(np.nanmax(c0_s)),
+        value=(_c0_lo, _c0_hi),
+        step=float((np.nanmax(c0_s) - np.nanmin(c0_s)) / 200),
+        width=200,
+    )
+
+    def _on_cbar_range(event):
+        if color_w.value == 'Cluster (HDBSCAN)':
+            return
+        mapper.low, mapper.high = float(cbar_slider.value[0]), float(cbar_slider.value[1])
+
+    cbar_slider.param.watch(_on_cbar_range, 'value')
+
     # Redshift range slider
     z_finite = z_safe[np.isfinite(z_all)]
     z_lo = float(np.floor(z_finite.min() * 10) / 10) if len(z_finite) else 0.0
@@ -461,8 +479,15 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         safe = np.where(np.isfinite(vals), vals,
                         np.nanmedian(vals[np.isfinite(vals)]))
         src.data['c'] = safe.tolist()
-        mapper.low  = float(np.nanpercentile(safe, 1))
-        mapper.high = float(np.nanpercentile(safe, 99))
+        lo = float(np.nanpercentile(safe, 1))
+        hi = float(np.nanpercentile(safe, 99))
+        mapper.low  = lo
+        mapper.high = hi
+        # sync the range slider to the new property — suppress its callback
+        # by updating start/end/value together
+        cbar_slider.start = float(np.nanmin(safe))
+        cbar_slider.end   = float(np.nanmax(safe))
+        cbar_slider.value = (lo, hi)
 
     def _refresh(sel):
         sel = list(sel)
@@ -511,6 +536,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         pn.layout.Divider(),
         embed_w,
         color_w,
+        cbar_slider,
         cluster_widget_row,
         pn.layout.Divider(),
         z_slider,
