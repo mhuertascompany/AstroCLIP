@@ -277,6 +277,9 @@ def main():
     _save_cigale_extras(npz_data, prop_aligned)
     for col in sorted(c for c in prop_aligned.columns if 'family' in c):
         npz_data[col] = prop_aligned[col].values.astype(np.float32)
+    for col in ('binary_disturbed', 'binary_not_disturbed'):
+        if col in prop_aligned.columns:
+            npz_data[col] = prop_aligned[col].values.astype(np.float32)
     npz_data['hdbscan_labels'] = hdb_labels
 
     np.savez_compressed(npz_path, **npz_data)

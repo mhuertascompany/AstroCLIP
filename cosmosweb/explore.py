@@ -170,6 +170,8 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
         color_props['P_early (Ell + S0)'] = np.clip(_ell + _s0, 0.0, 1.0)
     if _edsk is not None and _ldsk is not None:
         color_props['P_late (early + late disk)'] = np.clip(_edsk + _ldsk, 0.0, 1.0)
+    if 'binary_disturbed' in npz:
+        color_props['P(Disturbed)'] = npz['binary_disturbed'].astype(float)
 
     # SFH shape descriptors computed directly from the HDF5
     h5_indices = npz['h5_indices'].astype(int)
