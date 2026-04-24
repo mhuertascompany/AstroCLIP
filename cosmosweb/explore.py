@@ -161,6 +161,16 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
             label = key.replace('family_', 'P(').upper() + ')'
             color_props[label] = npz[key].astype(float)
 
+    # Composite morphology: P_early = P(Ell) + P(S0), P_late = P(early disk) + P(late disk)
+    _ell  = npz['family_elliptical'].astype(float) if 'family_elliptical' in npz else None
+    _s0   = npz['family_s0'].astype(float)         if 'family_s0'         in npz else None
+    _edsk = npz['family_early_disk'].astype(float) if 'family_early_disk' in npz else None
+    _ldsk = npz['family_late_disk'].astype(float)  if 'family_late_disk'  in npz else None
+    if _ell is not None and _s0 is not None:
+        color_props['P_early (Ell + S0)'] = np.clip(_ell + _s0, 0.0, 1.0)
+    if _edsk is not None and _ldsk is not None:
+        color_props['P_late (early + late disk)'] = np.clip(_edsk + _ldsk, 0.0, 1.0)
+
     # SFH shape descriptors computed directly from the HDF5
     h5_indices = npz['h5_indices'].astype(int)
     sfh_props  = _sfh_properties(h5_path, h5_indices)
