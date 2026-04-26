@@ -318,103 +318,108 @@ def _mean_sfh_fig(h5_path: Path, h5_rows: np.ndarray) -> plt.Figure:
 # ── Panel application ─────────────────────────────────────────────────────────
 
 def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
-    rng = np.random.default_rng(42)
+    rng  = np.random.default_rng(42)
+    N    = len(d['h5_indices'])
+    xy0  = d['xy']['Joint (img + SFH)']
+    keys = list(d['color_props'].keys())
 
-    # ── Bokeh UMAP scatter ────────────────────────────────────────────────
-    xy0    = d['xy']['Joint (img + SFH)']
-    c0_key = d['default_color']
-    c0     = d['color_props'].get(c0_key, np.zeros(len(xy0)))
-    c0_s   = np.where(np.isfinite(c0), c0, np.nanmedian(c0[np.isfinite(c0)]))
+    # ── shared data source ────────────────────────────────────────────────
+    # c1 / c2 are the colour fields for the left and right plots respectively.
+    def _safe(key):
+        vals = d['color_props'].get(key, np.zeros(N))
+        med  = np.nanmedian(vals[np.isfinite(vals)]) if np.any(np.isfinite(vals)) else 0.0
+        return np.where(np.isfinite(vals), vals, med)
+
+    # Default: first key left, second key right (usually a morphology vs SFH split)
+    key1 = keys[0] if keys else ''
+    key2 = keys[1] if len(keys) > 1 else key1
+    c1_s = _safe(key1)
+    c2_s = _safe(key2)
 
     src = ColumnDataSource(dict(
         x           = xy0[:, 0].tolist(),
         y           = xy0[:, 1].tolist(),
-        c           = c0_s.tolist(),
+        c1          = c1_s.tolist(),
+        c2          = c2_s.tolist(),
         cluster_hex = d['cluster_hex'],
     ))
 
-    mapper = LinearColorMapper(
-        palette = Plasma256,
-        low     = float(np.nanpercentile(c0_s, 1)),
-        high    = float(np.nanpercentile(c0_s, 99)),
-    )
-    cbar = ColorBar(color_mapper=mapper, ticker=BasicTicker(),
-                    label_standoff=8, width=12, location=(0, 0))
-
-    plot = bk_figure(
-        width=580, height=520,
-        tools='lasso_select,box_select,wheel_zoom,pan,reset',
-        active_drag='lasso_select',
-        title='Draw a lasso or box to select galaxies',
-        output_backend='webgl',
-    )
-    # Redshift filter view — updated by the z RangeSlider
+    # ── shared redshift CDSView ───────────────────────────────────────────
     z_all  = d['redshifts']
     z_safe = np.where(np.isfinite(z_all), z_all, -1.0)
-    z_view = CDSView(filter=BooleanFilter(booleans=[True] * len(z_safe)))
+    z_view = CDSView(filter=BooleanFilter(booleans=[True] * N))
 
-    r_cont = plot.scatter(
-        'x', 'y', source=src, view=z_view,
-        color=dict(field='c', transform=mapper),
-        size=2.5, alpha=0.7, line_width=0,
-        selection_color='white', selection_alpha=1.0,
-        nonselection_alpha=0.12,
-    )
-    r_clust = plot.scatter(
-        'x', 'y', source=src, view=z_view,
-        fill_color='cluster_hex', line_width=0,
-        size=2.5, alpha=0.7,
-        selection_fill_color='white', selection_alpha=1.0,
-        nonselection_alpha=0.12,
-        visible=False,
-    )
-    plot.add_layout(cbar, 'right')
-    plot.xaxis.axis_label = 'UMAP 1'
-    plot.yaxis.axis_label = 'UMAP 2'
+    # ── helper: build one Bokeh plot panel ────────────────────────────────
+    def _make_plot(color_field: str, init_safe: np.ndarray, title: str):
+        lo = float(np.nanpercentile(init_safe, 1))
+        hi = float(np.nanpercentile(init_safe, 99))
+        mapper = LinearColorMapper(palette=Plasma256, low=lo, high=hi)
+        cbar   = ColorBar(color_mapper=mapper, ticker=BasicTicker(),
+                          label_standoff=8, width=12, location=(0, 0))
+        plot = bk_figure(
+            width=500, height=480,
+            tools='lasso_select,box_select,wheel_zoom,pan,reset',
+            active_drag='lasso_select',
+            title=title,
+            output_backend='webgl',
+        )
+        r_cont = plot.scatter(
+            'x', 'y', source=src, view=z_view,
+            color=dict(field=color_field, transform=mapper),
+            size=2.5, alpha=0.7, line_width=0,
+            selection_color='white', selection_alpha=1.0,
+            nonselection_alpha=0.12,
+        )
+        r_clust = plot.scatter(
+            'x', 'y', source=src, view=z_view,
+            fill_color='cluster_hex', line_width=0,
+            size=2.5, alpha=0.7,
+            selection_fill_color='white', selection_alpha=1.0,
+            nonselection_alpha=0.12, visible=False,
+        )
+        plot.add_layout(cbar, 'right')
+        plot.xaxis.axis_label = 'UMAP 1'
+        plot.yaxis.axis_label = 'UMAP 2'
+        return plot, mapper, r_cont, r_clust
 
-    # ── widgets ───────────────────────────────────────────────────────────
+    plot1, mapper1, r_cont1, r_clust1 = _make_plot('c1', c1_s, 'Left UMAP — draw to select')
+    plot2, mapper2, r_cont2, r_clust2 = _make_plot('c2', c2_s, 'Right UMAP')
+
+    # ── per-plot colour widgets ───────────────────────────────────────────
+    def _make_color_widgets(init_key, init_safe, label_prefix):
+        color_w = pn.widgets.Select(
+            name=f'{label_prefix}: colour by',
+            options=keys, value=init_key, width=220,
+        )
+        lo = float(np.nanpercentile(init_safe, 1))
+        hi = float(np.nanpercentile(init_safe, 99))
+        cbar_w = pn.widgets.RangeSlider(
+            name=f'{label_prefix}: colour range',
+            start=float(np.nanmin(init_safe)), end=float(np.nanmax(init_safe)),
+            value=(lo, hi),
+            step=max(float((np.nanmax(init_safe) - np.nanmin(init_safe)) / 200), 1e-6),
+            width=220,
+        )
+        return color_w, cbar_w
+
+    color_w1, cbar_w1 = _make_color_widgets(key1, c1_s, 'Left')
+    color_w2, cbar_w2 = _make_color_widgets(key2, c2_s, 'Right')
+
+    # ── shared widgets ────────────────────────────────────────────────────
     embed_w = pn.widgets.Select(
         name='Embedding space',
         options=list(d['xy'].keys()),
-        value='Joint (img + SFH)',
-        width=200,
+        value='Joint (img + SFH)', width=200,
     )
-    color_w = pn.widgets.Select(
-        name='Color by',
-        options=list(d['color_props'].keys()),
-        value=c0_key or '',
-        width=200,
-    )
-    info_md = pn.pane.Markdown(
-        '_Draw a selection on the UMAP._', width=210)
-    resample_btn = pn.widgets.Button(
-        name='New random sample', button_type='primary', width=200)
+    info_md      = pn.pane.Markdown('_Draw a selection on the UMAP._', width=210)
+    resample_btn = pn.widgets.Button(name='New random sample',
+                                     button_type='primary', width=200)
 
-    # HTML panes are used instead of Matplotlib panes so that every update
-    # is a fresh object (new bytes) — Panel detects the change reliably.
     img_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
     sfh_pane      = pn.pane.HTML(_BLANK_HTML, width=550)
     mean_sfh_pane = pn.pane.HTML(_BLANK_HTML, width=400)
 
-    # Colour range slider (synced to current property; user can drag to override)
-    _c0_lo = float(np.nanpercentile(c0_s, 1))
-    _c0_hi = float(np.nanpercentile(c0_s, 99))
-    cbar_slider = pn.widgets.RangeSlider(
-        name='Colour range',
-        start=float(np.nanmin(c0_s)), end=float(np.nanmax(c0_s)),
-        value=(_c0_lo, _c0_hi),
-        step=float((np.nanmax(c0_s) - np.nanmin(c0_s)) / 200),
-        width=200,
-    )
-
-    def _on_cbar_range(event):
-        if color_w.value == 'Cluster (HDBSCAN)':
-            return
-        mapper.low, mapper.high = float(cbar_slider.value[0]), float(cbar_slider.value[1])
-
-    cbar_slider.param.watch(_on_cbar_range, 'value')
-
-    # Redshift range slider
+    # ── redshift slider ───────────────────────────────────────────────────
     z_finite = z_safe[np.isfinite(z_all)]
     z_lo = float(np.floor(z_finite.min() * 10) / 10) if len(z_finite) else 0.0
     z_hi = float(np.ceil( z_finite.max() * 10) / 10) if len(z_finite) else 6.0
@@ -423,41 +428,19 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         value=(z_lo, z_hi), step=0.1, width=200,
     )
 
-    def _on_z_filter(event):
-        lo, hi = z_slider.value
-        z_view.filter.booleans = [bool(lo <= z <= hi) for z in z_safe]
-        src.selected.indices = []
-        _refresh([])
-
-    z_slider.param.watch(_on_z_filter, 'value')
-
-    # Cluster selector widget (only shown when clusters are available)
+    # ── cluster selector ──────────────────────────────────────────────────
     n_clusters = d['n_clusters']
     if n_clusters > 0 and d['cluster_labels'] is not None:
-        labels = d['cluster_labels']
+        labels    = d['cluster_labels']
         has_noise = bool((labels == -1).any())
-        cl_opts = (['— all —'] +
-                   (['noise'] if has_noise else []) +
-                   [f'cluster {i}' for i in range(n_clusters)])
+        cl_opts   = (['— all —'] +
+                     (['noise'] if has_noise else []) +
+                     [f'cluster {i}' for i in range(n_clusters)])
         cluster_w = pn.widgets.Select(
             name='Jump to cluster', options=cl_opts, value='— all —', width=200)
-
-        def _on_cluster_select(event):
-            val = cluster_w.value
-            if val == '— all —':
-                src.selected.indices = []
-                return
-            elif val == 'noise':
-                idx = np.where(labels == -1)[0].tolist()
-            else:
-                cid = int(val.split()[-1])
-                idx = np.where(labels == cid)[0].tolist()
-            src.selected.indices = idx
-            _refresh(idx)
-
-        cluster_w.param.watch(_on_cluster_select, 'value')
         cluster_widget_row = pn.Column(pn.layout.Divider(), cluster_w)
     else:
+        cluster_w          = None
         cluster_widget_row = pn.pane.Markdown('')
 
     # ── callbacks ─────────────────────────────────────────────────────────
@@ -466,33 +449,60 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         src.data['x'] = xy[:, 0].tolist()
         src.data['y'] = xy[:, 1].tolist()
         src.selected.indices = []
-        plot.title.text = f'UMAP ({embed_w.value}) — draw to select'
+        plot1.title.text = f'Left UMAP ({embed_w.value}) — draw to select'
+        plot2.title.text = f'Right UMAP ({embed_w.value})'
 
-    def _update_color(event):
-        if color_w.value == 'Cluster (HDBSCAN)':
-            r_cont.visible  = False
-            r_clust.visible = True
+    def _make_color_cb(color_field, mapper, r_cont, r_clust, color_w, cbar_w):
+        def _cb(event):
+            if color_w.value == 'Cluster (HDBSCAN)':
+                r_cont.visible  = False
+                r_clust.visible = True
+                return
+            r_cont.visible  = True
+            r_clust.visible = False
+            safe = _safe(color_w.value)
+            src.data[color_field] = safe.tolist()
+            lo = float(np.nanpercentile(safe, 1))
+            hi = float(np.nanpercentile(safe, 99))
+            mapper.low  = lo
+            mapper.high = hi
+            cbar_w.start = float(np.nanmin(safe))
+            cbar_w.end   = float(np.nanmax(safe))
+            cbar_w.value = (lo, hi)
+        return _cb
+
+    def _make_cbar_cb(mapper, color_w):
+        def _cb(event):
+            if color_w.value != 'Cluster (HDBSCAN)':
+                mapper.low  = float(event.new[0])
+                mapper.high = float(event.new[1])
+        return _cb
+
+    def _on_z_filter(event):
+        lo, hi = z_slider.value
+        z_view.filter.booleans = [bool(lo <= z <= hi) for z in z_safe]
+        src.selected.indices   = []
+        _refresh([])
+
+    def _on_cluster_select(event):
+        if cluster_w is None:
             return
-        r_cont.visible  = True
-        r_clust.visible = False
-        vals = d['color_props'].get(color_w.value, np.zeros(len(xy0)))
-        safe = np.where(np.isfinite(vals), vals,
-                        np.nanmedian(vals[np.isfinite(vals)]))
-        src.data['c'] = safe.tolist()
-        lo = float(np.nanpercentile(safe, 1))
-        hi = float(np.nanpercentile(safe, 99))
-        mapper.low  = lo
-        mapper.high = hi
-        # sync the range slider to the new property — suppress its callback
-        # by updating start/end/value together
-        cbar_slider.start = float(np.nanmin(safe))
-        cbar_slider.end   = float(np.nanmax(safe))
-        cbar_slider.value = (lo, hi)
+        val = cluster_w.value
+        if val == '— all —':
+            src.selected.indices = []
+            return
+        elif val == 'noise':
+            idx = np.where(labels == -1)[0].tolist()
+        else:
+            cid = int(val.split()[-1])
+            idx = np.where(labels == cid)[0].tolist()
+        src.selected.indices = idx
+        _refresh(idx)
 
     def _refresh(sel):
         sel = list(sel)
         if not sel:
-            info_md.object = '_No galaxies selected._'
+            info_md.object       = '_No galaxies selected._'
             img_pane.object      = _BLANK_HTML
             sfh_pane.object      = _BLANK_HTML
             mean_sfh_pane.object = _BLANK_HTML
@@ -504,18 +514,14 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         fig_img, fig_sfh = _make_gallery(h5_path, h5_rows, d, rng)
         img_pane.object = _fig_to_html(fig_img)
         sfh_pane.object = _fig_to_html(fig_sfh)
-        if len(h5_rows) >= 20:
-            mean_sfh_pane.object = _fig_to_html(_mean_sfh_fig(h5_path, h5_rows))
-        else:
-            mean_sfh_pane.object = _BLANK_HTML
+        mean_sfh_pane.object = (
+            _fig_to_html(_mean_sfh_fig(h5_path, h5_rows))
+            if len(h5_rows) >= 20 else _BLANK_HTML
+        )
 
     def _on_resample(event):
         _refresh(src.selected.indices)
 
-    # Poll for selection changes every 350 ms.  This is more reliable than
-    # src.selected.on_change in Panel's server context because slow HDF5 I/O
-    # inside a Bokeh on_change callback can block the Tornado IOLoop and cause
-    # subsequent selection events to be silently dropped.
     _prev_key: list[tuple] = [()]
 
     def _poll():
@@ -525,8 +531,15 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         _prev_key[0] = key
         _refresh(list(src.selected.indices))
 
+    # wire up
     embed_w.param.watch(_update_embed, 'value')
-    color_w.param.watch(_update_color, 'value')
+    color_w1.param.watch(_make_color_cb('c1', mapper1, r_cont1, r_clust1, color_w1, cbar_w1), 'value')
+    color_w2.param.watch(_make_color_cb('c2', mapper2, r_cont2, r_clust2, color_w2, cbar_w2), 'value')
+    cbar_w1.param.watch(_make_cbar_cb(mapper1, color_w1), 'value')
+    cbar_w2.param.watch(_make_cbar_cb(mapper2, color_w2), 'value')
+    z_slider.param.watch(_on_z_filter, 'value')
+    if cluster_w is not None:
+        cluster_w.param.watch(_on_cluster_select, 'value')
     resample_btn.on_click(_on_resample)
     pn.state.add_periodic_callback(_poll, period=350)
 
@@ -535,8 +548,6 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         pn.pane.Markdown('## COSMOS-Web CLIP\n### Explorer'),
         pn.layout.Divider(),
         embed_w,
-        color_w,
-        cbar_slider,
         cluster_widget_row,
         pn.layout.Divider(),
         z_slider,
@@ -544,20 +555,23 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         info_md,
         resample_btn,
         pn.pane.Markdown(
-            '_Lasso or box-select points on the UMAP.  '
-            f'Up to {N_DISPLAY} random examples are shown.  '
-            'Click **New random sample** for a different draw._',
+            '_Lasso or box-select on either UMAP.  '
+            f'Up to {N_DISPLAY} random examples are shown._',
             styles={'font-size': '11px', 'color': '#888888'},
         ),
         width=220,
     )
 
     app = pn.Column(
-        pn.Row(pn.pane.Bokeh(plot), sidebar),
+        pn.Row(
+            pn.Column(color_w1, cbar_w1, pn.pane.Bokeh(plot1)),
+            pn.Column(color_w2, cbar_w2, pn.pane.Bokeh(plot2)),
+            sidebar,
+        ),
         pn.layout.Divider(),
         pn.Row(
-            pn.Column(pn.pane.Markdown('#### F277W stamps'), img_pane),
-            pn.Column(pn.pane.Markdown('#### CIGALE SFHs'),  sfh_pane),
+            pn.Column(pn.pane.Markdown('#### F277W stamps'),           img_pane),
+            pn.Column(pn.pane.Markdown('#### CIGALE SFHs'),            sfh_pane),
             pn.Column(pn.pane.Markdown('#### Mean SFH (all selected)'), mean_sfh_pane),
         ),
     )
