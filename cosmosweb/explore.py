@@ -336,12 +336,15 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     c1_s = _safe(key1)
     c2_s = _safe(key2)
 
+    _DYN_LABEL = 'Dynamic k-means'
+
     src = ColumnDataSource(dict(
         x           = xy0[:, 0].tolist(),
         y           = xy0[:, 1].tolist(),
         c1          = c1_s.tolist(),
         c2          = c2_s.tolist(),
         cluster_hex = d['cluster_hex'],
+        dyn_hex     = ['#cccccc'] * N,   # filled after on-the-fly k-means
     ))
 
     # ── shared redshift CDSView ───────────────────────────────────────────
@@ -377,19 +380,28 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
             selection_fill_color='white', selection_alpha=1.0,
             nonselection_alpha=0.12, visible=False,
         )
+        r_dyn = plot.scatter(
+            'x', 'y', source=src, view=z_view,
+            fill_color='dyn_hex', line_width=0,
+            size=2.5, alpha=0.8,
+            selection_fill_color='white', selection_alpha=1.0,
+            nonselection_alpha=0.15, visible=False,
+        )
         plot.add_layout(cbar, 'right')
         plot.xaxis.axis_label = 'UMAP 1'
         plot.yaxis.axis_label = 'UMAP 2'
-        return plot, mapper, r_cont, r_clust
+        return plot, mapper, r_cont, r_clust, r_dyn
 
-    plot1, mapper1, r_cont1, r_clust1 = _make_plot('c1', c1_s, 'Left UMAP — draw to select')
-    plot2, mapper2, r_cont2, r_clust2 = _make_plot('c2', c2_s, 'Right UMAP')
+    plot1, mapper1, r_cont1, r_clust1, r_dyn1 = _make_plot('c1', c1_s, 'Left UMAP — draw to select')
+    plot2, mapper2, r_cont2, r_clust2, r_dyn2 = _make_plot('c2', c2_s, 'Right UMAP')
 
     # ── per-plot colour widgets ───────────────────────────────────────────
+    keys_plus = keys + [_DYN_LABEL]   # includes dynamic option once computed
+
     def _make_color_widgets(init_key, init_safe, label_prefix):
         color_w = pn.widgets.Select(
             name=f'{label_prefix}: colour by',
-            options=keys, value=init_key, width=220,
+            options=keys_plus, value=init_key, width=220,
         )
         lo = float(np.nanpercentile(init_safe, 1))
         hi = float(np.nanpercentile(init_safe, 99))
@@ -452,15 +464,23 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         plot1.title.text = f'Left UMAP ({embed_w.value}) — draw to select'
         plot2.title.text = f'Right UMAP ({embed_w.value})'
 
-    def _make_color_cb(color_field, mapper, r_cont, r_clust, color_w, cbar_w):
+    def _set_renderers(r_cont, r_clust, r_dyn, mode):
+        """mode: 'cont' | 'clust' | 'dyn'"""
+        r_cont.visible  = (mode == 'cont')
+        r_clust.visible = (mode == 'clust')
+        r_dyn.visible   = (mode == 'dyn')
+
+    def _make_color_cb(color_field, mapper, r_cont, r_clust, r_dyn, color_w, cbar_w):
         def _cb(event):
-            if color_w.value == 'Cluster (HDBSCAN)':
-                r_cont.visible  = False
-                r_clust.visible = True
+            val = color_w.value
+            if val == 'Cluster (HDBSCAN)':
+                _set_renderers(r_cont, r_clust, r_dyn, 'clust')
                 return
-            r_cont.visible  = True
-            r_clust.visible = False
-            safe = _safe(color_w.value)
+            if val == _DYN_LABEL:
+                _set_renderers(r_cont, r_clust, r_dyn, 'dyn')
+                return
+            _set_renderers(r_cont, r_clust, r_dyn, 'cont')
+            safe = _safe(val)
             src.data[color_field] = safe.tolist()
             lo = float(np.nanpercentile(safe, 1))
             hi = float(np.nanpercentile(safe, 99))
@@ -473,10 +493,77 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
 
     def _make_cbar_cb(mapper, color_w):
         def _cb(event):
-            if color_w.value != 'Cluster (HDBSCAN)':
+            if color_w.value not in ('Cluster (HDBSCAN)', _DYN_LABEL):
                 mapper.low  = float(event.new[0])
                 mapper.high = float(event.new[1])
         return _cb
+
+    # ── on-the-fly property filter + k-means ─────────────────────────────
+    filter_prop_w = pn.widgets.Select(
+        name='Filter property', options=keys, value=keys[0] if keys else '', width=200,
+    )
+    _fp0  = _safe(keys[0]) if keys else np.zeros(N)
+    filter_range_w = pn.widgets.RangeSlider(
+        name='Filter range',
+        start=float(np.nanmin(_fp0)), end=float(np.nanmax(_fp0)),
+        value=(float(np.nanpercentile(_fp0, 1)), float(np.nanpercentile(_fp0, 99))),
+        step=max(float((np.nanmax(_fp0) - np.nanmin(_fp0)) / 200), 1e-6),
+        width=200,
+    )
+    k_input = pn.widgets.IntInput(name='k (clusters)', value=6, start=2, end=50, width=80)
+    cluster_btn = pn.widgets.Button(
+        name='Cluster filtered subset', button_type='success', width=200,
+    )
+    kmeans_info = pn.pane.Markdown('', width=210, styles={'font-size': '11px'})
+
+    def _on_filter_prop(event):
+        safe = _safe(filter_prop_w.value)
+        lo, hi = float(np.nanmin(safe)), float(np.nanmax(safe))
+        filter_range_w.start = lo
+        filter_range_w.end   = hi
+        filter_range_w.value = (float(np.nanpercentile(safe, 1)),
+                                 float(np.nanpercentile(safe, 99)))
+        filter_range_w.step  = max((hi - lo) / 200, 1e-6)
+
+    def _on_cluster_filtered(event):
+        from sklearn.cluster import KMeans
+        from bokeh.palettes import Turbo256
+
+        prop_vals = _safe(filter_prop_w.value)
+        flo, fhi  = filter_range_w.value
+        z_lo, z_hi = z_slider.value
+
+        prop_mask = (prop_vals >= flo) & (prop_vals <= fhi)
+        z_mask    = (z_safe >= z_lo) & (z_safe <= z_hi)
+        mask      = prop_mask & z_mask
+        idx       = np.where(mask)[0]
+        k         = k_input.value
+
+        if len(idx) < k:
+            kmeans_info.object = (f'⚠ Only **{len(idx)}** galaxies pass the '
+                                  f'filter — need ≥ k={k}.')
+            return
+
+        xy = np.column_stack([src.data['x'], src.data['y']])
+        km = KMeans(n_clusters=k, random_state=42, n_init='auto')
+        labels = km.fit_predict(xy[idx])
+
+        step = max(1, 256 // k)
+        pal  = [Turbo256[min(i * step, 255)] for i in range(k)]
+        dyn  = ['#cccccc'] * N
+        for i, gi in enumerate(idx):
+            dyn[gi] = pal[labels[i] % len(pal)]
+        src.data['dyn_hex'] = dyn
+
+        # switch left plot to dynamic view
+        color_w1.value = _DYN_LABEL
+
+        sizes = [int((labels == c).sum()) for c in range(k)]
+        kmeans_info.object = (
+            f'**{len(idx):,}** galaxies filtered → '
+            f'**{k}** clusters  \n'
+            + '  \n'.join(f'cluster {c}: {sizes[c]:,}' for c in range(k))
+        )
 
     def _on_z_filter(event):
         lo, hi = z_slider.value
@@ -533,13 +620,15 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
 
     # wire up
     embed_w.param.watch(_update_embed, 'value')
-    color_w1.param.watch(_make_color_cb('c1', mapper1, r_cont1, r_clust1, color_w1, cbar_w1), 'value')
-    color_w2.param.watch(_make_color_cb('c2', mapper2, r_cont2, r_clust2, color_w2, cbar_w2), 'value')
+    color_w1.param.watch(_make_color_cb('c1', mapper1, r_cont1, r_clust1, r_dyn1, color_w1, cbar_w1), 'value')
+    color_w2.param.watch(_make_color_cb('c2', mapper2, r_cont2, r_clust2, r_dyn2, color_w2, cbar_w2), 'value')
     cbar_w1.param.watch(_make_cbar_cb(mapper1, color_w1), 'value')
     cbar_w2.param.watch(_make_cbar_cb(mapper2, color_w2), 'value')
     z_slider.param.watch(_on_z_filter, 'value')
     if cluster_w is not None:
         cluster_w.param.watch(_on_cluster_select, 'value')
+    filter_prop_w.param.watch(_on_filter_prop, 'value')
+    cluster_btn.on_click(_on_cluster_filtered)
     resample_btn.on_click(_on_resample)
     pn.state.add_periodic_callback(_poll, period=350)
 
@@ -552,6 +641,13 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         pn.layout.Divider(),
         z_slider,
         pn.layout.Divider(),
+        pn.pane.Markdown('**Property filter → k-means**',
+                         styles={'font-size': '12px'}),
+        filter_prop_w,
+        filter_range_w,
+        pn.Row(k_input, cluster_btn),
+        kmeans_info,
+        pn.layout.Divider(),
         info_md,
         resample_btn,
         pn.pane.Markdown(
@@ -559,7 +655,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
             f'Up to {N_DISPLAY} random examples are shown._',
             styles={'font-size': '11px', 'color': '#888888'},
         ),
-        width=220,
+        width=230,
     )
 
     app = pn.Column(
