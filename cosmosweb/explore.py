@@ -347,10 +347,18 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         dyn_hex     = ['#cccccc'] * N,   # filled after on-the-fly k-means
     ))
 
-    # ── shared redshift CDSView ───────────────────────────────────────────
-    z_all  = d['redshifts']
-    z_safe = np.where(np.isfinite(z_all), z_all, -1.0)
-    z_view = CDSView(filter=BooleanFilter(booleans=[True] * N))
+    # ── combined visibility mask ──────────────────────────────────────────
+    # z_mask:   driven by the redshift slider
+    # prop_mask: driven by the property filter (all True until clustering runs)
+    # z_view holds the AND of both; hidden points are not rendered → not selectable
+    z_all     = d['redshifts']
+    z_safe    = np.where(np.isfinite(z_all), z_all, -1.0)
+    z_mask    = np.ones(N, dtype=bool)
+    prop_mask = np.ones(N, dtype=bool)   # updated when "Cluster filtered" fires
+    z_view    = CDSView(filter=BooleanFilter(booleans=[True] * N))
+
+    def _update_view():
+        z_view.filter.booleans = (z_mask & prop_mask).tolist()
 
     # ── helper: build one Bokeh plot panel ────────────────────────────────
     def _make_plot(color_field: str, init_safe: np.ndarray, title: str):
@@ -514,6 +522,9 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     cluster_btn = pn.widgets.Button(
         name='Cluster filtered subset', button_type='success', width=200,
     )
+    reset_btn = pn.widgets.Button(
+        name='Show all', button_type='light', width=95,
+    )
     kmeans_info = pn.pane.Markdown('', width=210, styles={'font-size': '11px'})
 
     def _on_filter_prop(event):
@@ -526,17 +537,17 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         filter_range_w.step  = max((hi - lo) / 200, 1e-6)
 
     def _on_cluster_filtered(event):
+        nonlocal prop_mask, z_mask
         from sklearn.cluster import KMeans
         from bokeh.palettes import Turbo256
 
-        prop_vals = _safe(filter_prop_w.value)
-        flo, fhi  = filter_range_w.value
+        prop_vals  = _safe(filter_prop_w.value)
+        flo, fhi   = filter_range_w.value
         z_lo, z_hi = z_slider.value
 
         prop_mask = (prop_vals >= flo) & (prop_vals <= fhi)
         z_mask    = (z_safe >= z_lo) & (z_safe <= z_hi)
-        mask      = prop_mask & z_mask
-        idx       = np.where(mask)[0]
+        idx       = np.where(prop_mask & z_mask)[0]
         k         = k_input.value
 
         if len(idx) < k:
@@ -544,8 +555,13 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
                                   f'filter — need ≥ k={k}.')
             return
 
-        xy = np.column_stack([src.data['x'], src.data['y']])
-        km = KMeans(n_clusters=k, random_state=42, n_init='auto')
+        # Update combined visibility — only filtered points shown
+        _update_view()
+        src.selected.indices = []
+        _refresh([])
+
+        xy     = np.column_stack([src.data['x'], src.data['y']])
+        km     = KMeans(n_clusters=k, random_state=42, n_init='auto')
         labels = km.fit_predict(xy[idx])
 
         step = max(1, 256 // k)
@@ -555,20 +571,29 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
             dyn[gi] = pal[labels[i] % len(pal)]
         src.data['dyn_hex'] = dyn
 
-        # switch left plot to dynamic view
+        # Switch left plot to dynamic view
         color_w1.value = _DYN_LABEL
 
         sizes = [int((labels == c).sum()) for c in range(k)]
         kmeans_info.object = (
-            f'**{len(idx):,}** galaxies filtered → '
-            f'**{k}** clusters  \n'
+            f'**{len(idx):,}** galaxies → **{k}** clusters  \n'
             + '  \n'.join(f'cluster {c}: {sizes[c]:,}' for c in range(k))
         )
 
+    def _on_reset(event):
+        nonlocal prop_mask, z_mask
+        prop_mask = np.ones(N, dtype=bool)
+        _update_view()
+        src.selected.indices = []
+        _refresh([])
+        kmeans_info.object = ''
+
     def _on_z_filter(event):
+        nonlocal z_mask
         lo, hi = z_slider.value
-        z_view.filter.booleans = [bool(lo <= z <= hi) for z in z_safe]
-        src.selected.indices   = []
+        z_mask = (z_safe >= lo) & (z_safe <= hi)
+        _update_view()
+        src.selected.indices = []
         _refresh([])
 
     def _on_cluster_select(event):
@@ -629,6 +654,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         cluster_w.param.watch(_on_cluster_select, 'value')
     filter_prop_w.param.watch(_on_filter_prop, 'value')
     cluster_btn.on_click(_on_cluster_filtered)
+    reset_btn.on_click(_on_reset)
     resample_btn.on_click(_on_resample)
     pn.state.add_periodic_callback(_poll, period=350)
 
@@ -646,6 +672,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
         filter_prop_w,
         filter_range_w,
         pn.Row(k_input, cluster_btn),
+        pn.Row(reset_btn),
         kmeans_info,
         pn.layout.Divider(),
         info_md,
