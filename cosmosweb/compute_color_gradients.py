@@ -89,6 +89,7 @@ def compute_gradients(
     chi2_max:        float = 5.0,
     BT_min:          float = 0.05,
     BT_max:          float = 0.95,
+    delta_max:       float = 2.0,
 ) -> Table:
     bd_catalog      = Path(bd_catalog)
     lephare_catalog = Path(lephare_catalog)
@@ -181,14 +182,17 @@ def compute_gradients(
     flag_size  = Re_bulge < Re_disk
     flag_mags  = (np.isfinite(bulge_f115) & np.isfinite(bulge_f277) &
                   np.isfinite(disk_f115)  & np.isfinite(disk_f277))
-    flag_good  = flag_chi2 & flag_BT & flag_size & flag_mags
+    # Reject unphysical colour gradients from degenerate fits
+    flag_range = np.abs(delta_col_115_277) < delta_max
+    flag_good  = flag_chi2 & flag_BT & flag_size & flag_mags & flag_range
 
     log.info("Quality cuts → %d / %d pass (%.1f %%)",
              flag_good.sum(), N, 100.0 * flag_good.sum() / max(N, 1))
-    log.info("  chi2 < %.1f          : %d", chi2_max, flag_chi2.sum())
+    log.info("  chi2 < %.1f          : %d", chi2_max,  flag_chi2.sum())
     log.info("  BT in [%.2f, %.2f]   : %d", BT_min, BT_max, flag_BT.sum())
     log.info("  Re_bulge < Re_disk   : %d", flag_size.sum())
     log.info("  all F115W/F277W finite: %d", flag_mags.sum())
+    log.info("  |delta_col| < %.1f   : %d", delta_max, flag_range.sum())
 
     # ── output table ──────────────────────────────────────────────────────────
     out = Table({
@@ -266,9 +270,14 @@ def parse_args() -> argparse.Namespace:
                    help='Photometry FITS file containing the id column (same row order)')
     p.add_argument('--output',          required=True,
                    help='Output FITS table path')
-    p.add_argument('--chi2_max',  type=float, default=5.0)
-    p.add_argument('--BT_min',    type=float, default=0.05)
-    p.add_argument('--BT_max',    type=float, default=0.95)
+    p.add_argument('--chi2_max',   type=float, default=5.0,
+                   help='Max B+D chi2')
+    p.add_argument('--BT_min',     type=float, default=0.05,
+                   help='Min B/T')
+    p.add_argument('--BT_max',     type=float, default=0.95,
+                   help='Max B/T')
+    p.add_argument('--delta_max',  type=float, default=2.0,
+                   help='Max |delta_col_115_277| in mag; rejects degenerate fits')
     p.add_argument('--merge_npz', default=None,
                    help='If given, merge results into this npz file')
     p.add_argument('--log_level', default='INFO',
@@ -290,6 +299,7 @@ def main() -> None:
         chi2_max=args.chi2_max,
         BT_min=args.BT_min,
         BT_max=args.BT_max,
+        delta_max=args.delta_max,
     )
 
     out_path = Path(args.output)

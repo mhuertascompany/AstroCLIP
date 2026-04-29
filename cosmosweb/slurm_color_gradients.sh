@@ -32,4 +32,5 @@ python -m cosmosweb.compute_color_gradients \
     --chi2_max        5.0 \
     --BT_min          0.05 \
     --BT_max          0.95 \
+    --delta_max       2.0 \
     --merge_npz       ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz
