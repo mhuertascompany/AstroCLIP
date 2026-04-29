@@ -18,16 +18,16 @@ REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
 CAT_DIR=/n23data2/cosmosweb/catalogs/DR1/data/catalog
 BD_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_bulgedisk.fits
-MASTER_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits
+LP_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits
 
 cd ${REPO_DIR}
 
 # ── step 1: compute gradients ─────────────────────────────────────────────────
 python -m cosmosweb.compute_color_gradients \
-    --bd_catalog     ${BD_CAT} \
-    --master_catalog ${MASTER_CAT} \
-    --output         ${OUTPUT_DIR}/color_gradients.fits \
-    --chi2_max       5.0 \
-    --BT_min         0.05 \
-    --BT_max         0.95 \
-    --merge_npz      ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz
+    --bd_catalog      ${BD_CAT} \
+    --lephare_catalog ${LP_CAT} \
+    --output          ${OUTPUT_DIR}/color_gradients.fits \
+    --chi2_max        5.0 \
+    --BT_min          0.05 \
+    --BT_max          0.95 \
+    --merge_npz       ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz
