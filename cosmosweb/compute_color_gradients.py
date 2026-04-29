@@ -73,7 +73,7 @@ Output
 Usage
 -----
   python -m cosmosweb.compute_color_gradients \\
-      --bd_catalog     /n03data/huertas/python/AstroCLIP/COSMOSWeb_mastercatalog_v1_bulgedisk.fits \\
+      --bd_catalog     /n23data2/cosmosweb/catalogs/DR1/data/catalog/COSMOSWeb_mastercatalog_v1_bulgedisk.fits \\
       --master_catalog /n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits \\
       --output         /n03data/huertas/COSMOS-Web/cosmosweb_clip/color_gradients.fits \\
       --chi2_max       5.0 \\
