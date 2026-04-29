@@ -175,10 +175,13 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
 
     # Bulge-disk colour gradients (optional — produced by compute_color_gradients.py)
     _cg_map = {
-        'delta_NUVr': 'ΔNUVr (bulge − disk)',
-        'NUVr_bulge': 'NUV-r bulge',
-        'NUVr_disk':  'NUV-r disk',
-        'BT':         'B/T ratio',
+        'delta_col_115_277': 'ΔF115W−F277W (bulge − disk)',
+        'col_bulge_115_277': 'F115W−F277W bulge',
+        'col_disk_115_277':  'F115W−F277W disk',
+        'delta_col_150_444': 'ΔF150W−F444W (bulge − disk)',
+        'col_bulge_150_444': 'F150W−F444W bulge',
+        'col_disk_150_444':  'F150W−F444W disk',
+        'BT':                'B/T ratio',
     }
     for npz_key, label in _cg_map.items():
         if npz_key in npz:
