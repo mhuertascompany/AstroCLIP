@@ -16,8 +16,9 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
-BD_CAT=/n23data2/cosmosweb/catalogs/DR1/data/catalog/COSMOSWeb_mastercatalog_v1_bulgedisk.fits
-MASTER_CAT=/n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits
+CAT_DIR=/n23data2/cosmosweb/catalogs/DR1/data/catalog
+BD_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_bulgedisk.fits
+MASTER_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits
 
 cd ${REPO_DIR}
 

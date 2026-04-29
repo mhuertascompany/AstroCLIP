@@ -18,9 +18,8 @@ Input catalogues
     Primary HDU: id, mag_model_bulge_<band>, mag_model_disk_<band>,
                  Re_bulge, Re_disk (deg), BT_jwst, chi2, …
 
-  COSMOSWeb_mastercatalog_v1.fits  (multi-extension master)
-    HDU 1  : photometry  (id, ra, dec, …)
-    HDU 2  : LePhare     (id, zfinal, mabs_NUV, mabs_r, …)
+  COSMOSWeb_mastercatalog_v1_lephare.fits  (standalone LePhare catalogue)
+    Primary HDU: id, zfinal, mabs_NUV, mabs_r, …
 
 Band pivot wavelengths [nm]
 ---------------------------
@@ -74,7 +73,7 @@ Usage
 -----
   python -m cosmosweb.compute_color_gradients \\
       --bd_catalog     /n23data2/cosmosweb/catalogs/DR1/data/catalog/COSMOSWeb_mastercatalog_v1_bulgedisk.fits \\
-      --master_catalog /n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits \\
+      --master_catalog /n23data2/cosmosweb/catalogs/DR1/data/catalog/COSMOSWeb_mastercatalog_v1_lephare.fits \\
       --output         /n03data/huertas/COSMOS-Web/cosmosweb_clip/color_gradients.fits \\
       --chi2_max       5.0 \\
       --BT_min         0.05 \\
@@ -272,16 +271,25 @@ def compute_gradients(
         log.info("B+D catalogue: %d rows, first columns: %s",
                  len(bd), bd.colnames[:20])
 
-    log.info("Opening master catalogue (LePhare): %s", master_catalog)
+    log.info("Opening LePhare catalogue: %s", master_catalog)
     with fits.open(master_catalog, memmap=True) as hdul:
         log.info("HDUs: %s", [h.name for h in hdul])
-        # ── LePhare photo-z (HDU 2) ──────────────────────────────────────────
-        lp = Table(hdul[2].data)
-        log.info("LePhare catalogue: %d rows", len(lp))
+        # Accept either a standalone file (primary data in HDU 1) or a
+        # multi-extension master catalogue (LePhare traditionally in HDU 2).
+        lp_hdu = next(h for h in hdul if h.data is not None)
+        lp = Table(lp_hdu.data)
+        log.info("LePhare catalogue: %d rows, first columns: %s",
+                 len(lp), lp.colnames[:10])
 
-    # Identify id column (may be 'id' or 'ID')
-    id_col_bd = next(c for c in bd.colnames if c.lower() == 'id')
-    id_col_lp = next(c for c in lp.colnames if c.lower() == 'id')
+    # Identify id column (may be 'id', 'ID', 'number', …)
+    id_col_bd = next((c for c in bd.colnames if c.lower() == 'id'), None)
+    id_col_lp = next((c for c in lp.colnames if c.lower() == 'id'), None)
+    if id_col_bd is None:
+        raise ValueError(
+            f"No 'id' column found in B+D catalogue. Columns: {bd.colnames[:30]}")
+    if id_col_lp is None:
+        raise ValueError(
+            f"No 'id' column found in LePhare catalogue. Columns: {lp.colnames[:30]}")
 
     # Keep only LePhare columns we need
     lp_keep = [id_col_lp, 'zfinal']
