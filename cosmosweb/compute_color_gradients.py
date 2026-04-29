@@ -192,12 +192,14 @@ def _interp_per_galaxy(
 def compute_gradients(
     bd_catalog:      str | Path,
     lephare_catalog: str | Path,
+    photom_catalog:  str | Path,
     chi2_max:        float = 5.0,
     BT_min:          float = 0.05,
     BT_max:          float = 0.95,
 ) -> Table:
     bd_catalog      = Path(bd_catalog)
     lephare_catalog = Path(lephare_catalog)
+    photom_catalog  = Path(photom_catalog)
 
     log.info("Reading B+D catalogue: %s", bd_catalog)
     bd = _read_primary(bd_catalog)
@@ -207,19 +209,25 @@ def compute_gradients(
     lp = _read_primary(lephare_catalog)
     log.info("  %d rows; first columns: %s", len(lp), lp.colnames[:10])
 
-    N = min(len(bd), len(lp))
-    if len(bd) != len(lp):
-        log.warning("Row count mismatch: B+D=%d, LePhare=%d — using first %d",
-                    len(bd), len(lp), N)
+    log.info("Reading photometry catalogue (id): %s", photom_catalog)
+    ph = _read_primary(photom_catalog)
+    log.info("  %d rows; first columns: %s", len(ph), ph.colnames[:10])
+
+    N = min(len(bd), len(lp), len(ph))
+    if not (len(bd) == len(lp) == len(ph)):
+        log.warning("Row count mismatch: B+D=%d, LePhare=%d, photom=%d — using first %d",
+                    len(bd), len(lp), len(ph), N)
     bd = bd[:N]
     lp = lp[:N]
+    ph = ph[:N]
 
-    # ── id and redshift from LePhare (positional match) ──────────────────────
-    id_col = next((c for c in lp.colnames if c.lower() == 'id'), None)
+    # ── id from photometry catalogue (positional match) ───────────────────────
+    id_col = next((c for c in ph.colnames if c.lower() == 'id'), None)
     if id_col is None:
-        raise ValueError(f"No 'id' column in LePhare. Columns: {lp.colnames[:30]}")
-    ids = np.array(lp[id_col], dtype=np.int64)
+        raise ValueError(f"No 'id' column in photom catalogue. Columns: {ph.colnames[:30]}")
+    ids = np.array(ph[id_col], dtype=np.int64)
 
+    # ── redshift from LePhare ─────────────────────────────────────────────────
     z_col = next((c for c in lp.colnames
                   if c.lower() in ('zfinal', 'z_phot', 'z')), None)
     if z_col is None:
@@ -371,7 +379,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--bd_catalog',      required=True,
                    help='Standalone B+D FITS file')
     p.add_argument('--lephare_catalog', required=True,
-                   help='Standalone LePhare FITS file (id + zfinal, same row order as B+D)')
+                   help='Standalone LePhare FITS file (zfinal, same row order as B+D)')
+    p.add_argument('--photom_catalog',  required=True,
+                   help='Photometry FITS file containing the id column (same row order)')
     p.add_argument('--output',          required=True,
                    help='Output FITS table path')
     p.add_argument('--chi2_max',  type=float, default=5.0)
@@ -394,6 +404,7 @@ def main() -> None:
     grad = compute_gradients(
         bd_catalog=args.bd_catalog,
         lephare_catalog=args.lephare_catalog,
+        photom_catalog=args.photom_catalog,
         chi2_max=args.chi2_max,
         BT_min=args.BT_min,
         BT_max=args.BT_max,

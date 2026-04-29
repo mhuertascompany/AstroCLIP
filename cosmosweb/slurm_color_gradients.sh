@@ -19,6 +19,7 @@ OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
 CAT_DIR=/n23data2/cosmosweb/catalogs/DR1/data/catalog
 BD_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_bulgedisk.fits
 LP_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_lephare.fits
+PH_CAT=${CAT_DIR}/COSMOSWeb_mastercatalog_v1_photom_primary.fits
 
 cd ${REPO_DIR}
 
@@ -26,6 +27,7 @@ cd ${REPO_DIR}
 python -m cosmosweb.compute_color_gradients \
     --bd_catalog      ${BD_CAT} \
     --lephare_catalog ${LP_CAT} \
+    --photom_catalog  ${PH_CAT} \
     --output          ${OUTPUT_DIR}/color_gradients.fits \
     --chi2_max        5.0 \
     --BT_min          0.05 \
