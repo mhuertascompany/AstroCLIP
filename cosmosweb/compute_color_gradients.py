@@ -12,13 +12,15 @@ All three are computed by interpolating the multi-band bulge/disk model
 magnitudes onto the observed wavelength that corresponds to the rest-frame
 NUV pivot (230 nm) and rest-frame r pivot (620 nm).
 
-Input catalogue
----------------
-  COSMOSWeb_mastercatalog_v1.fits
+Input catalogues
+----------------
+  COSMOSWeb_mastercatalog_v1_bulgedisk.fits   (standalone, no HDU extension)
+    Primary HDU: id, mag_model_bulge_<band>, mag_model_disk_<band>,
+                 Re_bulge, Re_disk (deg), BT_jwst, chi2, …
+
+  COSMOSWeb_mastercatalog_v1.fits  (multi-extension master)
     HDU 1  : photometry  (id, ra, dec, …)
-    HDU 2  : LePhare     (zfinal, mabs_NUV, mabs_r, …)
-    HDU 6  : B+D fits    (id, mag_model_bulge_<band>, mag_model_disk_<band>,
-                          Re_bulge, Re_disk (deg), BT_jwst, …)
+    HDU 2  : LePhare     (id, zfinal, mabs_NUV, mabs_r, …)
 
 Band pivot wavelengths [nm]
 ---------------------------
@@ -71,11 +73,12 @@ Output
 Usage
 -----
   python -m cosmosweb.compute_color_gradients \\
-      --catalog  /n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits \\
-      --output   /n03data/huertas/COSMOS-Web/cosmosweb_clip/color_gradients.fits \\
-      --chi2_max 5.0 \\
-      --BT_min   0.05 \\
-      --BT_max   0.95
+      --bd_catalog     /n03data/huertas/python/AstroCLIP/COSMOSWeb_mastercatalog_v1_bulgedisk.fits \\
+      --master_catalog /n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits \\
+      --output         /n03data/huertas/COSMOS-Web/cosmosweb_clip/color_gradients.fits \\
+      --chi2_max       5.0 \\
+      --BT_min         0.05 \\
+      --BT_max         0.95
 
   # To cross-match and merge with existing npz:
   python -m cosmosweb.compute_color_gradients --merge_npz <path>.npz
@@ -237,30 +240,43 @@ def _per_galaxy_interp(
 # ---------------------------------------------------------------------------
 
 def compute_gradients(
-    catalog_path: str | Path,
-    chi2_max:     float = 5.0,
-    BT_min:       float = 0.05,
-    BT_max:       float = 0.95,
+    bd_catalog:     str | Path,
+    master_catalog: str | Path,
+    chi2_max:       float = 5.0,
+    BT_min:         float = 0.05,
+    BT_max:         float = 0.95,
 ) -> Table:
     """
-    Read the master catalogue, apply quality cuts, compute colour gradients.
+    Read the B+D catalogue and master catalogue, apply quality cuts, compute
+    colour gradients.
+
+    Parameters
+    ----------
+    bd_catalog     : standalone B+D FITS file (primary HDU), e.g.
+                     COSMOSWeb_mastercatalog_v1_bulgedisk.fits
+    master_catalog : multi-extension master catalogue; LePhare is in HDU 2
+                     (for redshifts and optional absolute magnitudes)
 
     Returns an astropy Table with one row per *catalogue* galaxy (all B+D
     sources), with NaN for those that failed quality cuts.
     """
-    catalog_path = Path(catalog_path)
-    log.info("Opening %s", catalog_path)
+    bd_catalog     = Path(bd_catalog)
+    master_catalog = Path(master_catalog)
 
-    with fits.open(catalog_path, memmap=True) as hdul:
+    log.info("Opening B+D catalogue: %s", bd_catalog)
+    with fits.open(bd_catalog, memmap=True) as hdul:
         log.info("HDUs: %s", [h.name for h in hdul])
-
-        # ── B+D catalogue (HDU 6) ────────────────────────────────────────────
-        bd   = Table(hdul[6].data)
-        log.info("B+D catalogue: %d rows, columns: %s",
+        # Primary extension may be 0 (empty) or 1; pick the first with data
+        bd_hdu = next(h for h in hdul if h.data is not None)
+        bd     = Table(bd_hdu.data)
+        log.info("B+D catalogue: %d rows, first columns: %s",
                  len(bd), bd.colnames[:20])
 
+    log.info("Opening master catalogue (LePhare): %s", master_catalog)
+    with fits.open(master_catalog, memmap=True) as hdul:
+        log.info("HDUs: %s", [h.name for h in hdul])
         # ── LePhare photo-z (HDU 2) ──────────────────────────────────────────
-        lp   = Table(hdul[2].data)
+        lp = Table(hdul[2].data)
         log.info("LePhare catalogue: %d rows", len(lp))
 
     # Identify id column (may be 'id' or 'ID')
@@ -476,9 +492,11 @@ def parse_args() -> argparse.Namespace:
         description="Compute rest-frame NUV-r colour gradients from B+D catalogue",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('--catalog',    required=True,
-                   help='Path to COSMOSWeb_mastercatalog_v1.fits')
-    p.add_argument('--output',     required=True,
+    p.add_argument('--bd_catalog',     required=True,
+                   help='Standalone B+D FITS file (e.g. COSMOSWeb_mastercatalog_v1_bulgedisk.fits)')
+    p.add_argument('--master_catalog', required=True,
+                   help='Multi-extension master catalogue (LePhare redshifts in HDU 2)')
+    p.add_argument('--output',         required=True,
                    help='Output FITS table path')
     p.add_argument('--chi2_max',   type=float, default=5.0,
                    help='Max B+D chi2 for quality cut')
@@ -501,7 +519,8 @@ def main() -> None:
     )
 
     grad = compute_gradients(
-        catalog_path=args.catalog,
+        bd_catalog=args.bd_catalog,
+        master_catalog=args.master_catalog,
         chi2_max=args.chi2_max,
         BT_min=args.BT_min,
         BT_max=args.BT_max,

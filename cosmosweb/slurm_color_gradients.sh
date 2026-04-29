@@ -16,15 +16,17 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
+BD_CAT=${REPO_DIR}/COSMOSWeb_mastercatalog_v1_bulgedisk.fits
 MASTER_CAT=/n23data2/cosmosweb-public/DR1/data/COSMOSWeb_mastercatalog_v1.fits
 
 cd ${REPO_DIR}
 
 # ── step 1: compute gradients ─────────────────────────────────────────────────
 python -m cosmosweb.compute_color_gradients \
-    --catalog    ${MASTER_CAT} \
-    --output     ${OUTPUT_DIR}/color_gradients.fits \
-    --chi2_max   5.0 \
-    --BT_min     0.05 \
-    --BT_max     0.95 \
-    --merge_npz  ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz
+    --bd_catalog     ${BD_CAT} \
+    --master_catalog ${MASTER_CAT} \
+    --output         ${OUTPUT_DIR}/color_gradients.fits \
+    --chi2_max       5.0 \
+    --BT_min         0.05 \
+    --BT_max         0.95 \
+    --merge_npz      ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz
