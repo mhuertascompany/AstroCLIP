@@ -173,6 +173,20 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     if 'binary_disturbed' in npz:
         color_props['P(Disturbed)'] = npz['binary_disturbed'].astype(float)
 
+    # Bulge-disk colour gradients (optional — produced by compute_color_gradients.py)
+    _cg_map = {
+        'delta_NUVr': 'ΔNUVr (bulge − disk)',
+        'NUVr_bulge': 'NUV-r bulge',
+        'NUVr_disk':  'NUV-r disk',
+        'BT':         'B/T ratio',
+    }
+    for npz_key, label in _cg_map.items():
+        if npz_key in npz:
+            arr = npz[npz_key].astype(float)
+            # Replace non-finite values with NaN (quality-cut failures)
+            arr = np.where(np.isfinite(arr), arr, np.nan)
+            color_props[label] = arr
+
     # SFH shape descriptors computed directly from the HDF5
     h5_indices = npz['h5_indices'].astype(int)
     sfh_props  = _sfh_properties(h5_path, h5_indices)
