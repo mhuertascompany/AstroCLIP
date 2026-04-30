@@ -33,4 +33,5 @@ python -m cosmosweb.compute_color_gradients \
     --BT_min          0.05 \
     --BT_max          0.95 \
     --delta_max       2.0 \
+    --diagnostic_pdf  ${OUTPUT_DIR}/color_gradients_diagnostics.pdf \
     --merge_npz       ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz

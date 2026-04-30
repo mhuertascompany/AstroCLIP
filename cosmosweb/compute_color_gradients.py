@@ -201,6 +201,7 @@ def compute_gradients(
         'BT':                 BT,
         'Re_bulge_deg':       Re_bulge,
         'Re_disk_deg':        Re_disk,
+        'chi2':               chi2,
         'col_bulge_115_277':  col_bulge_115_277,
         'col_disk_115_277':   col_disk_115_277,
         'delta_col_115_277':  delta_col_115_277,
@@ -208,8 +209,223 @@ def compute_gradients(
         'col_disk_150_444':   col_disk_150_444,
         'delta_col_150_444':  delta_col_150_444,
         'flag_good':          flag_good,
+        # per-band magnitudes for diagnostics
+        'bulge_f115w':        bulge_f115,
+        'bulge_f150w':        bulge_f150,
+        'bulge_f277w':        bulge_f277,
+        'bulge_f444w':        bulge_f444,
+        'disk_f115w':         disk_f115,
+        'disk_f150w':         disk_f150,
+        'disk_f277w':         disk_f277,
+        'disk_f444w':         disk_f444,
     })
+
+    # per-band total mags for B/T computation (if available)
+    for band in ('f115w', 'f150w', 'f277w', 'f444w'):
+        col = f'mag_model_bd_total_{band}'
+        if col in bd.colnames:
+            out[f'total_{band}'] = _mag_array(bd, col)
+
     return out
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic plots
+# ---------------------------------------------------------------------------
+
+def make_diagnostic_pdf(grad: Table, pdf_path: str | Path) -> None:
+    """
+    Multi-page PDF with B/T and colour diagnostics.
+
+    Pages
+    -----
+    1. chi2 distribution (before/after quality cuts)
+    2. B/T from the catalogue + per-band B/T derived from fluxes
+    3. Observed F115W−F277W colours of bulge and disk, binned by redshift
+    4. Observed F150W−F444W colours of bulge and disk, binned by redshift
+    5. Colour gradient distributions (delta_col_115_277, delta_col_150_444)
+    6. delta_col_115_277 vs redshift (median per z-bin with scatter)
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    pdf_path = Path(pdf_path)
+    good = np.array(grad['flag_good'], dtype=bool)
+    z    = np.array(grad['z'],         dtype=float)
+
+    # z-bins for colour panels
+    z_edges = [0.0, 0.5, 1.0, 1.5, 2.5, 5.0]
+    z_labels = [f'{z_edges[i]:.1f} < z < {z_edges[i+1]:.1f}'
+                for i in range(len(z_edges) - 1)]
+    n_zbins  = len(z_labels)
+    z_colors = plt.cm.plasma(np.linspace(0.1, 0.9, n_zbins))
+
+    def _hist(ax, vals, mask, label, color, alpha=0.7, bins=60):
+        v = vals[mask & np.isfinite(vals)]
+        if len(v) == 0:
+            return
+        p5, p95 = np.nanpercentile(v, [2, 98])
+        ax.hist(v, bins=bins, range=(p5, p95),
+                histtype='step', color=color, label=label, alpha=alpha, density=True)
+
+    with PdfPages(str(pdf_path)) as pdf:
+
+        # ── Page 1: chi2 ──────────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(7, 4))
+        chi2 = np.array(grad['chi2'], dtype=float)
+        finite = np.isfinite(chi2)
+        p99 = float(np.nanpercentile(chi2[finite], 99))
+        ax.hist(chi2[finite], bins=100, range=(0, min(p99, 20)),
+                histtype='stepfilled', alpha=0.5, color='steelblue',
+                label=f'All ({finite.sum():,})', density=True)
+        ax.hist(chi2[good & finite], bins=100, range=(0, min(p99, 20)),
+                histtype='step', color='crimson', lw=1.5,
+                label=f'Quality cut ({good.sum():,})', density=True)
+        ax.set_xlabel('fmf_b+d_chi2')
+        ax.set_ylabel('Density')
+        ax.set_title('B+D fit chi2 distribution')
+        ax.legend()
+        fig.tight_layout()
+        pdf.savefig(fig); plt.close(fig)
+
+        # ── Page 2: B/T distributions ─────────────────────────────────────────
+        # Catalogue B/T + per-band B/T derived from flux ratios
+        BT_cat = np.array(grad['BT'], dtype=float)
+        bands  = ('f115w', 'f150w', 'f277w', 'f444w')
+        colors_b = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+
+        # Derive per-band B/T = flux_bulge / flux_total
+        per_band_BT = {}
+        for band in bands:
+            if f'total_{band}' in grad.colnames and f'bulge_{band}' in grad.colnames:
+                m_tot   = np.array(grad[f'total_{band}'],  dtype=float)
+                m_bulge = np.array(grad[f'bulge_{band}'],  dtype=float)
+                # BT = 10^(0.4*(m_tot - m_bulge))  [= f_bulge/f_total]
+                dm = m_tot - m_bulge
+                bt = np.where(np.isfinite(dm), 10 ** (0.4 * dm), np.nan)
+                bt = np.where((bt > 0) & (bt < 1), bt, np.nan)
+                per_band_BT[band] = bt
+
+        has_per_band = len(per_band_BT) > 0
+        n_panels = 1 + len(per_band_BT)
+        fig, axes = plt.subplots(1, n_panels, figsize=(4 * n_panels, 4),
+                                 sharey=False)
+        if n_panels == 1:
+            axes = [axes]
+
+        ax = axes[0]
+        v = BT_cat[good & np.isfinite(BT_cat)]
+        ax.hist(v, bins=50, histtype='stepfilled', alpha=0.6,
+                color='steelblue', density=True)
+        ax.set_xlabel('B/T (catalogue, BT_jwst)')
+        ax.set_ylabel('Density')
+        ax.set_title('Catalogue B/T')
+
+        for i, (band, bt) in enumerate(per_band_BT.items()):
+            ax = axes[i + 1]
+            v_all  = bt[np.isfinite(bt)]
+            v_good = bt[good & np.isfinite(bt)]
+            ax.hist(v_all,  bins=50, histtype='stepfilled', alpha=0.4,
+                    color=colors_b[i], density=True, label='all')
+            ax.hist(v_good, bins=50, histtype='step', lw=1.5,
+                    color=colors_b[i], density=True, label='quality cut')
+            ax.set_xlabel(f'B/T derived from {band.upper()}')
+            ax.set_title(f'B/T from {band.upper()}')
+            ax.legend(fontsize=8)
+
+        fig.suptitle('B/T ratio distributions', fontsize=12)
+        fig.tight_layout()
+        pdf.savefig(fig); plt.close(fig)
+
+        # ── Pages 3 & 4: colours per z-bin ───────────────────────────────────
+        for pair, col_b_key, col_d_key, pair_label in [
+            ('115_277', 'col_bulge_115_277', 'col_disk_115_277',  'F115W − F277W'),
+            ('150_444', 'col_bulge_150_444', 'col_disk_150_444',  'F150W − F444W'),
+        ]:
+            col_b = np.array(grad[col_b_key], dtype=float)
+            col_d = np.array(grad[col_d_key], dtype=float)
+
+            fig, axes = plt.subplots(1, n_zbins, figsize=(3.5 * n_zbins, 4),
+                                     sharey=False)
+            for i, (zlo, zhi, zlabel, zc) in enumerate(
+                    zip(z_edges[:-1], z_edges[1:], z_labels, z_colors)):
+                ax   = axes[i]
+                zmask = (z >= zlo) & (z < zhi) & good
+                _hist(ax, col_b, zmask, 'Bulge', color=zc,       alpha=0.85)
+                _hist(ax, col_d, zmask, 'Disk',  color='0.4',    alpha=0.55)
+                ax.set_xlabel(pair_label)
+                ax.set_title(f'{zlabel}\n(N={zmask.sum():,})', fontsize=8)
+                if i == 0:
+                    ax.set_ylabel('Density')
+                ax.legend(fontsize=7)
+
+            fig.suptitle(f'Observed-frame {pair_label}: bulge vs disk colour by redshift',
+                         fontsize=11)
+            fig.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
+        # ── Page 5: gradient distributions ────────────────────────────────────
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        for ax, key, label in [
+            (axes[0], 'delta_col_115_277', 'Δ(F115W−F277W)  [bulge − disk]'),
+            (axes[1], 'delta_col_150_444', 'Δ(F150W−F444W)  [bulge − disk]'),
+        ]:
+            vals = np.array(grad[key], dtype=float)
+            _hist(ax, vals, good, 'quality cut', color='steelblue', bins=80)
+            _hist(ax, vals, np.ones(len(vals), dtype=bool), 'all',
+                  color='0.6', bins=80, alpha=0.4)
+            ax.axvline(0, color='k', lw=0.8, ls='--')
+            ax.set_xlabel(label)
+            ax.set_ylabel('Density')
+            med = float(np.nanmedian(vals[good]))
+            ax.set_title(f'median = {med:+.3f} mag')
+            ax.legend(fontsize=8)
+
+        fig.suptitle('Colour gradient distributions', fontsize=12)
+        fig.tight_layout()
+        pdf.savefig(fig); plt.close(fig)
+
+        # ── Page 6: delta_col vs redshift ─────────────────────────────────────
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        for ax, key, label in [
+            (axes[0], 'delta_col_115_277', 'Δ(F115W−F277W)'),
+            (axes[1], 'delta_col_150_444', 'Δ(F150W−F444W)'),
+        ]:
+            vals  = np.array(grad[key], dtype=float)
+            z_mid = np.array([0.25, 0.75, 1.25, 2.0, 3.5])
+            medians, p16, p84 = [], [], []
+            for zlo, zhi in zip(z_edges[:-1], z_edges[1:]):
+                m = good & (z >= zlo) & (z < zhi) & np.isfinite(vals)
+                v = vals[m]
+                if len(v) > 10:
+                    medians.append(float(np.median(v)))
+                    p16.append(float(np.percentile(v, 16)))
+                    p84.append(float(np.percentile(v, 84)))
+                else:
+                    medians.append(np.nan); p16.append(np.nan); p84.append(np.nan)
+
+            # scatter (random subset)
+            rng  = np.random.default_rng(0)
+            idx  = np.where(good & np.isfinite(vals))[0]
+            idx  = rng.choice(idx, size=min(5000, len(idx)), replace=False)
+            ax.scatter(z[idx], vals[idx], s=1, alpha=0.2, color='0.6', rasterized=True)
+            ax.errorbar(z_mid, medians,
+                        yerr=[np.array(medians) - np.array(p16),
+                              np.array(p84) - np.array(medians)],
+                        fmt='o-', color='crimson', lw=1.5, ms=5,
+                        label='median ± 1σ')
+            ax.axhline(0, color='k', lw=0.8, ls='--')
+            ax.set_xlabel('Redshift z')
+            ax.set_ylabel(label)
+            ax.set_title(f'{label} vs redshift')
+            ax.legend(fontsize=8)
+
+        fig.tight_layout()
+        pdf.savefig(fig); plt.close(fig)
+
+    log.info("Diagnostic PDF → %s", pdf_path)
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +494,10 @@ def parse_args() -> argparse.Namespace:
                    help='Max B/T')
     p.add_argument('--delta_max',  type=float, default=2.0,
                    help='Max |delta_col_115_277| in mag; rejects degenerate fits')
-    p.add_argument('--merge_npz', default=None,
+    p.add_argument('--merge_npz',       default=None,
                    help='If given, merge results into this npz file')
+    p.add_argument('--diagnostic_pdf',  default=None,
+                   help='If given, write diagnostic plots to this PDF')
     p.add_argument('--log_level', default='INFO',
                    choices=['DEBUG', 'INFO', 'WARNING'])
     return p.parse_args()
@@ -306,6 +524,9 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     grad.write(str(out_path), overwrite=True)
     log.info("Wrote %d rows → %s", len(grad), out_path)
+
+    if args.diagnostic_pdf:
+        make_diagnostic_pdf(grad, args.diagnostic_pdf)
 
     if args.merge_npz:
         log.info("Merging into %s", args.merge_npz)
