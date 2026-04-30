@@ -314,52 +314,34 @@ def make_diagnostic_pdf(grad: Table, pdf_path: str | Path) -> None:
         fig.tight_layout()
         pdf.savefig(fig); plt.close(fig)
 
-        # ── Page 2: B/T distributions ─────────────────────────────────────────
-        # Catalogue B/T + per-band B/T derived from flux ratios
-        BT_cat = np.array(grad['BT'], dtype=float)
-        bands  = ('f115w', 'f150w', 'f277w', 'f444w')
+        # ── Page 2: per-band B/T distributions ───────────────────────────────
+        bands    = ('f115w', 'f150w', 'f277w', 'f444w')
         colors_b = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
 
-        # Derive per-band B/T = flux_bulge / flux_total
-        per_band_BT = {}
-        for band in bands:
-            if f'total_{band}' in grad.colnames and f'bulge_{band}' in grad.colnames:
-                m_tot   = np.array(grad[f'total_{band}'],  dtype=float)
-                m_bulge = np.array(grad[f'bulge_{band}'],  dtype=float)
-                # BT = 10^(0.4*(m_tot - m_bulge))  [= f_bulge/f_total]
-                dm = m_tot - m_bulge
-                bt = np.where(np.isfinite(dm), 10 ** (0.4 * dm), np.nan)
-                bt = np.where((bt > 0) & (bt < 1), bt, np.nan)
-                per_band_BT[band] = bt
+        per_band_BT = {b: np.array(grad[f'BT_{b}'], dtype=float)
+                       for b in bands if f'BT_{b}' in grad.colnames}
 
-        has_per_band = len(per_band_BT) > 0
-        n_panels = 1 + len(per_band_BT)
+        n_panels = max(len(per_band_BT), 1)
         fig, axes = plt.subplots(1, n_panels, figsize=(4 * n_panels, 4),
                                  sharey=False)
         if n_panels == 1:
             axes = [axes]
 
-        ax = axes[0]
-        v = BT_cat[good & np.isfinite(BT_cat)]
-        ax.hist(v, bins=50, histtype='stepfilled', alpha=0.6,
-                color='steelblue', density=True)
-        ax.set_xlabel('B/T (catalogue, BT_jwst)')
-        ax.set_ylabel('Density')
-        ax.set_title('Catalogue B/T')
-
         for i, (band, bt) in enumerate(per_band_BT.items()):
-            ax = axes[i + 1]
+            ax = axes[i]
             v_all  = bt[np.isfinite(bt)]
             v_good = bt[good & np.isfinite(bt)]
-            ax.hist(v_all,  bins=50, histtype='stepfilled', alpha=0.4,
+            ax.hist(v_all,  bins=50, range=(0, 1), histtype='stepfilled', alpha=0.4,
                     color=colors_b[i], density=True, label='all')
-            ax.hist(v_good, bins=50, histtype='step', lw=1.5,
+            ax.hist(v_good, bins=50, range=(0, 1), histtype='step', lw=1.5,
                     color=colors_b[i], density=True, label='quality cut')
-            ax.set_xlabel(f'B/T derived from {band.upper()}')
-            ax.set_title(f'B/T from {band.upper()}')
+            ax.set_xlabel(f'B/T ({band.upper()})')
+            ax.set_title(f'B/T from {band.upper()}\nall={len(v_all):,}  good={len(v_good):,}')
             ax.legend(fontsize=8)
+            if i == 0:
+                ax.set_ylabel('Density')
 
-        fig.suptitle('B/T ratio distributions', fontsize=12)
+        fig.suptitle('Per-band B/T ratio distributions', fontsize=12)
         fig.tight_layout()
         pdf.savefig(fig); plt.close(fig)
 
