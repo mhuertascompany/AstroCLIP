@@ -50,7 +50,9 @@ from astropy.io import fits
 
 log = logging.getLogger(__name__)
 
-APER_DIAMS  = [0.2, 0.3, 0.5, 0.75, 1.0]   # arcsec, index 0–4
+APER_DIAMS  = [0.2, 0.3, 0.5, 0.75, 1.0]   # arcsec (diameters), index 0–4
+# Annuli (radii): [0→0.1", 0.1"→0.15", 0.15"→0.25", 0.25"→0.375", 0.375"→0.5"]
+ANNULUS_LABELS = ['0–0.1"', '0.1–0.15"', '0.15–0.25"', '0.25–0.375"', '0.375–0.5"']
 SNR_MIN     = 3.0
 COL_MIN     = -5.0
 COL_MAX     =  5.0
@@ -83,6 +85,10 @@ def _load_cat(catalog_path: Path) -> tuple:
         ferr_aper_150 = _arr('flux_err_aper_f150w')  # (N, 5)
         flux_aper_444 = _arr('flux_aper_f444w')      # (N, 5)
         ferr_aper_444 = _arr('flux_err_aper_f444w')  # (N, 5)
+        flux_aper_115 = _arr('flux_aper_f115w')      # (N, 5)
+        ferr_aper_115 = _arr('flux_err_aper_f115w')  # (N, 5)
+        flux_aper_277 = _arr('flux_aper_f277w')      # (N, 5)
+        ferr_aper_277 = _arr('flux_err_aper_f277w')  # (N, 5)
         mag_auto_150  = _arr('mag_auto_f150w')       # (N,)
         mag_auto_444  = _arr('mag_auto_f444w')       # (N,)
 
@@ -90,6 +96,7 @@ def _load_cat(catalog_path: Path) -> tuple:
 
     return (ids, mag_aper_150, mag_aper_444, mag_aper_115, mag_aper_277,
             flux_aper_150, ferr_aper_150, flux_aper_444, ferr_aper_444,
+            flux_aper_115, ferr_aper_115, flux_aper_277, ferr_aper_277,
             mag_auto_150, mag_auto_444)
 
 
@@ -105,6 +112,44 @@ def _col(mag1, mag2):
     c = mag1 - mag2
     c[~np.isfinite(c)] = np.nan
     return c.astype(np.float32)
+
+
+def _flux_to_col(f1, f2, col_min=COL_MIN, col_max=COL_MAX):
+    """
+    Colour from two flux arrays (same band pair, same annulus).
+    Returns NaN where either flux is non-positive or result out of range.
+    """
+    with np.errstate(divide='ignore', invalid='ignore'):
+        c = -2.5 * np.log10(f1 / f2)
+    c = np.where(np.isfinite(c), c, np.nan)
+    c = np.where((c >= col_min) & (c <= col_max), c, np.nan)
+    return c.astype(np.float32)
+
+
+def _annular_fluxes(flux_aper: np.ndarray,
+                    ferr_aper: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert cumulative aperture fluxes to annular fluxes.
+
+    f_ann[:,0] = f_aper[:,0]                     (core = innermost aperture)
+    f_ann[:,i] = f_aper[:,i] - f_aper[:,i-1]     (ring i)
+    σ²_ann[:,i] = σ²_aper[:,i] + σ²_aper[:,i-1]
+    σ_ann[:,0]  = σ_aper[:,0]
+
+    Returns (f_ann, ferr_ann), each shape (N, 5).
+    """
+    N, K = flux_aper.shape
+    f_ann    = np.empty((N, K), dtype=np.float64)
+    ferr_ann = np.empty((N, K), dtype=np.float64)
+
+    f_ann[:, 0]    = flux_aper[:, 0]
+    ferr_ann[:, 0] = ferr_aper[:, 0]
+
+    for i in range(1, K):
+        f_ann[:, i]    = flux_aper[:, i] - flux_aper[:, i - 1]
+        ferr_ann[:, i] = np.sqrt(ferr_aper[:, i]**2 + ferr_aper[:, i - 1]**2)
+
+    return f_ann, ferr_ann
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +170,7 @@ def compute_aperture_gradients(
     catalog_path = Path(catalog_path)
     (ids, mag150, mag444, mag115, mag277,
      fl150, fe150, fl444, fe444,
+     fl115, fe115, fl277, fe277,
      mag_auto150, mag_auto444) = _load_cat(catalog_path)
 
     N = len(ids)
@@ -149,6 +195,44 @@ def compute_aperture_gradients(
         c2[~ok_150_444]                     = np.nan   # reuse spatial mask
         c2[(c2 < col_min) | (c2 > col_max)] = np.nan
         cols[f'col_aper{i}_115_277'] = c2
+
+    # ── annular colours ───────────────────────────────────────────────────────
+    # Derive per-annulus fluxes: f_ann[i] = f_aper[i] - f_aper[i-1]
+    f_ann150, fe_ann150 = _annular_fluxes(fl150, fe150)
+    f_ann444, fe_ann444 = _annular_fluxes(fl444, fe444)
+    f_ann115, fe_ann115 = _annular_fluxes(fl115, fe115)
+    f_ann277, fe_ann277 = _annular_fluxes(fl277, fe277)
+
+    for i, label in enumerate(ANNULUS_LABELS):
+        # F150W − F444W
+        ok = _quality_mask(f_ann150[:, i], fe_ann150[:, i],
+                           f_ann444[:, i], fe_ann444[:, i], snr_min)
+        c = _flux_to_col(f_ann150[:, i], f_ann444[:, i], col_min, col_max)
+        c[~ok] = np.nan
+        cols[f'col_ann{i}_150_444'] = c
+        log.info("col_ann%d_150_444 (%s): %d finite", i, label, np.isfinite(c).sum())
+
+        # F115W − F277W
+        ok2 = _quality_mask(f_ann115[:, i], fe_ann115[:, i],
+                            f_ann277[:, i], fe_ann277[:, i], snr_min)
+        c2 = _flux_to_col(f_ann115[:, i], f_ann277[:, i], col_min, col_max)
+        c2[~ok2] = np.nan
+        cols[f'col_ann{i}_115_277'] = c2
+
+    # Gradients: core annulus (0) vs outer annuli
+    for outer in (4, 3):
+        key = f'grad_ann_150_444_0v{outer}'
+        g   = cols['col_ann0_150_444'] - cols[f'col_ann{outer}_150_444']
+        g[~np.isfinite(g)] = np.nan
+        cols[key] = g
+        log.info("%s: %d finite, median=%+.3f", key, np.isfinite(g).sum(),
+                 float(np.nanmedian(g)) if np.isfinite(g).any() else np.nan)
+
+    key2 = 'grad_ann_115_277_0v4'
+    g2   = cols['col_ann0_115_277'] - cols['col_ann4_115_277']
+    g2[~np.isfinite(g2)] = np.nan
+    cols[key2] = g2
+    log.info("%s: %d finite", key2, np.isfinite(g2).sum())
 
     # ── auto (Kron) colour ────────────────────────────────────────────────────
     c_auto = _col(mag_auto150, mag_auto444)

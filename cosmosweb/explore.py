@@ -199,6 +199,13 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     _aper_map['grad_150_444_1v4']    = 'ΔF150W−F444W 0.3"−1.0" (gradient)'
     _aper_map['grad_150_444_2v4']    = 'ΔF150W−F444W 0.5"−1.0" (gradient)'
     _aper_map['grad_115_277_1v4']    = 'ΔF115W−F277W 0.3"−1.0" (gradient)'
+    _ANNULUS_LABELS = ['0–0.1"', '0.1–0.15"', '0.15–0.25"', '0.25–0.375"', '0.375–0.5"']
+    for i, ann in enumerate(_ANNULUS_LABELS):
+        _aper_map[f'col_ann{i}_150_444'] = f'F150W−F444W annulus {ann}'
+        _aper_map[f'col_ann{i}_115_277'] = f'F115W−F277W annulus {ann}'
+    _aper_map['grad_ann_150_444_0v4'] = 'ΔF150W−F444W core−outermost annulus'
+    _aper_map['grad_ann_150_444_0v3'] = 'ΔF150W−F444W core−3rd annulus'
+    _aper_map['grad_ann_115_277_0v4'] = 'ΔF115W−F277W core−outermost annulus'
     for npz_key, label in _aper_map.items():
         if npz_key in npz:
             arr = npz[npz_key].astype(float)
