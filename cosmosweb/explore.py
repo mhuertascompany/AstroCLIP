@@ -364,9 +364,15 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     # ── shared data source ────────────────────────────────────────────────
     # c1 / c2 are the colour fields for the left and right plots respectively.
     def _safe(key):
+        """Impute NaN → median; used only for filter/range-slider bounds."""
         vals = d['color_props'].get(key, np.zeros(N))
         med  = np.nanmedian(vals[np.isfinite(vals)]) if np.any(np.isfinite(vals)) else 0.0
         return np.where(np.isfinite(vals), vals, med)
+
+    def _raw(key):
+        """Return colour values with NaN preserved; NaN points are hidden by nan_color."""
+        vals = d['color_props'].get(key, np.full(N, np.nan))
+        return np.where(np.isfinite(vals), vals, np.nan).astype(np.float64)
 
     # Default: first key left, second key right (usually a morphology vs SFH split)
     key1 = keys[0] if keys else ''
@@ -379,8 +385,8 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     src = ColumnDataSource(dict(
         x           = xy0[:, 0].tolist(),
         y           = xy0[:, 1].tolist(),
-        c1          = c1_s.tolist(),
-        c2          = c2_s.tolist(),
+        c1          = _raw(key1).tolist(),
+        c2          = _raw(key2).tolist(),
         cluster_hex = d['cluster_hex'],
         dyn_hex     = ['#cccccc'] * N,   # filled after on-the-fly k-means
     ))
@@ -404,7 +410,8 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     def _make_plot(color_field: str, init_safe: np.ndarray, title: str):
         lo = float(np.nanpercentile(init_safe, 1))
         hi = float(np.nanpercentile(init_safe, 99))
-        mapper = LinearColorMapper(palette=Plasma256, low=lo, high=hi)
+        mapper = LinearColorMapper(palette=Plasma256, low=lo, high=hi,
+                                   nan_color=(0, 0, 0, 0))
         cbar   = ColorBar(color_mapper=mapper, ticker=BasicTicker(),
                           label_standoff=8, width=12, location=(0, 0))
         plot = bk_figure(
@@ -528,8 +535,9 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
                 _set_renderers(r_cont, r_clust, r_dyn, 'dyn')
                 return
             _set_renderers(r_cont, r_clust, r_dyn, 'cont')
-            safe = _safe(val)
-            src.data[color_field] = safe.tolist()
+            raw  = _raw(val)
+            safe = _safe(val)   # for range-slider bounds only
+            src.data[color_field] = raw.tolist()
             lo = float(np.nanpercentile(safe, 1))
             hi = float(np.nanpercentile(safe, 99))
             mapper.low  = lo
