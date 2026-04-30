@@ -377,7 +377,9 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     z_view    = CDSView(filter=BooleanFilter(booleans=[True] * N))
 
     def _update_view():
-        z_view.filter.booleans = (z_mask & prop_mask).tolist()
+        # Replace the filter object (not mutate in place) so Bokeh reliably
+        # detects the property change and pushes it to the browser.
+        z_view.filter = BooleanFilter(booleans=(z_mask & prop_mask).tolist())
 
     # ── helper: build one Bokeh plot panel ────────────────────────────────
     def _make_plot(color_field: str, init_safe: np.ndarray, title: str):
@@ -555,6 +557,14 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
                                  float(np.nanpercentile(safe, 99)))
         filter_range_w.step  = max((hi - lo) / 200, 1e-6)
 
+    def _on_filter_range(event):
+        """Live update: filter_range_w moved → update visibility immediately."""
+        nonlocal prop_mask
+        prop_vals = _safe(filter_prop_w.value)
+        flo, fhi  = filter_range_w.value
+        prop_mask = (prop_vals >= flo) & (prop_vals <= fhi)
+        _update_view()
+
     def _on_cluster_filtered(event):
         nonlocal prop_mask, z_mask
         from sklearn.cluster import KMeans
@@ -672,6 +682,7 @@ def build_app(h5_path: Path, d: dict) -> pn.viewable.Viewable:
     if cluster_w is not None:
         cluster_w.param.watch(_on_cluster_select, 'value')
     filter_prop_w.param.watch(_on_filter_prop, 'value')
+    filter_range_w.param.watch(_on_filter_range, 'value')
     cluster_btn.on_click(_on_cluster_filtered)
     reset_btn.on_click(_on_reset)
     resample_btn.on_click(_on_resample)
