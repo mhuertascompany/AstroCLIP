@@ -211,6 +211,25 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
             arr = npz[npz_key].astype(float)
             color_props[label] = np.where(np.isfinite(arr), arr, np.nan)
 
+    # Rest-frame Balmer-break colour gradients (produced by compute_restframe_gradient.py)
+    # Filter pair is chosen per galaxy so that the Balmer break (3646 Å) falls between the
+    # two filters: F814W/F115W (z 1.2-2.2), F115W/F150W (z 2.2-3.1), F150W/F277W (z 3.1-6.6)
+    _rf_map = {}
+    _APER_DIAMS_RF = ['0.2"', '0.3"', '0.5"', '0.75"', '1.0"']
+    for i, diam in enumerate(_APER_DIAMS_RF):
+        _rf_map[f'col_rf_aper{i}'] = f'Balmer break colour aper {diam} (rest-frame)'
+    for i, ann in enumerate(_ANNULUS_LABELS):
+        _rf_map[f'col_rf_ann{i}'] = f'Balmer break colour annulus {ann} (rest-frame)'
+    _rf_map['grad_rf_1v4']     = 'ΔBalmer break 0.3"−1.0" (rest-frame gradient)'
+    _rf_map['grad_rf_2v4']     = 'ΔBalmer break 0.5"−1.0" (rest-frame gradient)'
+    _rf_map['grad_rf_ann_0v4'] = 'ΔBalmer break core−outermost annulus (rest-frame)'
+    _rf_map['grad_rf_ann_0v3'] = 'ΔBalmer break core−3rd annulus (rest-frame)'
+    _rf_map['rf_pair']         = 'Rest-frame pair index (0=F814/115, 1=F115/150, 2=F150/277)'
+    for npz_key, label in _rf_map.items():
+        if npz_key in npz:
+            arr = npz[npz_key].astype(float)
+            color_props[label] = np.where(np.isfinite(arr), arr, np.nan)
+
     # SFH shape descriptors computed directly from the HDF5
     h5_indices = npz['h5_indices'].astype(int)
     sfh_props  = _sfh_properties(h5_path, h5_indices)
