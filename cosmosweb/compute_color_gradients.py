@@ -87,9 +87,10 @@ def compute_gradients(
     lephare_catalog: str | Path,
     photom_catalog:  str | Path,
     chi2_max:        float = 5.0,
-    BT_min:          float = 0.05,
-    BT_max:          float = 0.95,
-    delta_max:       float = 2.0,
+    col_min:         float = -7.0,
+    col_max:         float =  7.0,
+    delta_min:       float = -6.0,
+    delta_max:       float = 10.0,
 ) -> Table:
     bd_catalog      = Path(bd_catalog)
     lephare_catalog = Path(lephare_catalog)
@@ -134,14 +135,6 @@ def compute_gradients(
     chi2 = _mag_array(bd, 'fmf_b+d_chi2') if 'fmf_b+d_chi2' in bd.colnames \
            else np.zeros(N, dtype=np.float32)
 
-    bt_col = next((c for c in bd.colnames
-                   if c.lower() in ('bt_jwst', 'bt_f277w', 'bt_f150w', 'bt')), None)
-    BT = _mag_array(bd, bt_col) if bt_col else np.full(N, 0.5, dtype=np.float32)
-    if bt_col:
-        log.info("B/T column: '%s'", bt_col)
-    else:
-        log.warning("No B/T column found; B/T quality cut skipped")
-
     Re_bulge = _mag_array(bd, 'bulge_radius_deg') if 'bulge_radius_deg' in bd.colnames \
                else np.zeros(N, dtype=np.float32)
     Re_disk  = _mag_array(bd, 'disk_radius_deg')  if 'disk_radius_deg'  in bd.colnames \
@@ -175,33 +168,64 @@ def compute_gradients(
     col_disk_150_444  = disk_f150  - disk_f444
     delta_col_150_444 = col_bulge_150_444 - col_disk_150_444
 
+    # ── per-band B/T from flux ratios ─────────────────────────────────────────
+    # BT_band = f_bulge / f_total = 10^(0.4*(m_total - m_bulge))
+    # BT_jwst from the catalogue is always ~0.5 (useless); derive per-band instead.
+    def _band_BT(band: str) -> np.ndarray:
+        tot_col   = f'mag_model_bd_total_{band}'
+        bulge_col = f'mag_model_bulge_{band}'
+        if tot_col not in bd.colnames or bulge_col not in bd.colnames:
+            return np.full(N, np.nan, dtype=np.float32)
+        m_tot   = _mag_array(bd, tot_col)
+        m_bulge = _mag_array(bd, bulge_col)
+        dm  = m_tot - m_bulge
+        bt  = np.where(np.isfinite(dm), 10.0 ** (0.4 * dm), np.nan)
+        bt  = np.where((bt > 0) & (bt <= 1), bt, np.nan)
+        return bt.astype(np.float32)
+
+    BT_f115w = _band_BT('f115w')
+    BT_f150w = _band_BT('f150w')
+    BT_f277w = _band_BT('f277w')
+    BT_f444w = _band_BT('f444w')
+    log.info("Per-band B/T (finite): F115W=%d  F150W=%d  F277W=%d  F444W=%d",
+             np.isfinite(BT_f115w).sum(), np.isfinite(BT_f150w).sum(),
+             np.isfinite(BT_f277w).sum(), np.isfinite(BT_f444w).sum())
+
     # ── quality flags ─────────────────────────────────────────────────────────
+    # Primary pair: F150W−F444W
     flag_chi2  = chi2 < chi2_max
-    flag_BT    = (BT >= BT_min) & (BT <= BT_max) if bt_col \
-                 else np.ones(N, dtype=bool)
     flag_size  = Re_bulge < Re_disk
-    flag_mags  = (np.isfinite(bulge_f115) & np.isfinite(bulge_f277) &
-                  np.isfinite(disk_f115)  & np.isfinite(disk_f277))
-    # Reject unphysical colour gradients from degenerate fits
-    flag_range = np.abs(delta_col_115_277) < delta_max
-    flag_good  = flag_chi2 & flag_BT & flag_size & flag_mags & flag_range
+    flag_mags  = (np.isfinite(bulge_f150) & np.isfinite(bulge_f444) &
+                  np.isfinite(disk_f150)  & np.isfinite(disk_f444))
+    # Hard colour cuts to remove degenerate fits
+    flag_col   = ((col_bulge_150_444 >= col_min) & (col_bulge_150_444 <= col_max) &
+                  (col_disk_150_444  >= col_min) & (col_disk_150_444  <= col_max) &
+                  (col_bulge_115_277 >= col_min) & (col_bulge_115_277 <= col_max) &
+                  (col_disk_115_277  >= col_min) & (col_disk_115_277  <= col_max))
+    flag_delta = ((delta_col_150_444 >= delta_min) & (delta_col_150_444 <= delta_max))
+    flag_good  = flag_chi2 & flag_size & flag_mags & flag_col & flag_delta
 
     log.info("Quality cuts → %d / %d pass (%.1f %%)",
              flag_good.sum(), N, 100.0 * flag_good.sum() / max(N, 1))
-    log.info("  chi2 < %.1f          : %d", chi2_max,  flag_chi2.sum())
-    log.info("  BT in [%.2f, %.2f]   : %d", BT_min, BT_max, flag_BT.sum())
-    log.info("  Re_bulge < Re_disk   : %d", flag_size.sum())
-    log.info("  all F115W/F277W finite: %d", flag_mags.sum())
-    log.info("  |delta_col| < %.1f   : %d", delta_max, flag_range.sum())
+    log.info("  chi2 < %.1f            : %d", chi2_max,   flag_chi2.sum())
+    log.info("  Re_bulge < Re_disk     : %d", flag_size.sum())
+    log.info("  F150W/F444W finite     : %d", flag_mags.sum())
+    log.info("  colours in [%.1f, %.1f]: %d", col_min, col_max, flag_col.sum())
+    log.info("  delta in [%.1f, %.1f]  : %d", delta_min, delta_max, flag_delta.sum())
 
     # ── output table ──────────────────────────────────────────────────────────
     out = Table({
         'id':                 ids,
         'z':                  z,
-        'BT':                 BT,
         'Re_bulge_deg':       Re_bulge,
         'Re_disk_deg':        Re_disk,
         'chi2':               chi2,
+        # Per-band B/T (derived from flux ratios)
+        'BT_f115w':           BT_f115w,
+        'BT_f150w':           BT_f150w,
+        'BT_f277w':           BT_f277w,
+        'BT_f444w':           BT_f444w,
+        # Colours
         'col_bulge_115_277':  col_bulge_115_277,
         'col_disk_115_277':   col_disk_115_277,
         'delta_col_115_277':  delta_col_115_277,
@@ -209,7 +233,7 @@ def compute_gradients(
         'col_disk_150_444':   col_disk_150_444,
         'delta_col_150_444':  delta_col_150_444,
         'flag_good':          flag_good,
-        # per-band magnitudes for diagnostics
+        # per-band magnitudes kept for diagnostics
         'bulge_f115w':        bulge_f115,
         'bulge_f150w':        bulge_f150,
         'bulge_f277w':        bulge_f277,
@@ -220,7 +244,7 @@ def compute_gradients(
         'disk_f444w':         disk_f444,
     })
 
-    # per-band total mags for B/T computation (if available)
+    # per-band total mags (kept for diagnostics in make_diagnostic_pdf)
     for band in ('f115w', 'f150w', 'f277w', 'f444w'):
         col = f'mag_model_bd_total_{band}'
         if col in bd.colnames:
@@ -446,9 +470,9 @@ def merge_with_npz(grad_table: Table, npz_path: str | Path) -> None:
     grad_id = np.array(grad_table['id'], dtype=np.int64)
     id2idx  = {gid: i for i, gid in enumerate(grad_id)}
 
-    for col in ['delta_col_115_277', 'col_bulge_115_277', 'col_disk_115_277',
-                'delta_col_150_444', 'col_bulge_150_444', 'col_disk_150_444',
-                'BT']:
+    for col in ['delta_col_150_444', 'col_bulge_150_444', 'col_disk_150_444',
+                'delta_col_115_277', 'col_bulge_115_277', 'col_disk_115_277',
+                'BT_f115w', 'BT_f150w', 'BT_f277w', 'BT_f444w']:
         arr = np.full(N_npz, np.nan, dtype=np.float32)
         for j, gid in enumerate(npz_ids):
             if gid in id2idx:
@@ -488,12 +512,14 @@ def parse_args() -> argparse.Namespace:
                    help='Output FITS table path')
     p.add_argument('--chi2_max',   type=float, default=5.0,
                    help='Max B+D chi2')
-    p.add_argument('--BT_min',     type=float, default=0.05,
-                   help='Min B/T')
-    p.add_argument('--BT_max',     type=float, default=0.95,
-                   help='Max B/T')
-    p.add_argument('--delta_max',  type=float, default=2.0,
-                   help='Max |delta_col_115_277| in mag; rejects degenerate fits')
+    p.add_argument('--col_min',    type=float, default=-7.0,
+                   help='Min allowed value for individual component colours [mag]')
+    p.add_argument('--col_max',    type=float, default=7.0,
+                   help='Max allowed value for individual component colours [mag]')
+    p.add_argument('--delta_min',  type=float, default=-6.0,
+                   help='Min allowed delta_col_150_444 [mag]')
+    p.add_argument('--delta_max',  type=float, default=10.0,
+                   help='Max allowed delta_col_150_444 [mag]')
     p.add_argument('--merge_npz',       default=None,
                    help='If given, merge results into this npz file')
     p.add_argument('--diagnostic_pdf',  default=None,
@@ -515,8 +541,9 @@ def main() -> None:
         lephare_catalog=args.lephare_catalog,
         photom_catalog=args.photom_catalog,
         chi2_max=args.chi2_max,
-        BT_min=args.BT_min,
-        BT_max=args.BT_max,
+        col_min=args.col_min,
+        col_max=args.col_max,
+        delta_min=args.delta_min,
         delta_max=args.delta_max,
     )
 

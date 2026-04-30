@@ -30,8 +30,9 @@ python -m cosmosweb.compute_color_gradients \
     --photom_catalog  ${PH_CAT} \
     --output          ${OUTPUT_DIR}/color_gradients.fits \
     --chi2_max        5.0 \
-    --BT_min          0.05 \
-    --BT_max          0.95 \
-    --delta_max       2.0 \
+    --col_min        -7.0 \
+    --col_max         7.0 \
+    --delta_min      -6.0 \
+    --delta_max      10.0 \
     --diagnostic_pdf  ${OUTPUT_DIR}/color_gradients_diagnostics.pdf \
     --merge_npz       ${OUTPUT_DIR}/cosmosweb_umap_zoobot_v2.npz
