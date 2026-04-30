@@ -173,24 +173,36 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     if 'binary_disturbed' in npz:
         color_props['P(Disturbed)'] = npz['binary_disturbed'].astype(float)
 
-    # Bulge-disk colour gradients (optional — produced by compute_color_gradients.py)
-    _cg_map = {
-        'delta_col_150_444': 'ΔF150W−F444W (bulge − disk)',
-        'col_bulge_150_444': 'F150W−F444W bulge',
-        'col_disk_150_444':  'F150W−F444W disk',
-        'delta_col_115_277': 'ΔF115W−F277W (bulge − disk)',
-        'col_bulge_115_277': 'F115W−F277W bulge',
-        'col_disk_115_277':  'F115W−F277W disk',
+    # B+D colour gradients (optional — produced by compute_color_gradients.py)
+    _bd_map = {
+        'delta_col_150_444': 'ΔF150W−F444W B+D (bulge − disk)',
+        'col_bulge_150_444': 'F150W−F444W B+D bulge',
+        'col_disk_150_444':  'F150W−F444W B+D disk',
+        'delta_col_115_277': 'ΔF115W−F277W B+D (bulge − disk)',
         'BT_f115w':          'B/T (F115W)',
         'BT_f150w':          'B/T (F150W)',
         'BT_f277w':          'B/T (F277W)',
         'BT_f444w':          'B/T (F444W)',
     }
-    for npz_key, label in _cg_map.items():
+    for npz_key, label in _bd_map.items():
         if npz_key in npz:
             arr = npz[npz_key].astype(float)
-            arr = np.where(np.isfinite(arr), arr, np.nan)
-            color_props[label] = arr
+            color_props[label] = np.where(np.isfinite(arr), arr, np.nan)
+
+    # Aperture colour gradients (optional — produced by compute_aperture_gradients.py)
+    _APER_DIAMS = ['0.2"', '0.3"', '0.5"', '0.75"', '1.0"']
+    _aper_map = {}
+    for i, diam in enumerate(_APER_DIAMS):
+        _aper_map[f'col_aper{i}_150_444'] = f'F150W−F444W aper {diam}'
+        _aper_map[f'col_aper{i}_115_277'] = f'F115W−F277W aper {diam}'
+    _aper_map['col_auto_150_444']    = 'F150W−F444W Kron (auto)'
+    _aper_map['grad_150_444_1v4']    = 'ΔF150W−F444W 0.3"−1.0" (gradient)'
+    _aper_map['grad_150_444_2v4']    = 'ΔF150W−F444W 0.5"−1.0" (gradient)'
+    _aper_map['grad_115_277_1v4']    = 'ΔF115W−F277W 0.3"−1.0" (gradient)'
+    for npz_key, label in _aper_map.items():
+        if npz_key in npz:
+            arr = npz[npz_key].astype(float)
+            color_props[label] = np.where(np.isfinite(arr), arr, np.nan)
 
     # SFH shape descriptors computed directly from the HDF5
     h5_indices = npz['h5_indices'].astype(int)
