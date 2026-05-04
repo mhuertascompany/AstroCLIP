@@ -59,8 +59,12 @@ SFH_N_BINS = 50
 SFH_EPS    = 1e-10   # avoids log10(0) for quiescent galaxies
 
 # Fractional lookback-time grid ∈ [0, 1].
-# Multiplied by t_universe(z) [Myr] per galaxy to get the physical grid.
-SFH_T_FRAC = np.linspace(0, 1, SFH_N_BINS)
+# Bin 0 is fixed at t_frac=0 (always fill_value below the minimum CIGALE bin).
+# Bins 1–49 are log-spaced from 1e-3 to 1.0, concentrating resolution near the
+# present epoch where CIGALE has its finest bins (~10–120 Myr).  This replaces
+# the previous linspace grid, which assigned ~28/49 bins to the oldest CIGALE
+# bin and zero bins to CIGALE bins 0–3 (the last 10–120 Myr of SF).
+SFH_T_FRAC = np.concatenate([[0.0], np.geomspace(1e-3, 1.0, SFH_N_BINS - 1)])
 
 # Flat ΛCDM cosmology for computing t_universe(z)
 COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
@@ -222,9 +226,14 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     t_universe_myr = float(COSMO.age(z).to('Myr').value)
     phys_grid      = SFH_T_FRAC * t_universe_myr   # (SFH_N_BINS,) in Myr
 
+    # kind='next': assign each grid point the SFR of the next CIGALE bin ≥ t.
+    # fill_value=(sfr_frac[0], 0.0): for t < lb_time[0] (more recent than the
+    # youngest CIGALE bin) use sfr_frac[0] — the most recent bin's SFR extends
+    # back to t=0.  For t > lb_time[-1] use 0 (beyond oldest bin → no SF).
     sfh_obj       = SFH(lb_time, sfr_frac, err_frac)
     sfr_interp, _ = sfh_obj.interpolate_sfh(
-        phys_grid, kind='next', bounds_error=False, fill_value=0.0
+        phys_grid, kind='next', bounds_error=False,
+        fill_value=(sfr_frac[0], 0.0)
     )
 
     # Normalise to unit sum so the encoder sees only the SHAPE of the SFH,

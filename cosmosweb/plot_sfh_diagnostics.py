@@ -1,14 +1,14 @@
 """
-Diagnostic PDF: original CIGALE SFH vs preprocessed SFH used for training.
+Diagnostic PDF: original CIGALE SFH vs current and proposed preprocessed SFH.
 
 For each randomly selected galaxy this script produces a row with three panels:
 
   [1] Original CIGALE  — 9-bin fractional SFR weights vs lookback time [Myr]
-  [2] Preprocessed (linear) — 50-bin interpolated & normalised shape vs lookback
-      time [Myr], so it is directly comparable with panel 1
-  [3] Preprocessed (log₁₀) — what the model actually trains on
+  [2] Current grid (log₁₀) — 50-bin linspace fractional grid (stored in H5)
+  [3] Proposed grid (log₁₀) — 50-bin log-spaced fractional grid (recomputed)
 
-Redshift and galaxy-id are printed on each row title.
+Panels 2 and 3 share a fractional lookback-time x-axis so the redistribution
+of resolution toward recent times is directly visible.
 
 Usage
 -----
@@ -37,7 +37,13 @@ from scipy.interpolate import interp1d
 
 COSMO   = FlatLambdaCDM(H0=70, Om0=0.3)
 SFH_EPS = 1e-10
+SFH_N_BINS = 50
 GALAXIES_PER_PAGE = 4   # rows per PDF page
+
+# Proposed log-spaced fractional time grid (matches prepare_dataset.py update).
+# Bin 0 is fixed at t_frac=0 (always fill_value); bins 1-49 are log-spaced
+# from 1e-3 to 1.0, concentrating resolution near the present.
+NEW_T_FRAC = np.concatenate([[0.0], np.geomspace(1e-3, 1.0, SFH_N_BINS - 1)])
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -74,9 +80,12 @@ def _preprocess(sfr_raw: np.ndarray, err_raw: np.ndarray, lb_time_raw: np.ndarra
     sfr_frac  = sfr_raw[sort_idx]
     err_frac  = err_raw[sort_idx]
 
-    # Replicate SFH.interpolate_sfh(kind='next', bounds_error=False, fill_value=0.0)
+    # kind='next': at each grid point return the SFR of the next CIGALE bin ≥ t.
+    # fill_value=(sfr_frac[0], 0.0): for t < lb_time[0] (more recent than the
+    # youngest CIGALE bin) use sfr_frac[0] — the most recent bin extends back to
+    # t=0.  For t > lb_time[-1] use 0 (beyond the oldest bin → no SF).
     f_next     = interp1d(lb_time, sfr_frac, kind='next',
-                          bounds_error=False, fill_value=0.0)
+                          bounds_error=False, fill_value=(sfr_frac[0], 0.0))
     sfr_interp = f_next(phys_grid)
 
     sfr_total = sfr_interp.sum()
@@ -91,44 +100,40 @@ def _preprocess(sfr_raw: np.ndarray, err_raw: np.ndarray, lb_time_raw: np.ndarra
 
 def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
               lb_time_raw: np.ndarray, sfr_raw: np.ndarray, err_raw: np.ndarray,
-              sfh_t_frac: np.ndarray, sfh_log_h5: np.ndarray,
-              sfh_log_recon: np.ndarray, sfh_lin_recon: np.ndarray) -> None:
-    """Fill one 3-panel row for a single galaxy."""
+              sfh_t_frac_old: np.ndarray, sfh_log_h5: np.ndarray,
+              sfh_t_frac_new: np.ndarray, sfh_log_new: np.ndarray) -> None:
+    """Fill one 3-panel row for a single galaxy.
 
+    Panel 1 – original CIGALE 9-bin SFH (linear scale, Myr x-axis)
+    Panel 2 – current linspace grid stored in H5 (log₁₀, fractional x-axis)
+    Panel 3 – proposed log-spaced grid recomputed from catalog (log₁₀, fractional x-axis)
+    """
     ax1, ax2, ax3 = axes
-    phys_time = sfh_t_frac * t_univ   # Myr, lookback time axis for preprocessed
 
     # ── sort original bins ────────────────────────────────────────────────────
-    sort_idx  = np.argsort(lb_time_raw)
-    lb_sorted = lb_time_raw[sort_idx]
+    sort_idx   = np.argsort(lb_time_raw)
+    lb_sorted  = lb_time_raw[sort_idx]
     sfr_sorted = sfr_raw[sort_idx]
-    err_sorted = err_raw[sort_idx]
+    # err_raw is retained in the signature for future use but not plotted here
 
-    # Build bin edges for stair plot from the 9 midpoints
-    # CIGALE time bins are listed as lookback times; we draw them as bars of
-    # equal width in log-spaced lookback time, filling from the current epoch.
-    bin_edges = np.concatenate([[0.0], (lb_sorted[:-1] + lb_sorted[1:]) / 2, [lb_sorted[-1] * 1.5]])
+    bin_edges = np.concatenate([[0.0],
+                                (lb_sorted[:-1] + lb_sorted[1:]) / 2,
+                                [lb_sorted[-1] * 1.5]])
 
-    # Bin 0 (t_frac=0 → phys=0 Myr) is always zero by construction: the
-    # fractional grid starts at exactly 0 Myr, which is below the minimum
-    # CIGALE bin (~10 Myr), so fill_value=0 is applied.  The explorer skips
-    # it the same way (plots t[1:], w[1:]).  We do the same here.
-    t_phys = sfh_t_frac[1:] * t_univ   # (49,) Myr — skip bin 0
-    t_frac = sfh_t_frac[1:]            # (49,) fractional
-    lin1   = sfh_lin_recon[1:]
-    log_h5 = sfh_log_h5[1:]
-    log_rc = sfh_log_recon[1:]
-
-    # ── panel labels (inside axes, top-left) ─────────────────────────────────
     def _panel_label(ax, txt):
         ax.text(0.02, 0.97, txt, transform=ax.transAxes,
                 fontsize=8, style='italic', va='top', ha='left', color='#333333')
 
+    def _log_stairs(ax, sfh_log, t_frac_grid, **kw):
+        """Plot log10 SFH as stairs on a fractional x-axis, skipping bins 0 and 49."""
+        tf   = t_frac_grid[1:49]           # (48,) fractional — skip boundary bins
+        vals = sfh_log[1:49]               # (48,)
+        edges = np.concatenate([[0.0], tf])  # (49,)
+        ax.stairs(vals, edges, baseline=None, **kw)
+
     # ── panel 1: original 9-bin SFH (linear) ─────────────────────────────────
     ax1.stairs(sfr_sorted, bin_edges, fill=True, color='steelblue', alpha=0.6)
     ax1.stairs(sfr_sorted, bin_edges, color='steelblue', lw=1.5)
-    ax1.errorbar(lb_sorted, sfr_sorted, yerr=err_sorted, fmt='none',
-                 ecolor='steelblue', elinewidth=1.2, capsize=2, alpha=0.8)
     ax1.set_xlabel('Lookback time [Myr]')
     ax1.set_ylabel('Fractional SFR weight')
     ax1.set_xlim(0, t_univ * 1.05)
@@ -136,38 +141,29 @@ def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
     ax1.axvline(t_univ, color='k', lw=0.8, ls='--', alpha=0.4)
     _panel_label(ax1, 'Original CIGALE (9 bins)')
 
-    # ── panel 2: preprocessed linear (bins 1–49) ─────────────────────────────
-    t_edges = np.concatenate([[0.0], t_phys])   # edges for 49 bins
-    ax2.stairs(lin1, t_edges, fill=True, color='tomato', alpha=0.5)
-    ax2.stairs(lin1, t_edges, color='tomato', lw=1.2)
-    ax2.set_xlabel('Lookback time [Myr]')
-    ax2.set_ylabel('Normalised SFR (linear)')
-    ax2.set_xlim(0, t_univ * 1.05)
-    ax2.set_ylim(bottom=0)
-    ax2b = ax2.twiny()
-    ax2b.set_xlim(0, 1.05)
-    ax2b.set_xlabel('Fractional lookback time', fontsize=8)
-    ax2b.tick_params(labelsize=7)
-    _panel_label(ax2, 'Preprocessed — normalised linear (bins 1–49)')
+    # ── panel 2: current linspace grid (from H5, log₁₀) ──────────────────────
+    _log_stairs(ax2, sfh_log_h5, sfh_t_frac_old,
+                color='tomato', lw=1.4)
+    ax2.set_xlabel('Fractional lookback time')
+    ax2.set_ylabel('log₁₀(norm. SFR + ε)')
+    ax2.set_xlim(0, 1.05)
+    _panel_label(ax2, 'Current — linspace grid (bins 1–48, from H5)')
 
-    # ── panel 3: preprocessed log10 (bins 1–49) ──────────────────────────────
-    ax3.stairs(log_h5, t_edges, color='darkorange', lw=1.4, label='from H5')
-    ax3.stairs(log_rc, t_edges, color='k', lw=0.9, ls='--', alpha=0.6,
-               label='recomputed')
-    ax3.set_xlabel('Lookback time [Myr]')
+    # ── panel 3: proposed log-spaced grid (recomputed, log₁₀) ────────────────
+    _log_stairs(ax3, sfh_log_new, sfh_t_frac_new,
+                color='mediumseagreen', lw=1.4)
+    # overlay the CIGALE bin boundaries as faint vertical lines for reference
+    for lb in lb_sorted:
+        tf_lb = lb / t_univ
+        if 0 < tf_lb < 1:
+            ax3.axvline(tf_lb, color='grey', lw=0.5, ls=':', alpha=0.5)
+    ax3.set_xlabel('Fractional lookback time')
     ax3.set_ylabel('log₁₀(norm. SFR + ε)')
-    ax3.set_xlim(0, t_univ * 1.05)
-    ax3.legend(fontsize=6, loc='lower left')
-    _panel_label(ax3, 'Preprocessed — log₁₀ (model input, bins 1–49)')
+    ax3.set_xlim(0, 1.05)
+    _panel_label(ax3, 'Proposed — log-spaced grid (bins 1–48, recomputed)')
 
-    # ── agreement check ───────────────────────────────────────────────────────
-    max_diff = float(np.abs(sfh_log_h5 - sfh_log_recon).max())
-    col = 'red' if max_diff > 0.01 else 'green'
     for ax in axes:
         ax.set_facecolor('#fafafa')
-    ax3.text(0.98, 0.03, f'max|H5−recon|={max_diff:.2e}',
-             transform=ax3.transAxes, ha='right', va='bottom',
-             fontsize=7, color=col)
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -234,9 +230,9 @@ def main():
                 sfh_log_h5 = h5_sfh[h5_idx]      # (50,)
                 t_univ    = float(h5_tnorm[h5_idx])
 
-                # Recompute preprocessing to verify agreement
-                sfh_log_rc, sfh_lin_rc, _ = _preprocess(
-                    sfr_raw, err_raw, time_raw, z, sfh_t_frac
+                # Recompute with the proposed log-spaced grid
+                sfh_log_new, _, _ = _preprocess(
+                    sfr_raw, err_raw, time_raw, z, NEW_T_FRAC
                 )
 
                 axes = [fig.add_subplot(gs[row, col]) for col in range(3)]
@@ -244,7 +240,8 @@ def main():
                 _plot_row(
                     axes, gid, z, t_univ,
                     time_raw, sfr_raw, err_raw,
-                    sfh_t_frac, sfh_log_h5, sfh_log_rc, sfh_lin_rc,
+                    sfh_t_frac, sfh_log_h5,
+                    NEW_T_FRAC, sfh_log_new,
                 )
 
                 # Row header: placed just above the left panel using figure coords
