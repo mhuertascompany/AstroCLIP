@@ -109,11 +109,15 @@ def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
     # equal width in log-spaced lookback time, filling from the current epoch.
     bin_edges = np.concatenate([[0.0], (lb_sorted[:-1] + lb_sorted[1:]) / 2, [lb_sorted[-1] * 1.5]])
 
-    # ── identify artificially-zeroed bins ────────────────────────────────────
-    # Bins where phys_grid < min(lb_time) received fill_value=0 (not real data).
-    min_lb    = lb_sorted[0]
-    phys_time = sfh_t_frac * t_univ
-    artificial = phys_time < min_lb   # (N_bins,) bool
+    # Bin 0 (t_frac=0 → phys=0 Myr) is always zero by construction: the
+    # fractional grid starts at exactly 0 Myr, which is below the minimum
+    # CIGALE bin (~10 Myr), so fill_value=0 is applied.  The explorer skips
+    # it the same way (plots t[1:], w[1:]).  We do the same here.
+    t_phys = sfh_t_frac[1:] * t_univ   # (49,) Myr — skip bin 0
+    t_frac = sfh_t_frac[1:]            # (49,) fractional
+    lin1   = sfh_lin_recon[1:]
+    log_h5 = sfh_log_h5[1:]
+    log_rc = sfh_log_recon[1:]
 
     # ── panel labels (inside axes, top-left) ─────────────────────────────────
     def _panel_label(ax, txt):
@@ -132,50 +136,29 @@ def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
     ax1.axvline(t_univ, color='k', lw=0.8, ls='--', alpha=0.4)
     _panel_label(ax1, 'Original CIGALE (9 bins)')
 
-    # ── panel 2: preprocessed linear ─────────────────────────────────────────
-    t_edges = np.linspace(0, t_univ, len(sfh_lin_recon) + 1)
-    # Grey fill for artificially-zeroed bins, colour for real bins
-    sfh_lin_real = np.where(artificial, np.nan, sfh_lin_recon)
-    sfh_lin_art  = np.where(artificial, sfh_lin_recon, np.nan)
-    ax2.stairs(sfh_lin_real, t_edges, fill=True, color='tomato', alpha=0.5)
-    ax2.stairs(sfh_lin_real, t_edges, color='tomato', lw=1.2)
-    ax2.stairs(sfh_lin_art,  t_edges, fill=True, color='grey', alpha=0.3,
-               label='fill_value=0 (no CIGALE data)')
+    # ── panel 2: preprocessed linear (bins 1–49) ─────────────────────────────
+    t_edges = np.concatenate([[0.0], t_phys])   # edges for 49 bins
+    ax2.stairs(lin1, t_edges, fill=True, color='tomato', alpha=0.5)
+    ax2.stairs(lin1, t_edges, color='tomato', lw=1.2)
     ax2.set_xlabel('Lookback time [Myr]')
     ax2.set_ylabel('Normalised SFR (linear)')
     ax2.set_xlim(0, t_univ * 1.05)
     ax2.set_ylim(bottom=0)
-    if artificial.any():
-        ax2.legend(fontsize=6, loc='upper right')
     ax2b = ax2.twiny()
     ax2b.set_xlim(0, 1.05)
     ax2b.set_xlabel('Fractional lookback time', fontsize=8)
     ax2b.tick_params(labelsize=7)
-    _panel_label(ax2, 'Preprocessed — normalised linear (50 bins)')
+    _panel_label(ax2, 'Preprocessed — normalised linear (bins 1–49)')
 
-    # ── panel 3: preprocessed log10 ──────────────────────────────────────────
-    # Mask artificial bins so they don't distort the y-axis
-    sfh_log_real = np.where(artificial, np.nan, sfh_log_h5)
-    sfh_log_art  = np.where(artificial, sfh_log_h5, np.nan)
-
-    ax3.stairs(sfh_log_real,  t_edges, color='darkorange', lw=1.4, label='from H5 (real)')
-    ax3.stairs(sfh_log_art,   t_edges, color='grey',       lw=1.0, alpha=0.5,
-               label='fill_value=0 (artificial)')
-    ax3.stairs(np.where(artificial, np.nan, sfh_log_recon), t_edges,
-               color='k', lw=0.9, ls='--', alpha=0.6, label='recomputed')
+    # ── panel 3: preprocessed log10 (bins 1–49) ──────────────────────────────
+    ax3.stairs(log_h5, t_edges, color='darkorange', lw=1.4, label='from H5')
+    ax3.stairs(log_rc, t_edges, color='k', lw=0.9, ls='--', alpha=0.6,
+               label='recomputed')
     ax3.set_xlabel('Lookback time [Myr]')
     ax3.set_ylabel('log₁₀(norm. SFR + ε)')
     ax3.set_xlim(0, t_univ * 1.05)
-
-    # Clip y-axis to real data range (exclude the artificial -10 floor)
-    real_vals = sfh_log_real[np.isfinite(sfh_log_real)]
-    if len(real_vals):
-        ylo = float(np.nanmin(real_vals)) - 0.3
-        yhi = float(np.nanmax(real_vals)) + 0.3
-        ax3.set_ylim(ylo, yhi)
-
     ax3.legend(fontsize=6, loc='lower left')
-    _panel_label(ax3, 'Preprocessed — log₁₀ (model input)')
+    _panel_label(ax3, 'Preprocessed — log₁₀ (model input, bins 1–49)')
 
     # ── agreement check ───────────────────────────────────────────────────────
     max_diff = float(np.abs(sfh_log_h5 - sfh_log_recon).max())
