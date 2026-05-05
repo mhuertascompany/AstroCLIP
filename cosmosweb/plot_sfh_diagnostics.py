@@ -43,6 +43,7 @@ GALAXIES_PER_PAGE = 4   # rows per PDF page
 # Proposed log-spaced fractional time grid (matches prepare_dataset.py update).
 # Bin 0 is fixed at t_frac=0 (always fill_value); bins 1-49 are log-spaced
 # from 1e-3 to 1.0, concentrating resolution near the present.
+OLD_T_FRAC = np.linspace(0.0, 1.0, SFH_N_BINS)
 NEW_T_FRAC = np.concatenate([[0.0], np.geomspace(1e-3, 1.0, SFH_N_BINS - 1)])
 
 
@@ -80,6 +81,11 @@ def _preprocess(sfr_raw: np.ndarray, err_raw: np.ndarray, lb_time_raw: np.ndarra
     sfr_frac  = sfr_raw[sort_idx]
     err_frac  = err_raw[sort_idx]
 
+    # Normalise the 9 CIGALE bins BEFORE interpolation (grid-independent).
+    sfr_total = sfr_frac.sum()
+    if sfr_total > SFH_EPS:
+        sfr_frac = sfr_frac / sfr_total
+
     # kind='next': at each grid point return the SFR of the next CIGALE bin ≥ t.
     # fill_value=(sfr_frac[0], 0.0): for t < lb_time[0] (more recent than the
     # youngest CIGALE bin) use sfr_frac[0] — the most recent bin extends back to
@@ -87,10 +93,6 @@ def _preprocess(sfr_raw: np.ndarray, err_raw: np.ndarray, lb_time_raw: np.ndarra
     f_next     = interp1d(lb_time, sfr_frac, kind='next',
                           bounds_error=False, fill_value=(sfr_frac[0], 0.0))
     sfr_interp = f_next(phys_grid)
-
-    sfr_total = sfr_interp.sum()
-    if sfr_total > SFH_EPS:
-        sfr_interp = sfr_interp / sfr_total
 
     sfh_log = np.log10(sfr_interp + SFH_EPS).astype(np.float32)
     return sfh_log, sfr_interp.astype(np.float32), t_universe_myr
@@ -124,12 +126,11 @@ def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
         ax.text(0.02, 0.97, txt, transform=ax.transAxes,
                 fontsize=8, style='italic', va='top', ha='left', color='#333333')
 
-    def _log_stairs(ax, sfh_log, t_frac_grid, **kw):
-        """Plot log10 SFH as stairs on a fractional x-axis, skipping bins 0 and 49."""
-        tf   = t_frac_grid[1:49]           # (48,) fractional — skip boundary bins
-        vals = sfh_log[1:49]               # (48,)
-        edges = np.concatenate([[0.0], tf])  # (49,)
-        ax.stairs(vals, edges, baseline=None, **kw)
+    def _log_dots(ax, sfh_log, t_frac_grid, **kw):
+        """Plot log10 SFH as individual data points — exactly what the encoder sees."""
+        tf   = t_frac_grid[1:49]   # (48,) fractional — skip boundary bins
+        vals = sfh_log[1:49]       # (48,)
+        ax.scatter(tf, vals, s=12, **kw)
 
     # ── panel 1: original 9-bin SFH (linear) ─────────────────────────────────
     ax1.stairs(sfr_sorted, bin_edges, fill=True, color='steelblue', alpha=0.6)
@@ -142,16 +143,16 @@ def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
     _panel_label(ax1, 'Original CIGALE (9 bins)')
 
     # ── panel 2: current linspace grid (from H5, log₁₀) ──────────────────────
-    _log_stairs(ax2, sfh_log_h5, sfh_t_frac_old,
-                color='tomato', lw=1.4)
+    _log_dots(ax2, sfh_log_h5, sfh_t_frac_old,
+              color='tomato')
     ax2.set_xlabel('Fractional lookback time')
     ax2.set_ylabel('log₁₀(norm. SFR + ε)')
     ax2.set_xlim(0, 1.05)
-    _panel_label(ax2, 'Current — linspace grid (bins 1–48, from H5)')
+    _panel_label(ax2, 'v2 — linspace grid (bins 1–48, encoder input)')
 
     # ── panel 3: proposed log-spaced grid (recomputed, log₁₀) ────────────────
-    _log_stairs(ax3, sfh_log_new, sfh_t_frac_new,
-                color='mediumseagreen', lw=1.4)
+    _log_dots(ax3, sfh_log_new, sfh_t_frac_new,
+              color='mediumseagreen')
     # overlay the CIGALE bin boundaries as faint vertical lines for reference
     for lb in lb_sorted:
         tf_lb = lb / t_univ
@@ -160,7 +161,7 @@ def _plot_row(axes, galaxy_id: int, z: float, t_univ: float,
     ax3.set_xlabel('Fractional lookback time')
     ax3.set_ylabel('log₁₀(norm. SFR + ε)')
     ax3.set_xlim(0, 1.05)
-    _panel_label(ax3, 'Proposed — log-spaced grid (bins 1–48, recomputed)')
+    _panel_label(ax3, 'v3 — log-spaced grid (bins 1–48, encoder input)')
 
     for ax in axes:
         ax.set_facecolor('#fafafa')
@@ -227,10 +228,12 @@ def main():
                 sfr_raw   = cat_sfr[cat_row]     # (9,)
                 err_raw   = cat_err[cat_row]      # (9,)
                 time_raw  = cat_time[cat_row]     # (9,) lookback Myr
-                sfh_log_h5 = h5_sfh[h5_idx]      # (50,)
                 t_univ    = float(h5_tnorm[h5_idx])
 
-                # Recompute with the proposed log-spaced grid
+                # Recompute both grids from catalog with grid-independent normalisation
+                sfh_log_old, _, _ = _preprocess(
+                    sfr_raw, err_raw, time_raw, z, OLD_T_FRAC
+                )
                 sfh_log_new, _, _ = _preprocess(
                     sfr_raw, err_raw, time_raw, z, NEW_T_FRAC
                 )
@@ -240,7 +243,7 @@ def main():
                 _plot_row(
                     axes, gid, z, t_univ,
                     time_raw, sfr_raw, err_raw,
-                    sfh_t_frac, sfh_log_h5,
+                    OLD_T_FRAC, sfh_log_old,
                     NEW_T_FRAC, sfh_log_new,
                 )
 
