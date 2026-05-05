@@ -138,11 +138,23 @@ def _sfh_properties(h5_path: Path, h5_indices: np.ndarray) -> dict[str, np.ndarr
     peak_bin = np.argmax(sfr, axis=1)
     peak_t   = t_frac[peak_bin]
 
+    # ── 5. Quenching / rising SFR index ──────────────────────────────────────
+    # Difference between the 5-10% interval and 0-5% interval.
+    # Positive → SFR was higher 5-10% ago than now → currently quenching
+    # Negative → SFR is rising → rejuvenation or ongoing starburst
+    # Requires both 5% and 10% thresholds to be in SFH_TIME_FRACS.
+    quench_index = np.full(sfr.shape[0], np.nan)
+    if 5 in pcts and 10 in pcts:
+        delta_0_5  = cumul_recent[5]
+        delta_5_10 = cumul_recent[10] - cumul_recent[5]
+        quench_index = delta_5_10 - delta_0_5
+
     return {
         'SFH: log(old/recent)':      log_old_recent,
         'SFH: mean formation epoch':  mean_t,
         **sfr_fracs,
         'SFH: peak lookback t_frac':  peak_t,
+        'SFH: quenching index':       quench_index,
     }
 
 
