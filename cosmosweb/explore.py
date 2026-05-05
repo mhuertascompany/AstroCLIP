@@ -105,16 +105,34 @@ def _sfh_properties(h5_path: Path, h5_indices: np.ndarray) -> dict[str, np.ndarr
     # ── 2. Mass-weighted mean formation epoch (fractional lookback time) ──────
     mean_t = (sfr * t).sum(axis=1)
 
-    # ── 3. Cumulative SFR fractions in the most recent / earliest X% ─────────
-    # recent: t_frac ≤ threshold  (small t_frac = recent times)
-    # old:    t_frac ≥ 1-threshold (large t_frac = earliest times)
+    # ── 3. Cumulative + differential SFR fractions ────────────────────────────
+    # Cumulative recent: t_frac ≤ threshold
+    # Cumulative old:    t_frac ≥ 1 - threshold
+    # Differential:      fraction in each interval between thresholds
     sfr_fracs = {}
+    cumul_recent = {}   # cache for computing deltas
+    cumul_old    = {}
     for threshold in SFH_TIME_FRACS:
         pct = int(round(threshold * 100))
         mask_recent = t_frac <= threshold
         mask_old    = t_frac >= (1.0 - threshold)
-        sfr_fracs[f'SFH: f(recent {pct}%)'] = sfr[:, mask_recent].sum(axis=1)
-        sfr_fracs[f'SFH: f(old {pct}%)']    = sfr[:, mask_old].sum(axis=1)
+        cumul_recent[pct] = sfr[:, mask_recent].sum(axis=1)
+        cumul_old[pct]    = sfr[:, mask_old].sum(axis=1)
+        sfr_fracs[f'SFH: f(recent {pct}%)'] = cumul_recent[pct]
+        sfr_fracs[f'SFH: f(old {pct}%)']    = cumul_old[pct]
+
+    # Differential fractions: SFR in each interval (recent end)
+    pcts = [int(round(t * 100)) for t in SFH_TIME_FRACS]
+    for i, pct in enumerate(pcts):
+        prev_pct = pcts[i - 1] if i > 0 else 0
+        prev_val = cumul_recent[prev_pct] if i > 0 else np.zeros(sfr.shape[0])
+        sfr_fracs[f'SFH: Δf({prev_pct}–{pct}% recent)'] = cumul_recent[pct] - prev_val
+
+    # Differential fractions: SFR in each interval (old end)
+    for i, pct in enumerate(pcts):
+        prev_pct = pcts[i - 1] if i > 0 else 0
+        prev_val = cumul_old[prev_pct] if i > 0 else np.zeros(sfr.shape[0])
+        sfr_fracs[f'SFH: Δf({prev_pct}–{pct}% old)'] = cumul_old[pct] - prev_val
 
     # ── 4. Fractional lookback time of the SFH peak ───────────────────────────
     peak_bin = np.argmax(sfr, axis=1)
