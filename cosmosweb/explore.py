@@ -49,9 +49,12 @@ SFH_N_BINS = 50
 N_DISPLAY  = 16    # max stamps / SFHs shown at once
 NCOLS      = 4     # columns in each gallery grid
 
-# Fractional lookback-time grid matching prepare_dataset.py
-# bin 0 = observation epoch (t_frac=0.0), bin 49 = Big Bang (t_frac=1.0)
-_T_FRAC = np.linspace(0, 1, SFH_N_BINS)   # (50,)  matches SFH_T_FRAC in prepare_dataset.py
+# Fractional lookback-time grid — read from HDF5 at runtime (grid-agnostic).
+# Fallback to linspace for datasets that pre-date the sfh_time_grid dataset.
+_T_FRAC = np.linspace(0, 1, SFH_N_BINS)   # (50,) fallback
+
+# Fractions of cosmic time for which we compute cumulative SFR fractions
+SFH_TIME_FRACS = [0.1, 0.2, 0.3, 0.4, 0.5]
 
 _PALETTES = {
     'plasma':  Plasma256,
@@ -81,43 +84,43 @@ def _sfh_properties(h5_path: Path, h5_indices: np.ndarray) -> dict[str, np.ndarr
     Derive scalar SFH shape descriptors from the log10 SFH vectors in the HDF5.
 
     The SFH array has shape (N, 50) in log10 of normalised fractions.
-    Bin 0 = most recent lookback time (t_frac=0.02).
-    Bin 49 = oldest lookback time   (t_frac=1.0).
+    The time grid is read from sfh_time_grid in the HDF5 (grid-agnostic).
     """
     with h5py.File(h5_path, 'r') as f:
-        sfh_log = f['sfh'][list(h5_indices)].astype(np.float64)  # (N, 50)
+        sfh_log = f['sfh'][list(h5_indices)].astype(np.float64)   # (N, 50)
+        t_frac  = (f['sfh_time_grid'][:].astype(np.float64)
+                   if 'sfh_time_grid' in f else _T_FRAC)           # (50,)
 
     # Convert to linear fractions; re-normalise to correct for log rounding
     sfr = np.maximum(10.0 ** sfh_log - SFH_EPS, 0.0)
     sfr_sum = sfr.sum(axis=1, keepdims=True)
     sfr_sum = np.where(sfr_sum > 0, sfr_sum, 1.0)
-    sfr = sfr / sfr_sum                                  # (N, 50), sums to 1
+    sfr = sfr / sfr_sum                                            # (N, 50), sums to 1
 
-    t = _T_FRAC[np.newaxis, :]                           # (1, 50)
+    t = t_frac[np.newaxis, :]                                      # (1, 50)
 
     # ── 1. log ratio: old SFR / recent SFR ───────────────────────────────────
-    # Positive → dominated by old stars (quiescent / early-type)
-    # Negative → dominated by recent SF (star-forming / late-type)
     log_old_recent = sfh_log[:, -1] - sfh_log[:, 0]
 
     # ── 2. Mass-weighted mean formation epoch (fractional lookback time) ──────
-    # High (→1) = formed mostly at early times = old stellar population
-    # Low  (→0) = formed mostly recently       = young stellar population
     mean_t = (sfr * t).sum(axis=1)
 
-    # ── 3. Fraction of SFH in most recent 20% of lookback time (bins 0–9) ────
-    n_recent = max(1, SFH_N_BINS // 5)
-    f_recent = sfr[:, :n_recent].sum(axis=1)
+    # ── 3. Cumulative SFR fractions in the most recent X% of cosmic time ─────
+    # f_10 = fraction of SFR at t_frac ≤ 0.1, f_20 at t_frac ≤ 0.2, etc.
+    sfr_fracs = {}
+    for threshold in SFH_TIME_FRACS:
+        mask = t_frac <= threshold                                  # (50,) bool
+        sfr_fracs[f'SFH: f(recent {int(threshold*100)}%)'] = sfr[:, mask].sum(axis=1)
 
     # ── 4. Fractional lookback time of the SFH peak ───────────────────────────
     peak_bin = np.argmax(sfr, axis=1)
-    peak_t   = _T_FRAC[peak_bin]
+    peak_t   = t_frac[peak_bin]
 
     return {
-        'SFH: log(old/recent)':     log_old_recent,
-        'SFH: mean formation epoch': mean_t,
-        'SFH: f(recent 20%)':        f_recent,
-        'SFH: peak lookback t_frac': peak_t,
+        'SFH: log(old/recent)':      log_old_recent,
+        'SFH: mean formation epoch':  mean_t,
+        **sfr_fracs,
+        'SFH: peak lookback t_frac':  peak_t,
     }
 
 
