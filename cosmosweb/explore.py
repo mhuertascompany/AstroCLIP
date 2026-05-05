@@ -54,7 +54,7 @@ NCOLS      = 4     # columns in each gallery grid
 _T_FRAC = np.linspace(0, 1, SFH_N_BINS)   # (50,) fallback
 
 # Fractions of cosmic time for which we compute cumulative SFR fractions
-SFH_TIME_FRACS = [0.1, 0.2, 0.3, 0.4, 0.5]
+SFH_TIME_FRACS = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5]
 
 _PALETTES = {
     'plasma':  Plasma256,
@@ -105,12 +105,16 @@ def _sfh_properties(h5_path: Path, h5_indices: np.ndarray) -> dict[str, np.ndarr
     # ── 2. Mass-weighted mean formation epoch (fractional lookback time) ──────
     mean_t = (sfr * t).sum(axis=1)
 
-    # ── 3. Cumulative SFR fractions in the most recent X% of cosmic time ─────
-    # f_10 = fraction of SFR at t_frac ≤ 0.1, f_20 at t_frac ≤ 0.2, etc.
+    # ── 3. Cumulative SFR fractions in the most recent / earliest X% ─────────
+    # recent: t_frac ≤ threshold  (small t_frac = recent times)
+    # old:    t_frac ≥ 1-threshold (large t_frac = earliest times)
     sfr_fracs = {}
     for threshold in SFH_TIME_FRACS:
-        mask = t_frac <= threshold                                  # (50,) bool
-        sfr_fracs[f'SFH: f(recent {int(threshold*100)}%)'] = sfr[:, mask].sum(axis=1)
+        pct = int(round(threshold * 100))
+        mask_recent = t_frac <= threshold
+        mask_old    = t_frac >= (1.0 - threshold)
+        sfr_fracs[f'SFH: f(recent {pct}%)'] = sfr[:, mask_recent].sum(axis=1)
+        sfr_fracs[f'SFH: f(old {pct}%)']    = sfr[:, mask_old].sum(axis=1)
 
     # ── 4. Fractional lookback time of the SFH peak ───────────────────────────
     peak_bin = np.argmax(sfr, axis=1)
