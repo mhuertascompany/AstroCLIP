@@ -4,8 +4,8 @@ Prepare the paired COSMOS-Web image + CIGALE SFH dataset.
 For each galaxy selected from the visual morphology catalog:
   1. Cut a 64x64 stamp in F150W, F277W, F444W from the NIRCam tile mosaics
   2. Interpolate the CIGALE SFH onto a redshift-normalized fractional time grid
-     (Option A: t_frac = t_lookback / t_universe(z), so all SFHs share the
-      same [0, 1] axis regardless of redshift)
+     (t_frac = t_lookback / t_universe(z), so all SFHs share the same [0, 1]
+      axis regardless of redshift; linear interpolation between 9 CIGALE bins)
   3. Store everything in an HDF5 file ready for training
 
 Output HDF5 layout:
@@ -47,9 +47,7 @@ from astropy.table import Table
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
 from astropy.cosmology import FlatLambdaCDM
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'cigale'))
-from SFHandle.sfh import SFH
+from scipy.interpolate import interp1d
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -231,15 +229,15 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     if sfr_total > SFH_EPS:
         sfr_frac = sfr_frac / sfr_total
 
-    # kind='next': assign each grid point the SFR of the next CIGALE bin ≥ t.
-    # fill_value=(sfr_frac[0], 0.0): for t < lb_time[0] (more recent than the
-    # youngest CIGALE bin) use sfr_frac[0] — the most recent bin's SFR extends
-    # back to t=0.  For t > lb_time[-1] use 0 (beyond oldest bin → no SF).
-    sfh_obj       = SFH(lb_time, sfr_frac, err_frac)
-    sfr_interp, _ = sfh_obj.interpolate_sfh(
-        phys_grid, kind='next', bounds_error=False,
-        fill_value=(sfr_frac[0], 0.0)
-    )
+    # kind='linear': linearly interpolate between the 9 CIGALE bin centres.
+    # Avoids the plateau-width artifact introduced by kind='next', where the
+    # number of identical grid values encodes redshift (via t_universe width).
+    # fill_value=(sfr_frac[0], 0.0): extend the most recent bin to t=0 and
+    # zero beyond the oldest bin.  Clamp to ≥0 to prevent negative values at
+    # bin edges.
+    f_interp   = interp1d(lb_time, sfr_frac, kind='linear',
+                          bounds_error=False, fill_value=(sfr_frac[0], 0.0))
+    sfr_interp = np.maximum(f_interp(phys_grid), 0.0)
 
     sfh_log = np.log10(sfr_interp + SFH_EPS).astype(np.float32)
     return sfh_log, t_universe_myr
