@@ -31,7 +31,7 @@ ZOOBOT_CKPT=/n03data/huertas/COSMOS-Web/zoobot/models/ilbert_finetune/checkpoint
 
 # ── run ───────────────────────────────────────────────────────────────────────
 python -m cosmosweb.train_zoobot \
-    --dataset       ${OUTPUT_DIR}/cosmosweb_dataset_v5.h5 \
+    --dataset       ${OUTPUT_DIR}/cosmosweb_dataset_v6.h5 \
     --stamp_root    /n03data/huertas/COSMOS-Web/zoobot/stamps_ilbert \
     --filter        F277W \
     --zoobot_ckpt   ${ZOOBOT_CKPT} \
