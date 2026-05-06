@@ -18,7 +18,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/COSMOS-Web/cosmosweb_clip
 # Update CKPT to the best checkpoint path after training completes.
-CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v5-epoch=XXX-val_loss=X.XXXX.ckpt
+CKPT=${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v5-epoch=085-val_loss=3.6757.ckpt
 
 cd ${REPO_DIR}
 
