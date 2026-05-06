@@ -23,7 +23,7 @@ from zoobot.pytorch.training import finetune
 
 class ZooBotImageEncoder(nn.Module):
     """
-    Frozen ZooBOT EfficientNet backbone + trainable MLP projection head.
+    ZooBOT EfficientNet backbone + trainable MLP projection head.
 
     Parameters
     ----------
@@ -34,13 +34,19 @@ class ZooBotImageEncoder(nn.Module):
         Output embedding dimension.
     dropout : float
         Dropout applied inside the MLP projection head.
+    unfreeze_blocks : int
+        Number of top-level backbone children to unfreeze (counting from the
+        end).  0 = fully frozen (default).  2 = last two blocks trainable.
+        Unfrozen layers receive gradients and should be given a lower learning
+        rate than the projection head (see backbone_lr_scale in the model).
     """
 
     def __init__(
         self,
-        ckpt_path: str | Path,
-        embed_dim: int   = 256,
-        dropout:   float = 0.1,
+        ckpt_path:       str | Path,
+        embed_dim:       int   = 256,
+        dropout:         float = 0.1,
+        unfreeze_blocks: int   = 0,
     ) -> None:
         super().__init__()
 
@@ -59,9 +65,18 @@ class ZooBotImageEncoder(nn.Module):
 
         self.backbone = backbone
 
-        # Freeze — no gradients flow through the ZooBOT backbone
+        # Freeze all backbone parameters first
         for param in self.backbone.parameters():
             param.requires_grad_(False)
+
+        # Selectively unfreeze the last `unfreeze_blocks` top-level children
+        if unfreeze_blocks > 0:
+            children = list(self.backbone.named_children())
+            for name, module in children[-unfreeze_blocks:]:
+                for param in module.parameters():
+                    param.requires_grad_(True)
+            unfrozen_names = [n for n, _ in children[-unfreeze_blocks:]]
+            print(f'[ZooBotImageEncoder] unfrozen backbone blocks: {unfrozen_names}')
 
         # Probe backbone output dimension with a dummy forward pass.
         # Move dummy to the same device as the backbone weights.

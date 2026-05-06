@@ -44,16 +44,18 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
     def __init__(
         self,
-        zoobot_ckpt:   str,
-        embed_dim:     int   = 256,
-        sfh_input_dim: int   = 50,
-        temperature:   float = 0.07,
-        queue_size:    int   = 4096,
-        momentum:      float = 0.995,
-        lr:            float = 1e-4,
-        weight_decay:  float = 0.05,
-        epochs:        int   = 50,
-        warmup_epochs: int   = 5,
+        zoobot_ckpt:      str,
+        embed_dim:        int   = 256,
+        sfh_input_dim:    int   = 50,
+        temperature:      float = 0.07,
+        queue_size:       int   = 4096,
+        momentum:         float = 0.995,
+        lr:               float = 1e-4,
+        weight_decay:     float = 0.05,
+        epochs:           int   = 50,
+        warmup_epochs:    int   = 5,
+        unfreeze_blocks:  int   = 0,
+        backbone_lr_scale: float = 0.1,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -62,6 +64,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         self.image_encoder = ZooBotImageEncoder(
             ckpt_path=zoobot_ckpt,
             embed_dim=embed_dim,
+            unfreeze_blocks=unfreeze_blocks,
         )
         self.sfh_encoder = SFHEncoder(
             input_dim=sfh_input_dim,
@@ -214,11 +217,29 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     # ── optimiser & scheduler ─────────────────────────────────────────────────
 
     def configure_optimizers(self):
-        # Momentum encoder parameters have requires_grad=False → excluded automatically
-        trainable = [p for p in self.parameters() if p.requires_grad]
+        # Split trainable parameters into backbone (unfrozen blocks, lower lr)
+        # and everything else (projection head + SFH encoder, full lr).
+        backbone_params = [
+            p for n, p in self.image_encoder.backbone.named_parameters()
+            if p.requires_grad
+        ]
+        other_params = [
+            p for n, p in self.named_parameters()
+            if p.requires_grad
+            and not n.startswith('image_encoder.backbone.')
+            and not n.startswith('image_encoder_m.')
+            and not n.startswith('sfh_encoder_m.')
+        ]
+
+        param_groups = [{'params': other_params, 'lr': self.hparams.lr}]
+        if backbone_params:
+            param_groups.append({
+                'params': backbone_params,
+                'lr': self.hparams.lr * self.hparams.backbone_lr_scale,
+            })
+
         optimizer = torch.optim.AdamW(
-            trainable,
-            lr=self.hparams.lr,
+            param_groups,
             weight_decay=self.hparams.weight_decay,
         )
 

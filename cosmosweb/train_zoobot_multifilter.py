@@ -50,6 +50,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--temperature',   type=float, default=0.07)
     p.add_argument('--queue_size',    type=int,   default=1024)
     p.add_argument('--momentum',      type=float, default=0.995)
+    p.add_argument('--unfreeze_blocks',   type=int,   default=0,
+                   help='Number of top-level backbone blocks to unfreeze (0 = fully frozen)')
+    p.add_argument('--backbone_lr_scale', type=float, default=0.1,
+                   help='LR multiplier for unfrozen backbone params (default 0.1)')
 
     # Optimiser
     p.add_argument('--lr',            type=float, default=1e-4)
@@ -103,6 +107,8 @@ def main() -> None:
         weight_decay=args.weight_decay,
         epochs=args.max_epochs,
         warmup_epochs=args.warmup_epochs,
+        unfreeze_blocks=args.unfreeze_blocks,
+        backbone_lr_scale=args.backbone_lr_scale,
     )
 
     # ── callbacks ─────────────────────────────────────────────────────────────
