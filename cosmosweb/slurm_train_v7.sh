@@ -24,16 +24,16 @@ cd ${REPO_DIR}
 
 ZOOBOT_CKPT=/n03data/huertas/COSMOS-Web/zoobot/models/ilbert_finetune/checkpoints/family_2.ckpt
 
-# v7: same architecture as v5 (single F277W stamp, fully frozen backbone) but
-# trained on cosmosweb_dataset_v5.h5, which uses kind='linear' SFH interpolation.
-# This removes the plateau-width redshift artifact from the SFH encoder input.
+# v7: same as v4 (single F277W stamp, frozen backbone) but trained on
+# cosmosweb_dataset_v5.h5, which uses kind='linear' SFH interpolation.
+# Tests whether removing the plateau-width redshift artifact produces a
+# less z-dominated embedding without the added complication of multi-filter.
 
 # ── run ───────────────────────────────────────────────────────────────────────
-python -m cosmosweb.train_zoobot_multifilter \
+python -m cosmosweb.train_zoobot \
     --dataset       ${OUTPUT_DIR}/cosmosweb_dataset_v5.h5 \
     --stamp_root    /n03data/huertas/COSMOS-Web/zoobot/stamps_ilbert \
-    --z_low         1.0 \
-    --z_high        3.0 \
+    --filter        F277W \
     --zoobot_ckpt   ${ZOOBOT_CKPT} \
     --output        ${OUTPUT_DIR}/checkpoints/cosmosweb_zoobot_v7.ckpt \
     --log_dir       ${OUTPUT_DIR}/logs_zoobot_v7 \
@@ -49,5 +49,4 @@ python -m cosmosweb.train_zoobot_multifilter \
     --warmup_epochs 3 \
     --patience      20 \
     --num_workers   8 \
-    --precision     16-mixed \
-    --unfreeze_blocks   0
+    --precision     16-mixed
