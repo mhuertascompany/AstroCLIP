@@ -37,6 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .sfh_encoder import SFHEncoder
+from .sfh_transformer import SFHTransformerEncoder
 from .zoobot_encoder import MultiFilterZooBotImageEncoder, ZooBotImageEncoder
 
 
@@ -437,3 +438,183 @@ class MultiFilterCosmosWebZooBotCLIP(L.LightningModule):
             'optimizer':    optimizer,
             'lr_scheduler': {'scheduler': scheduler, 'interval': 'epoch'},
         }
+
+
+# ── v8: transformer SFH encoder ───────────────────────────────────────────────
+
+class CosmosWebZooBotCLIPv8(L.LightningModule):
+    """
+    CosmosWebZooBotCLIP v8 — same MoCo CLIP framework as v4/v7 but with a
+    Set-Transformer SFH encoder replacing the fixed-grid FC encoder.
+
+    SFH input: (B, 9, 2) tokens — each token is (t_frac, log_sfr) for one
+    CIGALE bin.  t_frac is randomly sampled within each bin's temporal extent
+    at train time, breaking the plateau-width redshift artifact.
+    """
+
+    def __init__(
+        self,
+        zoobot_ckpt:      str,
+        embed_dim:        int   = 256,
+        # SFH transformer hyperparameters
+        sfh_n_bins:       int   = 9,
+        sfh_d_model:      int   = 64,
+        sfh_n_heads:      int   = 4,
+        sfh_n_layers:     int   = 3,
+        # CLIP / MoCo
+        temperature:      float = 0.07,
+        queue_size:       int   = 1024,
+        momentum:         float = 0.995,
+        # Optimiser
+        lr:               float = 1e-4,
+        weight_decay:     float = 0.05,
+        epochs:           int   = 100,
+        warmup_epochs:    int   = 3,
+        # Backbone fine-tuning
+        unfreeze_blocks:  int   = 0,
+        backbone_lr_scale: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.image_encoder = ZooBotImageEncoder(
+            ckpt_path=zoobot_ckpt,
+            embed_dim=embed_dim,
+            unfreeze_blocks=unfreeze_blocks,
+        )
+        self.sfh_encoder = SFHTransformerEncoder(
+            n_bins=sfh_n_bins,
+            d_model=sfh_d_model,
+            n_heads=sfh_n_heads,
+            n_layers=sfh_n_layers,
+            embed_dim=embed_dim,
+        )
+
+        self.image_encoder_m = copy.deepcopy(self.image_encoder)
+        self.sfh_encoder_m   = copy.deepcopy(self.sfh_encoder)
+        for p in self.image_encoder_m.parameters():
+            p.requires_grad_(False)
+        for p in self.sfh_encoder_m.parameters():
+            p.requires_grad_(False)
+
+        self.log_temp = nn.Parameter(torch.tensor(np.log(1.0 / temperature)))
+
+        Q, D = queue_size, embed_dim
+        self.register_buffer('queue_img', F.normalize(torch.randn(D, Q), dim=0))
+        self.register_buffer('queue_sfh', F.normalize(torch.randn(D, Q), dim=0))
+        self.register_buffer('queue_ptr', torch.zeros(1, dtype=torch.long))
+
+    @torch.no_grad()
+    def _momentum_update(self) -> None:
+        m = self.hparams.momentum
+        for p, pm in zip(self.image_encoder.parameters(),
+                         self.image_encoder_m.parameters()):
+            pm.data.mul_(m).add_((1.0 - m) * p.data)
+        for p, pm in zip(self.sfh_encoder.parameters(),
+                         self.sfh_encoder_m.parameters()):
+            pm.data.mul_(m).add_((1.0 - m) * p.data)
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, img_keys, sfh_keys) -> None:
+        B   = img_keys.shape[0]
+        Q   = self.hparams.queue_size
+        ptr = int(self.queue_ptr)
+        self.queue_img[:, ptr:ptr + B] = img_keys.T
+        self.queue_sfh[:, ptr:ptr + B] = sfh_keys.T
+        self.queue_ptr[0] = (ptr + B) % Q
+
+    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
+        return self.image_encoder(image)
+
+    def encode_sfh(self, tokens: torch.Tensor) -> torch.Tensor:
+        """tokens: (B, 9, 2)"""
+        return self.sfh_encoder(tokens)
+
+    @staticmethod
+    def _infoNCE(queries, all_keys, T):
+        B = queries.shape[0]
+        logits = torch.matmul(queries, all_keys.T) * T.exp()
+        labels = torch.arange(B, device=queries.device)
+        return F.cross_entropy(logits, labels)
+
+    def training_step(self, batch, batch_idx):
+        images = batch['image']
+        tokens = batch['tokens']   # (B, 9, 2)
+        B = images.shape[0]
+
+        self._momentum_update()
+
+        img_q = F.normalize(self.image_encoder(images), dim=1)
+        sfh_q = F.normalize(self.sfh_encoder(tokens),  dim=1)
+
+        with torch.no_grad():
+            img_k = F.normalize(self.image_encoder_m(images), dim=1)
+            sfh_k = F.normalize(self.sfh_encoder_m(tokens),   dim=1)
+
+        all_img = torch.cat([img_k, self.queue_img.T.clone()], dim=0)
+        all_sfh = torch.cat([sfh_k, self.queue_sfh.T.clone()], dim=0)
+
+        T = self.log_temp
+        loss = (self._infoNCE(sfh_q, all_img, T) +
+                self._infoNCE(img_q, all_sfh, T)) / 2.0
+
+        self._dequeue_and_enqueue(img_k, sfh_k)
+
+        with torch.no_grad():
+            logits = torch.matmul(sfh_q, img_k.T) * T.exp()
+            r1 = (logits.argmax(1) == torch.arange(B, device=self.device)).float().mean()
+
+        self.log('train_loss',       loss, prog_bar=True,  on_step=True, on_epoch=False)
+        self.log('train_rank1_batch', r1,  prog_bar=False, on_step=True, on_epoch=False)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        images = batch['image']
+        tokens = batch['tokens']
+        B = images.shape[0]
+
+        img_q = F.normalize(self.image_encoder(images), dim=1)
+        sfh_q = F.normalize(self.sfh_encoder(tokens),  dim=1)
+
+        logits   = torch.matmul(sfh_q, img_q.T) * self.log_temp.exp()
+        labels   = torch.arange(B, device=self.device)
+        val_loss = (F.cross_entropy(logits, labels) +
+                    F.cross_entropy(logits.T, labels)) / 2.0
+
+        with torch.no_grad():
+            r1 = ((logits.argmax(1)   == labels).float().mean() +
+                  (logits.T.argmax(1) == labels).float().mean()) / 2
+
+        self.log('val_loss',  val_loss, prog_bar=True, sync_dist=True)
+        self.log('val_rank1', r1,       prog_bar=True, sync_dist=True)
+
+    def configure_optimizers(self):
+        backbone_params = [p for n, p in self.image_encoder.backbone.named_parameters()
+                           if p.requires_grad]
+        other_params = [p for n, p in self.named_parameters()
+                        if p.requires_grad
+                        and not n.startswith('image_encoder.backbone.')
+                        and not n.startswith('image_encoder_m.')
+                        and not n.startswith('sfh_encoder_m.')]
+
+        param_groups = [{'params': other_params, 'lr': self.hparams.lr}]
+        if backbone_params:
+            param_groups.append({
+                'params': backbone_params,
+                'lr': self.hparams.lr * self.hparams.backbone_lr_scale,
+            })
+
+        optimizer = torch.optim.AdamW(param_groups,
+                                      weight_decay=self.hparams.weight_decay)
+
+        def lr_lambda(epoch):
+            wu    = self.hparams.warmup_epochs
+            total = self.hparams.epochs
+            if epoch < wu:
+                return epoch / max(wu, 1)
+            progress = (epoch - wu) / max(total - wu, 1)
+            return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        return {'optimizer': optimizer,
+                'lr_scheduler': {'scheduler': scheduler, 'interval': 'epoch'}}

@@ -407,3 +407,148 @@ class MultiFilterCosmosWebZooBotDataModule(L.LightningDataModule):
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
         )
+
+
+# ── v8: token dataset ──────────────────────────────────────────────────────────
+
+def _sfh_bin_edges(times_myr: np.ndarray, t_universe_myr: float) -> np.ndarray:
+    """
+    Compute temporal bin edges from 9 bin-centre lookback times [Myr].
+
+    edges[0]   = 0 (present)
+    edges[1:9] = midpoints between consecutive centres
+    edges[9]   = t_universe_myr
+    """
+    n = len(times_myr)
+    edges = np.empty(n + 1, dtype=np.float64)
+    edges[0] = 0.0
+    for i in range(1, n):
+        edges[i] = 0.5 * (times_myr[i - 1] + times_myr[i])
+    edges[n] = t_universe_myr
+    return edges
+
+
+class SFHTokenCosmosWebZooBotDataset(Dataset):
+    """
+    v8 dataset: SFH represented as 9 (t_frac, log_sfr) tokens.
+
+    At train time t_frac for each bin is drawn uniformly within the bin's
+    temporal extent (data augmentation that prevents the encoder from reading
+    plateau widths or exact bin positions).  At eval time the bin-centre value
+    is used deterministically.
+
+    Requires the HDF5 file to contain ``sfh_bins_log`` (N, 9) and
+    ``sfh_times_myr`` (N, 9) datasets (produced by the updated
+    prepare_dataset.py).
+
+    Returns
+    -------
+    dict with keys:
+        'image'  : Tensor (3, image_size, image_size)
+        'tokens' : Tensor (9, 2)   — (t_frac, log_sfr) per CIGALE bin
+    """
+
+    def __init__(
+        self,
+        h5_path:     str | Path,
+        stamp_root:  str | Path,
+        filter_name: str   = 'F277W',
+        split:       str   = 'train',
+        augment:     bool  = True,
+        image_size:  int   = 224,
+    ) -> None:
+        super().__init__()
+        self.stamp_root  = Path(stamp_root)
+        self.filter_name = filter_name
+        self.augment     = augment
+        self.training    = (split == 'train')
+        self.transform   = (_train_transform(image_size) if augment
+                            else _inference_transform(image_size))
+
+        with h5py.File(h5_path, 'r') as f:
+            n_tot        = int(f.attrs['n_galaxies'])
+            gids         = f['galaxy_id'][:]
+            sfh_bins_log = f['sfh_bins_log'][:]    # (N, 9)
+            sfh_times    = f['sfh_times_myr'][:]   # (N, 9)
+            t_norm       = f['sfh_time_norm'][:]   # (N,)
+
+        cut = int(n_tot * 0.9)
+        sl  = slice(None, cut) if split == 'train' else slice(cut, None)
+
+        self.gids         = gids[sl]
+        self.sfh_bins_log = sfh_bins_log[sl]
+        self.sfh_times    = sfh_times[sl]
+        self.t_norm       = t_norm[sl]
+
+    def __len__(self) -> int:
+        return len(self.gids)
+
+    def __getitem__(self, idx: int) -> dict:
+        gid          = int(self.gids[idx])
+        sfh_bins_log = self.sfh_bins_log[idx]    # (9,)
+        times_myr    = self.sfh_times[idx]        # (9,)
+        t_universe   = float(self.t_norm[idx])
+
+        # ── sample t_frac within each bin ────────────────────────────────────
+        edges = _sfh_bin_edges(times_myr, t_universe)
+        if self.training:
+            t_samples = np.array([
+                np.random.uniform(edges[i], edges[i + 1])
+                for i in range(len(times_myr))
+            ], dtype=np.float32)
+        else:
+            t_samples = times_myr.copy()
+
+        t_frac = np.clip(t_samples / t_universe, 0.0, 1.0).astype(np.float32)
+        tokens = np.stack([t_frac, sfh_bins_log], axis=1)   # (9, 2)
+
+        # ── image ─────────────────────────────────────────────────────────────
+        img_path = (self.stamp_root / self.filter_name
+                    / f'{self.filter_name}_{gid}.jpg')
+        img   = Image.open(img_path).convert('L')
+        image = self.transform(img)
+
+        return {'image': image, 'tokens': torch.from_numpy(tokens)}
+
+
+class SFHTokenCosmosWebZooBotDataModule(L.LightningDataModule):
+    """LightningDataModule for v8 token-based SFH training."""
+
+    def __init__(
+        self,
+        h5_path:     str | Path,
+        stamp_root:  str | Path,
+        filter_name: str  = 'F277W',
+        batch_size:  int  = 128,
+        num_workers: int  = 4,
+        augment:     bool = True,
+        image_size:  int  = 224,
+    ) -> None:
+        super().__init__()
+        self.h5_path     = h5_path
+        self.stamp_root  = stamp_root
+        self.filter_name = filter_name
+        self.batch_size  = batch_size
+        self.num_workers = num_workers
+        self.augment     = augment
+        self.image_size  = image_size
+
+    def setup(self, stage=None) -> None:
+        shared = dict(h5_path=self.h5_path, stamp_root=self.stamp_root,
+                      filter_name=self.filter_name, image_size=self.image_size)
+        self.train_ds = SFHTokenCosmosWebZooBotDataset(
+            split='train', augment=self.augment, **shared)
+        self.val_ds   = SFHTokenCosmosWebZooBotDataset(
+            split='val', augment=False, **shared)
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(self.train_ds, batch_size=self.batch_size,
+                          shuffle=True, num_workers=self.num_workers,
+                          pin_memory=True, drop_last=True,
+                          persistent_workers=self.num_workers > 0)
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(self.val_ds, batch_size=self.batch_size,
+                          shuffle=False, num_workers=self.num_workers,
+                          pin_memory=True,
+                          persistent_workers=self.num_workers > 0)

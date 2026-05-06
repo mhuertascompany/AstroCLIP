@@ -188,8 +188,10 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     Instead we normalise the interpolated shape so that it sums to 1, making
     the encoder see only the temporal distribution of star formation.
 
-    Returns (sfh_log, t_universe_myr) where
-      sfh_log        – float32 array of shape (SFH_N_BINS,), log10(frac + EPS)
+    Returns (sfh_log, sfh_bins_log, sfh_times_myr, t_universe_myr) where
+      sfh_log        – float32 (SFH_N_BINS,)  log10(frac + EPS) on linspace grid
+      sfh_bins_log   – float32 (9,)           log10(sfr_norm_i + EPS) per CIGALE bin
+      sfh_times_myr  – float32 (9,)           bin-centre lookback times [Myr], sorted
       t_universe_myr – age of universe at z in Myr (stored per galaxy in HDF5)
 
     Returns None if the row does not contain valid SFH data or z is invalid.
@@ -202,7 +204,7 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     # sfh_sfr_bin{i} are dimensionless fractions; sfh_integrated is stellar mass
     # (M_sun).  The product would give stellar mass per bin, adding log10(M_star)
     # as an amplitude offset that correlates with redshift.
-    lb_time = np.array([row[c] for c in _COL_MAP['time']], dtype=np.float64)
+    lb_time  = np.array([row[c] for c in _COL_MAP['time']], dtype=np.float64)
     sfr_frac = np.array([row[c] for c in _COL_MAP['sfr']],  dtype=np.float64)
     err_frac = np.array([row[c] for c in _COL_MAP['err']],  dtype=np.float64)
 
@@ -222,25 +224,26 @@ def sfh_to_common_grid(row: pd.Series, z: float) -> tuple[np.ndarray, float] | N
     phys_grid      = SFH_T_FRAC * t_universe_myr   # (SFH_N_BINS,) in Myr
 
     # Normalise the 9 CIGALE bins BEFORE interpolation so that the resulting
-    # 50-bin values are grid-independent.  Normalising after interpolation
-    # distorts the values because each CIGALE bin is counted as many times as
-    # there are grid points in it — causing the y-axis to shift with grid density.
+    # 50-bin values are grid-independent.
     sfr_total = sfr_frac.sum()
     if sfr_total > SFH_EPS:
         sfr_frac = sfr_frac / sfr_total
 
+    # ── raw 9-bin representation (for v8 transformer encoder) ─────────────────
+    # Store the normalised bin values as log10 values, together with bin-centre
+    # lookback times.  The dataset loader will handle fractional conversion and
+    # random temporal sampling within each bin at train time.
+    sfh_bins_log  = np.log10(sfr_frac + SFH_EPS).astype(np.float32)
+    sfh_times_myr = lb_time.astype(np.float32)
+
+    # ── 50-bin interpolated representation (for v4–v7 models) ────────────────
     # kind='linear': linearly interpolate between the 9 CIGALE bin centres.
-    # Avoids the plateau-width artifact introduced by kind='next', where the
-    # number of identical grid values encodes redshift (via t_universe width).
-    # fill_value=(sfr_frac[0], 0.0): extend the most recent bin to t=0 and
-    # zero beyond the oldest bin.  Clamp to ≥0 to prevent negative values at
-    # bin edges.
     f_interp   = interp1d(lb_time, sfr_frac, kind='linear',
                           bounds_error=False, fill_value=(sfr_frac[0], 0.0))
     sfr_interp = np.maximum(f_interp(phys_grid), 0.0)
+    sfh_log    = np.log10(sfr_interp + SFH_EPS).astype(np.float32)
 
-    sfh_log = np.log10(sfr_interp + SFH_EPS).astype(np.float32)
-    return sfh_log, t_universe_myr
+    return sfh_log, sfh_bins_log, sfh_times_myr, t_universe_myr
 
 
 # ── image helpers ──────────────────────────────────────────────────────────────
@@ -382,14 +385,21 @@ def main() -> None:
         kw      = dict(maxshape=(None,), chunks=True)
         img_kw  = dict(maxshape=(None, 3, sz, sz), chunks=(64, 3, sz, sz))
 
-        ds_img   = f.create_dataset('images',       shape=(n_max, 3, sz, sz), dtype='f4', **img_kw)
-        ds_sfh   = f.create_dataset('sfh',          shape=(n_max, SFH_N_BINS), dtype='f4',
-                                    maxshape=(None, SFH_N_BINS), chunks=(256, SFH_N_BINS))
-        ds_tnorm = f.create_dataset('sfh_time_norm', shape=(n_max,), dtype='f4', **kw)
-        ds_id    = f.create_dataset('galaxy_id',    shape=(n_max,), dtype='i8', **kw)
-        ds_ra    = f.create_dataset('ra',           shape=(n_max,), dtype='f8', **kw)
-        ds_dec   = f.create_dataset('dec',          shape=(n_max,), dtype='f8', **kw)
-        ds_z     = f.create_dataset('redshift',     shape=(n_max,), dtype='f4', **kw)
+        SFH_N_RAW = 9   # number of CIGALE bins
+
+        ds_img      = f.create_dataset('images',        shape=(n_max, 3, sz, sz), dtype='f4', **img_kw)
+        ds_sfh      = f.create_dataset('sfh',           shape=(n_max, SFH_N_BINS), dtype='f4',
+                                       maxshape=(None, SFH_N_BINS), chunks=(256, SFH_N_BINS))
+        # Raw 9-bin representation for v8 transformer encoder
+        ds_sfh_bins = f.create_dataset('sfh_bins_log',  shape=(n_max, SFH_N_RAW), dtype='f4',
+                                       maxshape=(None, SFH_N_RAW), chunks=(256, SFH_N_RAW))
+        ds_sfh_t    = f.create_dataset('sfh_times_myr', shape=(n_max, SFH_N_RAW), dtype='f4',
+                                       maxshape=(None, SFH_N_RAW), chunks=(256, SFH_N_RAW))
+        ds_tnorm    = f.create_dataset('sfh_time_norm', shape=(n_max,), dtype='f4', **kw)
+        ds_id       = f.create_dataset('galaxy_id',     shape=(n_max,), dtype='i8', **kw)
+        ds_ra       = f.create_dataset('ra',            shape=(n_max,), dtype='f8', **kw)
+        ds_dec      = f.create_dataset('dec',           shape=(n_max,), dtype='f8', **kw)
+        ds_z        = f.create_dataset('redshift',      shape=(n_max,), dtype='f4', **kw)
         # Common fractional grid ∈ [0, 1]; multiply by sfh_time_norm[i] to get Myr
         f.create_dataset('sfh_time_grid', data=SFH_T_FRAC.astype(np.float32))
 
@@ -429,7 +439,7 @@ def main() -> None:
                     result = sfh_to_common_grid(row, z)
                     if result is None:
                         continue
-                    sfh_vec, t_universe_myr = result
+                    sfh_vec, sfh_bins_log, sfh_times_myr, t_universe_myr = result
 
                     # ── stamps ───────────────────────────────────────────────
                     stamps, ok = [], True
@@ -445,13 +455,15 @@ def main() -> None:
                     if not ok:
                         continue
 
-                    ds_img[written]   = np.stack(stamps, axis=0)    # (3, sz, sz)
-                    ds_sfh[written]   = sfh_vec
-                    ds_tnorm[written] = t_universe_myr
-                    ds_id[written]    = int(row['id'])
-                    ds_ra[written]    = float(row['ra'])
-                    ds_dec[written]   = float(row['dec'])
-                    ds_z[written]     = z
+                    ds_img[written]      = np.stack(stamps, axis=0)    # (3, sz, sz)
+                    ds_sfh[written]      = sfh_vec
+                    ds_sfh_bins[written] = sfh_bins_log
+                    ds_sfh_t[written]    = sfh_times_myr
+                    ds_tnorm[written]    = t_universe_myr
+                    ds_id[written]       = int(row['id'])
+                    ds_ra[written]       = float(row['ra'])
+                    ds_dec[written]      = float(row['dec'])
+                    ds_z[written]        = z
                     written += 1
                     tile_ok += 1
 
@@ -462,7 +474,7 @@ def main() -> None:
                     hdul.close()
 
         # ── truncate datasets to actual size ──────────────────────────────
-        for ds in [ds_img, ds_sfh, ds_tnorm, ds_id, ds_ra, ds_dec, ds_z]:
+        for ds in [ds_img, ds_sfh, ds_sfh_bins, ds_sfh_t, ds_tnorm, ds_id, ds_ra, ds_dec, ds_z]:
             ds.resize(written, axis=0)
 
         f.attrs['n_galaxies'] = written
