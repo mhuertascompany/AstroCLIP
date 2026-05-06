@@ -223,10 +223,28 @@ def _plot_population(sfr_bins_log_all: np.ndarray, times_myr_all: np.ndarray,
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+def _demo_bins_from_grid(sfh_grid: np.ndarray, t_frac_grid: np.ndarray,
+                         t_universe_myr: float, n_bins: int = 9):
+    """
+    Demo mode: approximate 9 tokens by averaging consecutive groups of the
+    50-bin grid.  Used when --catalog is not provided (local H5-only run).
+
+    Returns (sfr_bins_log, times_myr) as if they came from 9 CIGALE bins.
+    """
+    # group the 50 grid indices into n_bins consecutive blocks
+    indices   = np.array_split(np.arange(len(t_frac_grid)), n_bins)
+    bin_t_frac = np.array([t_frac_grid[idx].mean() for idx in indices])
+    bin_log    = np.array([sfh_grid[idx].mean()     for idx in indices], dtype=np.float32)
+    times_myr  = (bin_t_frac * t_universe_myr).astype(np.float32)
+    return bin_log, times_myr
+
+
 def main():
     parser = argparse.ArgumentParser(description='Visualise v8 SFH token representation')
     parser.add_argument('--h5',       required=True, help='cosmosweb dataset HDF5')
-    parser.add_argument('--catalog',  required=True, help='COSMOSWeb_mastercatalog_v1.fits')
+    parser.add_argument('--catalog',  default=None,
+                        help='COSMOSWeb_mastercatalog_v1.fits  '
+                             '(omit to run in demo mode using the existing 50-bin grid)')
     parser.add_argument('--output',   default='sfh_tokens_diagnostics.pdf')
     parser.add_argument('--n_gal',    type=int, default=20)
     parser.add_argument('--n_samples',type=int, default=8,
@@ -235,6 +253,10 @@ def main():
                         help='Number of galaxies in the population scatter panel')
     parser.add_argument('--seed',     type=int, default=42)
     args = parser.parse_args()
+
+    demo_mode = args.catalog is None
+    if demo_mode:
+        print('No catalog provided — running in demo mode (9 tokens approximated from 50-bin grid)')
 
     rng = np.random.default_rng(args.seed)
 
@@ -247,38 +269,56 @@ def main():
         h5_sfh      = f['sfh'][:]
         h5_tnorm    = f['sfh_time_norm'][:]
         t_frac_grid = f['sfh_time_grid'][:]
-    print(f'  {n_tot} galaxies in H5')
+        # v6 dataset: may already have raw bins stored
+        has_raw = 'sfh_bins_log' in f
+        if has_raw:
+            h5_bins_log = f['sfh_bins_log'][:]
+            h5_times    = f['sfh_times_myr'][:]
+    print(f'  {n_tot} galaxies in H5  (raw bins in H5: {has_raw})')
 
-    # ── load catalog ─────────────────────────────────────────────────────────
-    cat_ids, cat_sfr, cat_time = _load_catalog(Path(args.catalog))
-    id2row = {gid: i for i, gid in enumerate(cat_ids)}
+    # ── catalog (full mode) ───────────────────────────────────────────────────
+    if not demo_mode and not has_raw:
+        cat_ids, cat_sfr, cat_time = _load_catalog(Path(args.catalog))
+        id2row = {gid: i for i, gid in enumerate(cat_ids)}
+    else:
+        id2row = {}
+
+    # ── helper: get (sfr_bins_log, times_myr) for one H5 index ───────────────
+    def _get_bins(h5_idx):
+        if has_raw:
+            return h5_bins_log[h5_idx], h5_times[h5_idx]
+        if demo_mode:
+            return _demo_bins_from_grid(h5_sfh[h5_idx], t_frac_grid, h5_tnorm[h5_idx])
+        # full catalog mode
+        gid = int(h5_gids[h5_idx])
+        row = id2row.get(gid)
+        if row is None:
+            return None, None
+        sfr_raw  = cat_sfr[row]
+        time_raw = cat_time[row]
+        sort_i   = np.argsort(time_raw)
+        return (_normalise_sfr(sfr_raw[sort_i]),
+                time_raw[sort_i].astype(np.float32))
 
     # ── random selection for per-galaxy panels ────────────────────────────────
     chosen = np.sort(rng.choice(n_tot, size=min(args.n_gal, n_tot), replace=False))
 
-    # ── also load a larger sample for the population panel ────────────────────
-    sort_z = np.argsort(h5_z)
-    step   = max(1, n_tot // args.n_pop)
+    # ── population sample ─────────────────────────────────────────────────────
+    sort_z  = np.argsort(h5_z)
+    step    = max(1, n_tot // args.n_pop)
     pop_idx = sort_z[::step][:args.n_pop]
 
     pop_sfr_bins, pop_times, pop_tuniv, pop_z = [], [], [], []
     for idx in pop_idx:
-        gid = int(h5_gids[idx])
-        row = id2row.get(gid)
-        if row is None:
+        z = float(h5_z[idx])
+        if not (np.isfinite(z) and z > 0):
             continue
-        sfr_raw  = cat_sfr[row]
-        time_raw = cat_time[row]
-        t_univ   = float(h5_tnorm[idx])
-        z        = float(h5_z[idx])
-        if not (np.isfinite(z) and z > 0 and np.all(np.isfinite(sfr_raw))):
+        bins_log, times_myr = _get_bins(idx)
+        if bins_log is None:
             continue
-        sort_idx = np.argsort(time_raw)
-        times_s  = time_raw[sort_idx]
-        sfr_s    = sfr_raw[sort_idx]
-        pop_sfr_bins.append(_normalise_sfr(sfr_s))
-        pop_times.append(times_s.astype(np.float32))
-        pop_tuniv.append(t_univ)
+        pop_sfr_bins.append(bins_log)
+        pop_times.append(times_myr)
+        pop_tuniv.append(float(h5_tnorm[idx]))
         pop_z.append(z)
 
     pop_sfr_bins = np.stack(pop_sfr_bins)
@@ -313,17 +353,10 @@ def main():
                 z     = float(h5_z[h5_idx])
                 t_univ = float(h5_tnorm[h5_idx])
 
-                cat_row = id2row.get(gid)
-                if cat_row is None:
+                sfr_log, times_s = _get_bins(h5_idx)
+                if sfr_log is None:
                     print(f'  galaxy_id={gid} not in catalog — skipping')
                     continue
-
-                sfr_raw  = cat_sfr[cat_row]
-                time_raw = cat_time[cat_row]
-                sort_i   = np.argsort(time_raw)
-                times_s  = time_raw[sort_i].astype(np.float32)
-                sfr_s    = sfr_raw[sort_i]
-                sfr_log  = _normalise_sfr(sfr_s)
 
                 axes = [fig.add_subplot(gs[row, col]) for col in range(3)]
                 _plot_row(axes, gid, z, t_univ,
