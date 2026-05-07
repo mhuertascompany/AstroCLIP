@@ -34,8 +34,8 @@ python -m cosmosweb.umap_embeddings_zoobot_v8 \
     --batch_size       128 \
     --n_neighbors      15 \
     --min_dist         0.1 \
-    --clustering           pca_hdbscan \
-    --n_pca_components     50 \
-    --min_cluster_size     200 \
-    --min_samples          30 \
-    --device               cuda
+    --clustering              umap_hdbscan \
+    --umap_cluster_components 5 \
+    --min_cluster_size        200 \
+    --min_samples             30 \
+    --device                  cuda

@@ -246,15 +246,20 @@ def main():
 
     elif args.clustering == 'umap_hdbscan':
         import umap as umap_lib
-        log.info('UMAP %d-d on joint embedding for clustering…',
+        from sklearn.decomposition import PCA
+        # PCA first: reduces 256-d to 50-d (fast), then UMAP to n-d
+        # with min_dist=0 for tight density clusters.
+        # PCA→UMAP→HDBSCAN is the standard scRNA-seq pipeline (Scanpy).
+        log.info('PCA 50-d → UMAP %d-d for clustering…',
                  args.umap_cluster_components)
+        emb_pca50 = PCA(n_components=50, random_state=42).fit_transform(joint_emb)
         emb_umap_nd = umap_lib.UMAP(
             n_components=args.umap_cluster_components,
             n_neighbors=args.n_neighbors,
             min_dist=0.0,   # tighter clusters for HDBSCAN
-            metric='cosine',
+            metric='euclidean',
             random_state=42,
-        ).fit_transform(joint_emb)
+        ).fit_transform(emb_pca50)
         log.info('HDBSCAN on %d-d UMAP (min_cluster_size=%d, min_samples=%d)…',
                  args.umap_cluster_components, args.min_cluster_size, args.min_samples)
         clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
