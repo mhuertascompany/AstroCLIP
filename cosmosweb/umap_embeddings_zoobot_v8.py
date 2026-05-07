@@ -150,9 +150,22 @@ def parse_args():
     p.add_argument('--z_high',      type=float, default=3.0)
     p.add_argument('--n_neighbors', type=int,   default=15)
     p.add_argument('--min_dist',    type=float, default=0.1)
-    p.add_argument('--clustering',  type=str,   default='kmeans',
-                   choices=['kmeans', 'hdbscan'])
-    p.add_argument('--n_clusters',  type=int,   default=12)
+    p.add_argument('--clustering',  type=str,   default='pca_hdbscan',
+                   choices=['kmeans', 'hdbscan', 'pca_hdbscan', 'umap_hdbscan'],
+                   help='kmeans: k-means on 2D UMAP (arbitrary equal-size clusters); '
+                        'hdbscan: HDBSCAN on 2D UMAP; '
+                        'pca_hdbscan: PCA(256→n_pca_components) then HDBSCAN [recommended]; '
+                        'umap_hdbscan: UMAP(256→umap_cluster_components) then HDBSCAN')
+    p.add_argument('--n_clusters',           type=int,   default=12,
+                   help='k-means only')
+    p.add_argument('--min_cluster_size',     type=int,   default=200,
+                   help='HDBSCAN min_cluster_size (all hdbscan modes)')
+    p.add_argument('--min_samples',          type=int,   default=30,
+                   help='HDBSCAN min_samples (all hdbscan modes)')
+    p.add_argument('--n_pca_components',     type=int,   default=50,
+                   help='PCA components before HDBSCAN (pca_hdbscan mode)')
+    p.add_argument('--umap_cluster_components', type=int, default=10,
+                   help='UMAP output dims for clustering (umap_hdbscan mode)')
     p.add_argument('--device',      type=str,   default='cuda')
     return p.parse_args()
 
@@ -191,20 +204,66 @@ def main():
     xy_img   = fit_umap(img_emb,   n_neighbors=args.n_neighbors, min_dist=args.min_dist)
     xy_sfh   = fit_umap(sfh_emb,   n_neighbors=args.n_neighbors, min_dist=args.min_dist)
 
+    try:
+        from hdbscan import HDBSCAN
+    except ImportError:
+        from sklearn.cluster import HDBSCAN
+
     if args.clustering == 'kmeans':
         from sklearn.cluster import KMeans
+        log.info('k-means (k=%d) on 2D UMAP…', args.n_clusters)
         km = KMeans(n_clusters=args.n_clusters, random_state=42, n_init='auto')
         hdb_labels = km.fit_predict(xy_joint).astype(np.int32)
         n_clusters, n_noise = args.n_clusters, 0
-    else:
-        try:
-            from hdbscan import HDBSCAN
-        except ImportError:
-            from sklearn.cluster import HDBSCAN
-        clusterer  = HDBSCAN(min_cluster_size=200, min_samples=50)
+
+    elif args.clustering == 'hdbscan':
+        log.info('HDBSCAN on 2D UMAP (min_cluster_size=%d, min_samples=%d)…',
+                 args.min_cluster_size, args.min_samples)
+        clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
+                             min_samples=args.min_samples)
         hdb_labels = clusterer.fit_predict(xy_joint).astype(np.int32)
         n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
         n_noise    = int((hdb_labels == -1).sum())
+        log.info('  %d clusters, %d noise points (%.1f%%)',
+                 n_clusters, n_noise, 100 * n_noise / len(hdb_labels))
+
+    elif args.clustering == 'pca_hdbscan':
+        from sklearn.decomposition import PCA
+        log.info('PCA %d-d on joint embedding…', args.n_pca_components)
+        pca        = PCA(n_components=args.n_pca_components, random_state=42)
+        emb_pca    = pca.fit_transform(joint_emb)
+        var_explained = pca.explained_variance_ratio_.sum()
+        log.info('  Explained variance: %.1f%%', 100 * var_explained)
+        log.info('HDBSCAN on PCA space (min_cluster_size=%d, min_samples=%d)…',
+                 args.min_cluster_size, args.min_samples)
+        clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
+                             min_samples=args.min_samples)
+        hdb_labels = clusterer.fit_predict(emb_pca).astype(np.int32)
+        n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
+        n_noise    = int((hdb_labels == -1).sum())
+        log.info('  %d clusters, %d noise points (%.1f%%)',
+                 n_clusters, n_noise, 100 * n_noise / len(hdb_labels))
+
+    elif args.clustering == 'umap_hdbscan':
+        import umap as umap_lib
+        log.info('UMAP %d-d on joint embedding for clustering…',
+                 args.umap_cluster_components)
+        emb_umap_nd = umap_lib.UMAP(
+            n_components=args.umap_cluster_components,
+            n_neighbors=args.n_neighbors,
+            min_dist=0.0,   # tighter clusters for HDBSCAN
+            metric='cosine',
+            random_state=42,
+        ).fit_transform(joint_emb)
+        log.info('HDBSCAN on %d-d UMAP (min_cluster_size=%d, min_samples=%d)…',
+                 args.umap_cluster_components, args.min_cluster_size, args.min_samples)
+        clusterer  = HDBSCAN(min_cluster_size=args.min_cluster_size,
+                             min_samples=args.min_samples)
+        hdb_labels = clusterer.fit_predict(emb_umap_nd).astype(np.int32)
+        n_clusters = int(hdb_labels.max()) + 1 if hdb_labels.max() >= 0 else 0
+        n_noise    = int((hdb_labels == -1).sum())
+        log.info('  %d clusters, %d noise points (%.1f%%)',
+                 n_clusters, n_noise, 100 * n_noise / len(hdb_labels))
 
     npz_path = args.npz_output or args.output.with_suffix('.npz')
     npz_data = dict(
