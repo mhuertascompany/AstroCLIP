@@ -214,14 +214,18 @@ def main():
         h5_indices=h5_indices, redshifts=redshifts.astype(np.float32),
         hdbscan_labels=hdb_labels,
     )
-    for col, key in [('zfinal','zfinal'), ('radius_sersic','radius_sersic'),
-                     ('_log_mass','log_mass'), ('_log_sfr','log_sfr'),
-                     ('_log_ssfr','log_ssfr')]:
+    for col, key in [('zfinal', 'zfinal'), ('radius_sersic', 'radius_sersic'),
+                     ('sersic', 'sersic'), ('axratio_sersic', 'axratio_sersic'),
+                     ('_log_mass', 'log_mass'), ('_log_sfr', 'log_sfr'),
+                     ('_log_ssfr', 'log_ssfr')]:
         if col in prop_aligned.columns:
             npz_data[key] = prop_aligned[col].values.astype(np.float32)
     _save_cigale_extras(npz_data, prop_aligned)
     for col in sorted(c for c in prop_aligned.columns if 'family' in c):
         npz_data[col] = prop_aligned[col].values.astype(np.float32)
+    for col in ('binary_disturbed', 'binary_not_disturbed'):
+        if col in prop_aligned.columns:
+            npz_data[col] = prop_aligned[col].values.astype(np.float32)
     np.savez_compressed(npz_path, **npz_data)
     log.info('npz → %s', npz_path)
 
