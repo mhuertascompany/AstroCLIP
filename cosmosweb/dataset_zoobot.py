@@ -465,6 +465,8 @@ class SFHTokenCosmosWebZooBotDataset(Dataset):
         self.transform   = (_train_transform(image_size) if augment
                             else _inference_transform(image_size))
 
+        stamp_dir = Path(stamp_root) / filter_name
+
         with h5py.File(h5_path, 'r') as f:
             n_tot        = int(f.attrs['n_galaxies'])
             gids         = f['galaxy_id'][:]
@@ -475,10 +477,23 @@ class SFHTokenCosmosWebZooBotDataset(Dataset):
         cut = int(n_tot * 0.9)
         sl  = slice(None, cut) if split == 'train' else slice(cut, None)
 
-        self.gids         = gids[sl]
-        self.sfh_bins_log = sfh_bins_log[sl]
-        self.sfh_times    = sfh_times[sl]
-        self.t_norm       = t_norm[sl]
+        gids         = gids[sl]
+        sfh_bins_log = sfh_bins_log[sl]
+        sfh_times    = sfh_times[sl]
+        t_norm       = t_norm[sl]
+
+        # Keep only galaxies whose stamp file exists
+        valid = np.array(
+            [(stamp_dir / f'{filter_name}_{int(gid)}.jpg').exists()
+             for gid in gids],
+            dtype=bool,
+        )
+        self.gids         = gids[valid]
+        self.sfh_bins_log = sfh_bins_log[valid]
+        self.sfh_times    = sfh_times[valid]
+        self.t_norm       = t_norm[valid]
+        print(f'[SFHTokenDataset] {split}: {valid.sum()}/{len(gids)} objects '
+              f'have {filter_name} stamps')
 
     def __len__(self) -> int:
         return len(self.gids)
