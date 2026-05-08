@@ -317,16 +317,44 @@ def _render_stamp(ax, img: np.ndarray):
     ax.set_xticks([]); ax.set_yticks([])
 
 
-def _render_sfh(ax, sfh_log: np.ndarray):
-    w = np.maximum(10.0 ** sfh_log - SFH_EPS, SFH_EPS)
-    t = np.linspace(0, 1, len(sfh_log))
-    ax.step(t[1:], w[1:], where='post', color='steelblue', lw=0.9)
-    ax.fill_between(t[1:], w[1:], step='post', alpha=0.2, color='steelblue')
-    ax.set_yscale('log')
-    ax.set_xlim(0, 1)
-    ax.tick_params(labelsize=4)
-    ax.set_xlabel('Fractional lookback time', fontsize=4)
-    ax.set_ylabel('SFH weight (norm.)', fontsize=4)
+def _render_sfh(ax, sfh_log: np.ndarray,
+                sfh_bins_log: np.ndarray | None = None,
+                sfh_times_myr: np.ndarray | None = None,
+                t_norm: float | None = None):
+    """
+    Plot a galaxy SFH.  If sfh_bins_log / sfh_times_myr / t_norm are provided
+    (v6+ H5), draw the 9 original CIGALE bins as a bar chart.
+    Otherwise fall back to the 50-bin interpolated step plot.
+    """
+    if sfh_bins_log is not None and sfh_times_myr is not None and t_norm and t_norm > 0:
+        # ── 9 CIGALE bins ────────────────────────────────────────────────────
+        w = np.maximum(10.0 ** sfh_bins_log - SFH_EPS, SFH_EPS)
+        w = w / w.sum()
+        t_centres = sfh_times_myr / t_norm                   # fractional lookback times
+        # bin edges: 0, midpoints between consecutive centres, 1
+        edges = np.empty(len(t_centres) + 1)
+        edges[0]    = 0.0
+        edges[1:-1] = 0.5 * (t_centres[:-1] + t_centres[1:])
+        edges[-1]   = 1.0
+        widths = np.diff(edges)
+        ax.bar(edges[:-1], w, width=widths, align='edge',
+               color='steelblue', alpha=0.7, edgecolor='steelblue', linewidth=0.5)
+        ax.set_yscale('log')
+        ax.set_xlim(0, 1)
+        ax.tick_params(labelsize=4)
+        ax.set_xlabel('Fractional lookback time', fontsize=4)
+        ax.set_ylabel('SFH weight (norm.)', fontsize=4)
+    else:
+        # ── 50-bin interpolated fallback ─────────────────────────────────────
+        w = np.maximum(10.0 ** sfh_log - SFH_EPS, SFH_EPS)
+        t = np.linspace(0, 1, len(sfh_log))
+        ax.step(t[1:], w[1:], where='post', color='steelblue', lw=0.9)
+        ax.fill_between(t[1:], w[1:], step='post', alpha=0.2, color='steelblue')
+        ax.set_yscale('log')
+        ax.set_xlim(0, 1)
+        ax.tick_params(labelsize=4)
+        ax.set_xlabel('Fractional lookback time', fontsize=4)
+        ax.set_ylabel('SFH weight (norm.)', fontsize=4)
 
 
 _BLANK_HTML = (
@@ -359,6 +387,14 @@ def _make_gallery(h5_path: Path, h5_rows: np.ndarray, d: dict,
         imgs = f['images'][list(rows)]    # (n, 3, 64, 64)
         sfhs = f['sfh'][list(rows)]       # (n, N_BINS)
         zs   = f['redshift'][list(rows)]  # (n,)
+        # v6+ native CIGALE bins (optional)
+        has_bins = 'sfh_bins_log' in f and 'sfh_times_myr' in f and 'sfh_time_norm' in f
+        if has_bins:
+            sfh_bins   = f['sfh_bins_log'][list(rows)]   # (n, 9)
+            sfh_times  = f['sfh_times_myr'][list(rows)]  # (n, 9)
+            sfh_tnorms = f['sfh_time_norm'][list(rows)]  # (n,)
+        else:
+            sfh_bins = sfh_times = sfh_tnorms = None
 
     nrows = max(1, (n + NCOLS - 1) // NCOLS)
     kw    = dict(figsize=(NCOLS * 1.7, nrows * 1.7), squeeze=False)
@@ -376,7 +412,12 @@ def _make_gallery(h5_path: Path, h5_rows: np.ndarray, d: dict,
         axs_img.flatten()[i].set_title(f'z={zs[i]:.2f}', fontsize=5, pad=1)
 
         axs_sfh.flatten()[i].set_visible(True)
-        _render_sfh(axs_sfh.flatten()[i], sfhs[i])
+        _render_sfh(
+            axs_sfh.flatten()[i], sfhs[i],
+            sfh_bins_log  = sfh_bins[i]   if has_bins else None,
+            sfh_times_myr = sfh_times[i]  if has_bins else None,
+            t_norm        = float(sfh_tnorms[i]) if has_bins else None,
+        )
         axs_sfh.flatten()[i].set_title(f'z={zs[i]:.2f}', fontsize=5, pad=1)
 
     for fig in (fig_img, fig_sfh):
