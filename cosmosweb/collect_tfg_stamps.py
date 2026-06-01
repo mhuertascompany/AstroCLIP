@@ -20,11 +20,14 @@ Output layout
         COSMOS_175080/
             ...
 
-Run on candide (from the repo root):
+Run (from the repo root):
     python -m cosmosweb.collect_tfg_stamps \\
-        --csv_dir  /n03data/huertas/python/AstroCLIP/cosmosweb/galaxias_select \\
-        --output   /n03data/huertas/COSMOS-Web/tfg_laura \\
+        --csv_dir  cosmosweb/datos_CIGALE \\
+        --output   tfg_stamps \\
         --arcsec   5.0
+
+Or with defaults (reads cosmosweb/datos_CIGALE, writes to tfg_stamps/):
+    python -m cosmosweb.collect_tfg_stamps
 """
 
 from __future__ import annotations
@@ -171,7 +174,7 @@ def process_galaxy(gid: int, ra: float, dec: float,
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description='Collect TFG stamps for Laura')
     p.add_argument('--csv_dir', type=Path,
-                   default=Path(__file__).parent / 'galaxias_select',
+                   default=Path(__file__).parent / 'datos_CIGALE',
                    help='Directory containing the COSMOS_*.csv files')
     p.add_argument('--output',  type=Path,
                    default=Path('/n03data/huertas/COSMOS-Web/tfg_laura'),

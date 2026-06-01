@@ -149,12 +149,30 @@ def _sfh_properties(h5_path: Path, h5_indices: np.ndarray) -> dict[str, np.ndarr
         delta_5_10 = cumul_recent[10] - cumul_recent[5]
         quench_index = delta_5_10 - delta_0_5
 
+    # ── 6. dX / iX: decline / increase indices over last X% of Hubble time ──────
+    # dX = (weight in [X/2, X%]) - (weight in [0, X/2%]), normalised by [0, X%]
+    # Positive → more SF in older half → declining SFH
+    # iX = -dX: positive → more SF in recent half → rising SFH
+    sfh_trend = {}
+    for pct in (5, 10, 20, 30, 50):
+        half = pct / 2.0 / 100.0
+        full = pct / 100.0
+        w_recent = sfr[:, t_frac <= half].sum(axis=1)
+        w_older  = sfr[:, (t_frac > half) & (t_frac <= full)].sum(axis=1)
+        w_total  = sfr[:, t_frac <= full].sum(axis=1)
+        d = np.full(sfr.shape[0], np.nan)
+        nz = w_total > 0
+        d[nz] = (w_older[nz] - w_recent[nz]) / w_total[nz]
+        sfh_trend[f'SFH: d{pct} (decline last {pct}%)']  =  d
+        sfh_trend[f'SFH: i{pct} (increase last {pct}%)'] = -d
+
     return {
         'SFH: log(old/recent)':      log_old_recent,
         'SFH: mean formation epoch':  mean_t,
         **sfr_fracs,
         'SFH: peak lookback t_frac':  peak_t,
         'SFH: quenching index':       quench_index,
+        **sfh_trend,
     }
 
 
@@ -271,6 +289,46 @@ def _load(h5_path: Path, umap_path: Path) -> dict:
     h5_indices = npz['h5_indices'].astype(int)
     sfh_props  = _sfh_properties(h5_path, h5_indices)
     color_props.update(sfh_props)
+
+    # Pre-computed SFH scalar statistics from the npz (add_sfh_stats.py)
+    # These duplicate some on-the-fly props but also include burstiness metrics
+    # that require the 9-bin CIGALE data (not recomputed on the fly here).
+    _npz_sfh_map = {
+        'qi':              'SFH: QI (quenching index)',
+        'nqi':             'SFH: nQI (normalised QI = −i10)',
+        'sfh_peak_t':      'SFH: peak lookback time (npz)',
+        'sfh_mean_t':      'SFH: mean formation epoch (npz)',
+        # cumulative fractions
+        'f5':              'SFH: f(5%) cumulative',
+        'f10':             'SFH: f(10%) cumulative',
+        'f20':             'SFH: f(20%) cumulative',
+        'f30':             'SFH: f(30%) cumulative',
+        'f50':             'SFH: f(50%) cumulative',
+        # increase / decline indices
+        'i5':              'SFH: i5 (increase last 5%)',
+        'i10':             'SFH: i10 (increase last 10%)',
+        'i20':             'SFH: i20 (increase last 20%)',
+        'i30':             'SFH: i30 (increase last 30%)',
+        'i50':             'SFH: i50 (increase last 50%)',
+        'd5':              'SFH: d5 (decline last 5%)',
+        'd10':             'SFH: d10 (decline last 10%)',
+        'd20':             'SFH: d20 (decline last 20%)',
+        'd30':             'SFH: d30 (decline last 30%)',
+        'd50':             'SFH: d50 (decline last 50%)',
+        # burstiness (9-bin CIGALE)
+        'burst_var':       'Burst: variance (9-bin)',
+        'burst_ac1':       'Burst: autocorr lag-1',
+        'burst_ac2':       'Burst: autocorr lag-2',
+        'burst_dyn_range': 'Burst: dynamic range log10(max/min)',
+        'burst_var_rec':   'Burst: variance recent 3 bins',
+        'burst_var_old':   'Burst: variance old 3 bins',
+        'burst_var_ratio': 'Burst: var ratio (recent/old)',
+        'burst_max_delta': 'Burst: max consecutive jump',
+    }
+    for npz_key, label in _npz_sfh_map.items():
+        if npz_key in npz:
+            arr = npz[npz_key].astype(float)
+            color_props[label] = np.where(np.isfinite(arr), arr, np.nan)
 
     # HDBSCAN cluster labels (optional — produced by umap_embeddings_zoobot.py)
     if 'hdbscan_labels' in npz:
