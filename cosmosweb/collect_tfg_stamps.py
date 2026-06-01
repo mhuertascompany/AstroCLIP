@@ -7,16 +7,17 @@ Output layout
 -------------
     tfg_laura/
         COSMOS_130567/          ← one folder per CSV (one per student)
-            F115W_130567.jpg    ← copied from existing JPEG stamp
-            F150W_130567.jpg
-            F277W_130567.jpg
-            F444W_130567.jpg
-            F115W_130567.fits   ← fresh FITS cutout from mosaic
-            F150W_130567.fits
-            F277W_130567.fits
-            F444W_130567.fits
-            F115W_316983.jpg    ← next galaxy in the same CSV
-            ...
+            130567/             ← one subfolder per galaxy
+                F115W_130567.jpg
+                F150W_130567.jpg
+                F277W_130567.jpg
+                F444W_130567.jpg
+                F115W_130567.fits
+                F150W_130567.fits
+                F277W_130567.fits
+                F444W_130567.fits
+            316983/             ← next galaxy in the same CSV
+                ...
         COSMOS_175080/
             ...
 
@@ -130,15 +131,19 @@ def make_fits_cutout(mosaic: Path, ra: float, dec: float,
 def process_galaxy(gid: int, ra: float, dec: float,
                    out_dir: Path, arcsec: float) -> dict:
     """
-    Copy JPEGs and cut FITS stamps for one galaxy.
+    Copy JPEGs and cut FITS stamps for one galaxy into its own subfolder.
+    Output layout: out_dir / <gid> / <FILT>_<gid>.{jpg,fits}
     Returns a summary dict with counts.
     """
     counts = {'jpg_ok': 0, 'jpg_miss': 0, 'fits_ok': 0, 'fits_miss': 0}
 
+    gal_dir = out_dir / str(gid)
+    gal_dir.mkdir(parents=True, exist_ok=True)
+
     # ── 1. JPEGs: copy from existing stamp directory ──────────────────────────
     for filt in JWST_FILTERS:
         src = STAMP_ROOT / filt / f'{filt}_{gid}.jpg'
-        dst = out_dir / f'{filt}_{gid}.jpg'
+        dst = gal_dir / f'{filt}_{gid}.jpg'
         if src.exists():
             shutil.copy2(src, dst)
             counts['jpg_ok'] += 1
@@ -156,7 +161,7 @@ def process_galaxy(gid: int, ra: float, dec: float,
     log.info('  id=%-8d  tile=%s', gid, tile)
     for filt in JWST_FILTERS:
         mpath = mosaic_path(filt, tile)
-        dst   = out_dir / f'{filt}_{gid}.fits'
+        dst   = gal_dir / f'{filt}_{gid}.fits'
         if not mpath.exists():
             log.debug('  Mosaic missing: %s', mpath)
             counts['fits_miss'] += 1
