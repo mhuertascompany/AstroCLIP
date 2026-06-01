@@ -22,6 +22,6 @@ cd ${REPO_DIR}
 
 # ── run ───────────────────────────────────────────────────────────────────────
 python -m cosmosweb.collect_tfg_stamps \
-    --csv_dir  ${REPO_DIR}/cosmosweb/datos_CIGALE \
+    --csv_dir  ${REPO_DIR}/cosmosweb/datos_redshift \
     --output   ${OUTPUT_DIR} \
     --arcsec   5.0

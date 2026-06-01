@@ -174,7 +174,7 @@ def process_galaxy(gid: int, ra: float, dec: float,
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description='Collect TFG stamps for Laura')
     p.add_argument('--csv_dir', type=Path,
-                   default=Path(__file__).parent / 'datos_CIGALE',
+                   default=Path(__file__).parent / 'datos_redshift',
                    help='Directory containing the COSMOS_*.csv files')
     p.add_argument('--output',  type=Path,
                    default=Path('/n03data/huertas/COSMOS-Web/tfg_laura'),
