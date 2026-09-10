@@ -31,8 +31,8 @@ UTILS_DIR=/home/wozny/jobs/These/DR1_science/SFH/utils
 cd "${REPO_DIR}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 
-# The sampler creates OUTPUT_DIR itself and refuses to overwrite an existing
-# sample. Do not mkdir OUTPUT_DIR here. It preserves all SFH realizations and
+# The sampler accepts a new or empty OUTPUT_DIR and refuses to overwrite an
+# existing sample. It preserves all SFH realizations and
 # exports catalog.fits with the photometric columns needed for image cutouts.
 # Extra arguments override defaults (argparse uses the last supplied value).
 python -u -m euclid.sample_edfn_sfhs \

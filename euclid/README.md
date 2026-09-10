@@ -10,7 +10,7 @@ python -m euclid.sample_edfn_sfhs \
     --seed 42
 ```
 
-Choose a new output directory. Defaults use:
+Choose a new or empty output directory. Defaults use:
 
 - Helpers: `/home/wozny/jobs/These/DR1_science/SFH/utils`
 - Photometric catalog: `get_file_cat(field="EDFN", cat_name="clean_photo_phz", phot_type="2fwhm_aper")`, loaded with `open_table`.
@@ -35,7 +35,9 @@ Sampler options can be passed after the script name, for example:
 sbatch euclid/slurm_sample_edfn_sfhs.sh --output /path/to/new_sample
 ```
 
-The output directory must not already exist; the sampler creates it.
+The output directory may already exist if it is empty; otherwise the sampler
+creates it. Existing files are never overwritten. If an earlier run left a
+partial sample, choose another `--output` directory.
 
 The script identifies EDFN membership through the photometric catalog, matches
 its IDs to the SFH files, and uniformly samples 10,000 matched galaxies without

@@ -20,6 +20,16 @@ import numpy as np
 from .sample_sfh_catalog import sample_catalog
 
 
+def check_output_directory(output):
+    """Allow a new or empty directory; never reuse an existing sample."""
+    output = Path(output)
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        raise FileExistsError(
+            f'Output must be a new or empty directory: {output}. '
+            'Choose another --output path to preserve the existing contents.'
+        )
+
+
 def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
                      id_column='object_id', batch_size=128):
     """Uniformly sample unique field-catalog galaxies that have available SFHs."""
@@ -29,8 +39,7 @@ def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
     # or a pandas DataFrame.
     table = Table.from_pandas(table) if hasattr(table, 'to_records') else Table(table)
     output = Path(output)
-    if output.exists():
-        raise FileExistsError(f'Refusing to overwrite {output}')
+    check_output_directory(output)
     if id_column not in table.colnames:
         raise ValueError(f'No {id_column!r} column. Available: {table.colnames}')
     if n <= 0 or batch_size <= 0:
@@ -94,7 +103,8 @@ def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
     selected.meta['NFIELD'] = len(table)
     selected.meta['NMATCH'] = len(eligible)
 
-    output.mkdir(parents=True, exist_ok=False)
+    check_output_directory(output)
+    output.mkdir(parents=True, exist_ok=True)
     for path in used_files:
         positions = np.array([i for i, gid in enumerate(selected_ids)
                               if matches[gid][0] == path])
@@ -123,7 +133,7 @@ def main():
                         default=Path('/n17data/wozny/These/science_DR1/SFHs/ready_to_use_sfhs'))
     parser.add_argument('--sfh-files', type=Path, nargs='+',
                         help='Explicit files, overriding the directory scan.')
-    parser.add_argument('--output', type=Path, required=True, help='New output directory.')
+    parser.add_argument('--output', type=Path, required=True, help='New or empty output directory.')
     parser.add_argument('--n', type=int, default=10_000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--id-column', default='object_id')
