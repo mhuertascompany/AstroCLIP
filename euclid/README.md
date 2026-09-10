@@ -17,6 +17,26 @@ Choose a new output directory. Defaults use:
 - SFHs: HDF5 files under `/n17data/wozny/These/science_DR1/SFHs/ready_to_use_sfhs`.
 - ID column: `object_id` (override with `--id-column` for the photometric catalog).
 
+To submit this preparation as a SLURM job on candide:
+
+```bash
+sbatch euclid/slurm_sample_edfn_sfhs.sh
+```
+
+The job uses node `n03`, 4 CPUs, 64 GB RAM, and a 6-hour limit, with the same
+`cosmos_visual` conda environment as the COSMOS-Web preparation scripts.
+It writes the 10,000-object sample (seed 42) to
+`/n03data/huertas/Euclid/sfh_clip/edfn_10k/`. Job logs are written to
+`euclid/sample_edfn_sfhs_<jobid>.out` and `.err` in the candide checkout.
+The environment must also provide the dependencies of Wozny's catalog helpers.
+Sampler options can be passed after the script name, for example:
+
+```bash
+sbatch euclid/slurm_sample_edfn_sfhs.sh --output /path/to/new_sample
+```
+
+The output directory must not already exist; the sampler creates it.
+
 The script identifies EDFN membership through the photometric catalog, matches
 its IDs to the SFH files, and uniformly samples 10,000 matched galaxies without
 replacement. This samples the **SFH-available subset** of the clean EDFN catalog;
