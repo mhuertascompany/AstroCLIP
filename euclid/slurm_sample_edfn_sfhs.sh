@@ -24,7 +24,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 set -u
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
-OUTPUT_DIR=/n03data/huertas/Euclid/sfh_clip/edfn_10k
+OUTPUT_DIR=/n03data/huertas/euclid/sfh_clip/edfn_10k
 SFH_DIR=/n17data/wozny/These/science_DR1/SFHs/ready_to_use_sfhs
 UTILS_DIR=/home/wozny/jobs/These/DR1_science/SFH/utils
 

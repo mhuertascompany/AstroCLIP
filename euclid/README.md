@@ -26,7 +26,7 @@ sbatch euclid/slurm_sample_edfn_sfhs.sh
 The job uses node `n03`, 4 CPUs, 64 GB RAM, and a 6-hour limit, with the same
 `cosmos_visual` conda environment as the COSMOS-Web preparation scripts.
 It writes the 10,000-object sample (seed 42) to
-`/n03data/huertas/Euclid/sfh_clip/edfn_10k/`. Job logs are written to
+`/n03data/huertas/euclid/sfh_clip/edfn_10k/`. Job logs are written to
 `euclid/sample_edfn_sfhs_<jobid>.out` and `.err` in the candide checkout.
 The environment must also provide the dependencies of Wozny's catalog helpers.
 Sampler options can be passed after the script name, for example:
