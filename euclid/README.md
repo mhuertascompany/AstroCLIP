@@ -23,6 +23,16 @@ To submit this preparation as a SLURM job on candide:
 sbatch euclid/slurm_sample_edfn_sfhs.sh
 ```
 
+For the 100,000-object training sample, submit the separate large job:
+
+```bash
+sbatch euclid/slurm_sample_edfn_sfhs_100k.sh
+```
+
+It writes to `/n03data/huertas/euclid/sfh_clip/edfn_100k/`, uses the same seed
+and `EDFN_2fwhm_aper.h5` input as the pilot, and has a 24-hour time limit. It
+fails cleanly if fewer than 100,000 photometric-catalog objects have SFHs.
+
 The job uses node `n03`, 4 CPUs, 64 GB RAM, and a 6-hour limit, with the same
 `cosmos_visual` conda environment as the COSMOS-Web preparation scripts.
 It writes the 10,000-object sample (seed 42) to
