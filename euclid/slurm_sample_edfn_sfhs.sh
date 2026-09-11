@@ -25,7 +25,7 @@ set -u
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 OUTPUT_DIR=/n03data/huertas/euclid/sfh_clip/edfn_10k
-SFH_DIR=/n17data/wozny/These/science_DR1/SFHs/ready_to_use_sfhs
+SFH_FILE=/n17data/wozny/These/science_DR1/SFHs/ready_to_use_sfhs/EDFN_2fwhm_aper.h5
 UTILS_DIR=/home/wozny/jobs/These/DR1_science/SFH/utils
 
 cd "${REPO_DIR}"
@@ -39,7 +39,7 @@ python -u -m euclid.sample_edfn_sfhs \
     --utils-dir  "${UTILS_DIR}" \
     --field      EDFN \
     --phot-type  2fwhm_aper \
-    --sfh-dir    "${SFH_DIR}" \
+    --sfh-files  "${SFH_FILE}" \
     --output     "${OUTPUT_DIR}" \
     --n          10000 \
     --seed       42 \

@@ -29,6 +29,9 @@ It writes the 10,000-object sample (seed 42) to
 `/n03data/huertas/euclid/sfh_clip/edfn_10k/`. Job logs are written to
 `euclid/sample_edfn_sfhs_<jobid>.out` and `.err` in the candide checkout.
 The environment must also provide the dependencies of Wozny's catalog helpers.
+The job explicitly reads
+`ready_to_use_sfhs/EDFN_2fwhm_aper.h5`, matching the `2fwhm_aper` photometric
+catalog. It does not scan or combine the alternate `EDFN.h5` product.
 Sampler options can be passed after the script name, for example:
 
 ```bash
