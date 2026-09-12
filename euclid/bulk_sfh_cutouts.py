@@ -14,6 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import time
 
 import numpy as np
 from astropy import units as u
@@ -106,8 +107,9 @@ ORDER BY src.sample_row, dist_cent
 """
 
 
-def query_mosaics(client, sources, output, query, batch_size=1000):
-    """Cache each completed TAP upload/query so interrupted lookups can resume."""
+def query_mosaics(client, sources, output, query, batch_size=1000,
+                  query_retries=5, retry_delay=5):
+    """Cache completed TAP queries and retry transient archive failures."""
     cache = Path(output) / 'queries'
     cache.mkdir(exist_ok=True)
     (cache / 'mosaics.sql').write_text(query)
@@ -123,13 +125,33 @@ def query_mosaics(client, sources, output, query, batch_size=1000):
             with tempfile.TemporaryDirectory() as tmp:
                 upload = Path(tmp) / 'sample.vot'
                 sources[start:stop].write(upload, format='votable')
-                job = client.launch_job_async(
-                    query, upload_resource=str(upload), upload_table_name='sfh_sample',
-                    output_format='votable', verbose=False,
-                )
-                result = job.get_results()
-                if result is None:
-                    raise RuntimeError(f'No TAP result for rows {start}:{stop}.')
+                for attempt in range(1, query_retries + 1):
+                    try:
+                        job = client.launch_job_async(
+                            query, upload_resource=str(upload),
+                            upload_table_name='sfh_sample', output_format='votable',
+                            verbose=False,
+                        )
+                        if job is None:
+                            raise RuntimeError('Euclid TAP returned no job.')
+                        result = job.get_results()
+                        if result is None:
+                            raise RuntimeError('Euclid TAP job returned no result.')
+                        break
+                    except Exception as exc:
+                        if attempt == query_retries:
+                            raise RuntimeError(
+                                f'Mosaic query failed for sample rows {start}:{stop} '
+                                f'after {query_retries} attempts.'
+                            ) from exc
+                        delay = min(retry_delay * 2 ** (attempt - 1), 30)
+                        print(
+                            f'Mosaic query failed for rows {start}:{stop} '
+                            f'(attempt {attempt}/{query_retries}): {exc} '
+                            f'Retrying in {delay:g} s.',
+                            flush=True,
+                        )
+                        time.sleep(delay)
             temp = path.with_suffix('.tmp')
             result.write(temp, format='ascii.ecsv', overwrite=True)
             temp.replace(path)
@@ -276,6 +298,10 @@ def main():
     parser.add_argument('--processing-mode', choices=['DEEP', 'WIDE'], default='DEEP')
     parser.add_argument('--release-name', help='Optional exact mosaic release_name filter')
     parser.add_argument('--batch-size', type=int, default=1000, help='Sources per archive query')
+    parser.add_argument('--query-retries', type=int, default=5,
+                        help='Attempts per uncached archive batch (default: 5)')
+    parser.add_argument('--retry-delay', type=float, default=5,
+                        help='Initial retry delay in seconds; doubles up to 30 s')
     parser.add_argument('--id-column')
     parser.add_argument('--ra-column')
     parser.add_argument('--dec-column')
@@ -285,8 +311,9 @@ def main():
     parser.add_argument('--resume', action='store_true', help='Reuse cached queries and verified cutouts')
     args = parser.parse_args()
     if (not np.isfinite(args.size_arcsec) or args.size_arcsec <= 0 or args.batch_size < 1
+            or args.query_retries < 1 or not np.isfinite(args.retry_delay) or args.retry_delay < 0
             or (args.limit is not None and args.limit < 1)):
-        parser.error('Size, batch size, and limit must be positive.')
+        parser.error('Size, batch size, retry count, and limit must be positive; retry delay cannot be negative.')
     bands = list(dict.fromkeys(args.bands))
     sample, sources = load_sample(args.sample, args.id_column, args.ra_column, args.dec_column, args.limit)
     settings = dict(schema_version=1, sample_sha256=hashlib.sha256(args.sample.read_bytes()).hexdigest(),
@@ -313,7 +340,10 @@ def main():
             client.ROW_LIMIT = -1
             client.login(**({'credentials_file': str(args.credentials_file.expanduser())}
                             if args.credentials_file else {}))
-        matches = query_mosaics(client, sources, args.output, query, args.batch_size)
+        matches = query_mosaics(
+            client, sources, args.output, query, args.batch_size,
+            args.query_retries, args.retry_delay,
+        )
     finally:
         if client is not None:
             client.logout()

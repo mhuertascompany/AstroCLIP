@@ -174,6 +174,11 @@ galaxy from the manifest. Retry the **same command with `--resume`** to reuse
 completed queries and verified FITS outputs. Changing the sample, bands, size,
 or query settings requires a new output directory.
 
+Each uncached archive batch is attempted five times by default, with an
+exponential delay capped at 30 seconds. Adjust this with `--query-retries` and
+`--retry-delay`. If an archive login expires during a long lookup, restart the
+same command with `--resume`; it logs in again and queries only uncached batches.
+
 For an initial check, add `--limit 100` and use a separate output directory.
 `--query-only` saves mosaic matches without extracting images; use the same
 command with `--resume` and without `--query-only` to extract them later.

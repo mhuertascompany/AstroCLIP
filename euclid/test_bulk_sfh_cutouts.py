@@ -92,6 +92,8 @@ class BulkCutoutTests(unittest.TestCase):
 
             def launch_job_async(self, query, **kwargs):
                 self.calls += 1
+                if self.calls == 1:
+                    return None
                 upload = Table.read(kwargs['upload_resource'], format='votable')
                 indices = list(upload['sample_row'])
                 for row in upload:
@@ -109,8 +111,9 @@ class BulkCutoutTests(unittest.TestCase):
         self.assertIn('dr1.mosaic_product', query)
         self.assertIn('TAP_UPLOAD.sfh_sample', query)
         self.assertIn("processing_mode = 'DEEP'", query)
-        result = query_mosaics(client, self.sources, self.output, query, batch_size=2)
-        self.assertEqual(client.calls, 2)
+        result = query_mosaics(client, self.sources, self.output, query,
+                               batch_size=2, query_retries=2, retry_delay=0)
+        self.assertEqual(client.calls, 3)
         self.assertEqual(len(result), 4)
         cached = query_mosaics(None, self.sources, self.output, query, batch_size=2)
         np.testing.assert_array_equal(cached['object_id'], self.ids)
