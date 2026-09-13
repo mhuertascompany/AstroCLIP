@@ -356,3 +356,57 @@ table at
 `/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/morphology_catalog_sfh_100k.fits`.
 The first three positional arguments can override the cutout root, catalog,
 and output paths. The pilot accepts a fourth argument for its sample size.
+
+## Train Euclid image--SFH CLIP
+
+The Euclid trainer reuses the fixed-grid ZooBot CLIP model from the COSMOS-Web
+run and reads the SFH input dimension directly from the preprocessed file (250
+for the current data). It joins SFHs and JPEGs by exact integer `galaxy_id`, so
+catalog row order is irrelevant and objects whose cutout conversion failed are
+excluded. The train/validation assignment is deterministic for a given seed and
+is made before checking image availability.
+
+The HDF5 file is opened lazily in each data-loader worker. During training, one
+valid entry from `sfh_realizations` is drawn each time a galaxy is loaded. This
+propagates the fitted SFH uncertainty into the contrastive training rather than
+treating the posterior median as exact. Validation always uses the deterministic
+median `sfh` dataset. Disable posterior sampling for an ablation with
+`--no-sample-posterior`.
+
+First run the two-epoch, 1,024-pair GPU smoke test on candide:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_test.sh
+```
+
+Its logs and checkpoints are written under
+`/n03data/huertas/euclid/sfh_clip/edfn_100k/training_test`. Once that succeeds,
+submit the complete matched sample:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_100k.sh
+```
+
+The full run uses a 90/10 split, batch size 128, a 4,096-element MoCo queue,
+mixed precision, and early stopping. It initially freezes the ZooBot backbone
+and trains the image projection and SFH encoder. The default starting checkpoint
+is the existing `family_2.ckpt` used by the COSMOS-Web framework. Supply another
+compatible `FinetuneableZoobotClassifier` checkpoint as the third positional
+argument to either SLURM script if desired. The first four positional arguments
+are the preprocessed HDF5 file, JPEG stamp root, ZooBot checkpoint, and output
+directory. A fifth argument to the full script resumes a Lightning checkpoint:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_100k.sh \
+    /path/to/sfh_clip.h5 \
+    /path/to/zoobot_stamps \
+    /path/to/zoobot.ckpt \
+    /path/to/training_output \
+    /path/to/training_output/checkpoints/last.ckpt
+```
+
+The best three checkpoints and `last.ckpt` are saved in
+`training/checkpoints`; CSV learning curves are saved in `training/logs`.
+`pair_split.npz` records the exact HDF5 rows and galaxy IDs used for each split.
+The trainer refuses queue and batch sizes that cannot safely update the MoCo
+queue.

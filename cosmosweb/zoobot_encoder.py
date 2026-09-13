@@ -64,6 +64,7 @@ class ZooBotImageEncoder(nn.Module):
             )
 
         self.backbone = backbone
+        self._backbone_frozen = unfreeze_blocks == 0
 
         # Freeze all backbone parameters first
         for param in self.backbone.parameters():
@@ -94,6 +95,13 @@ class ZooBotImageEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(embed_dim, embed_dim),
         )
+
+    def train(self, mode: bool = True):
+        """Keep a fully frozen backbone in inference mode during training."""
+        super().train(mode)
+        if self._backbone_frozen:
+            self.backbone.eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -187,6 +195,14 @@ class MultiFilterZooBotImageEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(embed_dim, embed_dim),
         )
+
+    def train(self, mode: bool = True):
+        """Keep the frozen filter backbones in inference mode."""
+        super().train(mode)
+        self.backbone_f150w.eval()
+        self.backbone_f277w.eval()
+        self.backbone_f444w.eval()
+        return self
 
     def forward(self, x: torch.Tensor, redshifts: torch.Tensor) -> torch.Tensor:
         """
