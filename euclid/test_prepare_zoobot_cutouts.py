@@ -56,6 +56,17 @@ class RadiusTests(unittest.TestCase):
             self.assertEqual(radii[101], 17.5)
             self.assertEqual(method, 'catalog:R_MAX')
 
+    def test_reduced_catalog_does_not_use_size_proxy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'catalog.fits'
+            Table({
+                'object_id': np.array([101], dtype=np.int64),
+                'semimajor_axis': [4.0],
+                'kron_radius': [6.0],
+            }).write(path)
+            with self.assertRaisesRegex(ValueError, 'fetch_mer_morphology'):
+                load_source_radii(path)
+
     def test_crop_larger_than_input_is_rejected_before_resize(self):
         with self.assertRaisesRegex(ValueError, 'regenerate a larger FITS cutout'):
             prepare_zoobot_stamp(

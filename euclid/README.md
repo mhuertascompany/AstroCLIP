@@ -263,6 +263,30 @@ supplied notebook and the documented
 
 ## Prepare VIS cutouts for ZooBot
 
+The SFH selection catalog is based on `clean_photo_phz`, which does not include
+the `SEGMENTATION_AREA` and `ELLIPTICITY` columns required by the reference
+Euclid `R_MAX` regression. Fetch those exact values by `OBJECT_ID` from the MER
+deep-survey catalog on Datalabs before transferring the metadata file to
+candide:
+
+```bash
+cd /media/user/python/AstroCLIP
+/opt/miniforge/envs/euclid-tools/bin/python -m euclid.fetch_mer_morphology \
+    --sample /home/mhuertas/my_workspace/sfh_edfn100k/catalog_sfh_100k.fits \
+    --output /home/mhuertas/my_workspace/sfh_edfn100k/morphology_catalog_sfh_100k.fits \
+    --batch-size 1000 \
+    --resume
+```
+
+The query uses `catalogue.mer_catalogue_deep_survey` and requires a complete,
+one-to-one match for all object IDs. Completed batches are cached next to the
+output, so `--resume` continues after a TAP failure. Transfer the resulting
+`morphology_catalog_sfh_100k.fits` to:
+
+```text
+/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/morphology_catalog_sfh_100k.fits
+```
+
 After transferring the complete Datalabs cutout directory to candide, convert
 the successful VIS FITS cutouts into the JPEG layout used by the existing
 ZooBot CLIP loader:
@@ -270,7 +294,7 @@ ZooBot CLIP loader:
 ```bash
 python -m euclid.prepare_zoobot_cutouts \
     --cutout-root /path/to/transferred_cutout_directory \
-    --catalog /path/to/edfn_100k/catalog.fits \
+    --catalog /path/to/morphology_catalog_sfh_100k.fits \
     --output /path/to/zoobot_stamps \
     --band VIS \
     --image-size 224 \
@@ -278,13 +302,15 @@ python -m euclid.prepare_zoobot_cutouts \
 ```
 
 `--cutout-root` must contain the original `manifest.csv` and `cutouts/VIS/`
-tree. `--catalog` is the matching `catalog.fits` created on candide. Only rows
+tree. `--catalog` is the matching MER morphology table exported on Datalabs.
+Only rows
 with source status `written` or `existing` are converted. Following
 `morphology_utils.py`, the converter estimates `R_MAX` in VIS pixels from
-`SEGMENTATION_AREA`, `KRON_RADIUS`, and `ELLIPTICITY`, crops each source to a
-square of half-width `R_MAX`, applies `arcsinh(flux * 100)`, clips at the
-99.85th percentile, and bicubically resizes it to 224 pixels. The result is
-saved as an 8-bit grayscale JPEG at
+`SEGMENTATION_AREA`, `KRON_RADIUS`, and `ELLIPTICITY`. These must be exact MER
+catalog values; the converter does not substitute a size proxy. It then crops
+each source to a square of half-width `R_MAX`, applies `arcsinh(flux * 100)`,
+clips at the 99.85th percentile, and bicubically resizes it to 224 pixels. The
+result is saved as an 8-bit grayscale JPEG at
 `zoobot_stamps/VIS/VIS_<object_id>.jpg`. At training time the current ZooBot
 dataset loader replicates grayscale to three channels and applies its standard
 crop and augmentation transforms.
@@ -319,7 +345,8 @@ sbatch euclid/slurm_prepare_zoobot_cutouts_100k.sh
 Both scripts use
 `/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/edfn_100k_cutouts`
 as the cutout root. This is the directory containing `manifest.csv`; the
-provided `cutouts/VIS` path is below it. They expect the matching catalog at
-`/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/catalog_sfh_100k.fits`.
+provided `cutouts/VIS` path is below it. They expect the matching morphology
+table at
+`/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/morphology_catalog_sfh_100k.fits`.
 The first three positional arguments can override the cutout root, catalog,
 and output paths. The pilot accepts a fourth argument for its sample size.

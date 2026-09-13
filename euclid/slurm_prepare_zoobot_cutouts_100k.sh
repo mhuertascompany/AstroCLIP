@@ -21,7 +21,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 DEFAULT_CUTOUT_ROOT=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/edfn_100k_cutouts
-DEFAULT_CATALOG=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/catalog_sfh_100k.fits
+DEFAULT_CATALOG=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/morphology_catalog_sfh_100k.fits
 DEFAULT_OUTPUT=/n03data/huertas/euclid/sfh_clip/edfn_100k/zoobot_stamps_rmax
 CUTOUT_ROOT=${1:-${DEFAULT_CUTOUT_ROOT}}
 CATALOG=${2:-${DEFAULT_CATALOG}}

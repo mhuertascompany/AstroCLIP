@@ -10,6 +10,7 @@ stretched, clipped, and resized as in the pipeline.
 import argparse
 import csv
 import os
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.table import Table
+from astropy.units import UnitsWarning
 from astropy.wcs import WCS
 from PIL import Image
 
@@ -42,9 +44,16 @@ def _text(value):
     return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
 
 
-def load_source_radii(catalog, id_column=None, r_max_column=None):
+def load_source_radii(catalog, id_column=None, r_max_column=None,
+                      minimum_r_max=10.0):
     """Return object_id -> R_MAX using the Euclid morphology utility formula."""
-    table = Table.read(catalog)
+    # Euclid uses TUNIT='NA' for dimensionless identifier columns. Astropy
+    # warns because that token is not a FITS unit, but the column data are fine.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UnitsWarning)
+        table = Table.read(catalog)
+    if not np.isfinite(minimum_r_max) or minimum_r_max <= 0:
+        raise ValueError('minimum_r_max must be finite and positive.')
     id_name = _column_name(table, id_column, ['object_id'])
     ids = table[id_name]
     if ids.dtype.kind not in 'iuSU' or np.any(np.ma.getmaskarray(ids)):
@@ -58,10 +67,15 @@ def load_source_radii(catalog, id_column=None, r_max_column=None):
         radii = np.asarray(table[radius_name], dtype=float)
         method = f'catalog:{radius_name}'
     else:
-        names = {
-            key: _column_name(table, None, [key])
-            for key in RADIUS_COLUMNS
-        }
+        available = {name.lower() for name in table.colnames}
+        missing = [name for name in RADIUS_COLUMNS if name.lower() not in available]
+        if missing:
+            raise ValueError(
+                f'Morphology catalog is missing {missing}. Run '
+                '`python -m euclid.fetch_mer_morphology` on ESA Datalabs and '
+                'use its output as --catalog.'
+            )
+        names = {key: _column_name(table, None, [key]) for key in RADIUS_COLUMNS}
         area = np.asarray(table[names['SEGMENTATION_AREA']], dtype=float)
         kron = np.asarray(table[names['KRON_RADIUS']], dtype=float)
         ellipticity = np.asarray(table[names['ELLIPTICITY']], dtype=float)
@@ -77,7 +91,7 @@ def load_source_radii(catalog, id_column=None, r_max_column=None):
             + ellipticity[valid] * 0.2405883433225405
             + np.log10(kron[valid]) * 0.11148176647655159
         )
-        radii[valid] = np.maximum(10.0, 10.0 ** log_r_max + 2.0)
+        radii[valid] = np.maximum(minimum_r_max, 10.0 ** log_r_max + 2.0)
         method = 'estimated_from_SEGMENTATION_AREA_KRON_RADIUS_ELLIPTICITY'
 
     valid = np.isfinite(radii) & (radii > 0)
@@ -210,7 +224,8 @@ def _write_manifest(records, output):
 
 def prepare_cutout_catalog(cutout_root, catalog, output, band='VIS',
                            image_size=224, workers=8, limit=None, resume=False,
-                           id_column=None, r_max_column=None):
+                           id_column=None, r_max_column=None,
+                           minimum_r_max=10.0):
     """Convert successful cutouts using size metadata from the sample catalog."""
     cutout_root = Path(cutout_root)
     output = Path(output)
@@ -224,7 +239,9 @@ def prepare_cutout_catalog(cutout_root, catalog, output, band='VIS',
     if limit is not None and limit < 1:
         raise ValueError('limit must be positive.')
 
-    radii, radius_method = load_source_radii(catalog, id_column, r_max_column)
+    radii, radius_method = load_source_radii(
+        catalog, id_column, r_max_column, minimum_r_max,
+    )
     with manifest_path.open(newline='') as stream:
         rows = list(csv.DictReader(stream))
     required = {'object_id', 'ra', 'dec', 'band', 'cutout_file', 'status'}
@@ -258,7 +275,7 @@ def prepare_cutout_catalog(cutout_root, catalog, output, band='VIS',
                 'x_center_pixels': '',
                 'y_center_pixels': '',
                 'status': 'invalid_morphology',
-                'error': 'Missing or nonfinite SEGMENTATION_AREA, KRON_RADIUS, or ELLIPTICITY.',
+                'error': f'Missing or nonfinite radius input for {radius_method}.',
             })
             continue
         source = cutout_root / row['cutout_file']
@@ -320,11 +337,14 @@ def main():
     parser.add_argument('--id-column')
     parser.add_argument('--r-max-column',
                         help='Use an existing pixel R_MAX column instead of estimating it.')
+    parser.add_argument('--minimum-r-max', type=float, default=10.0,
+                        help='Minimum crop half-width in pixels (default: 10).')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     prepare_cutout_catalog(
         args.cutout_root, args.catalog, args.output, args.band, args.image_size,
         args.workers, args.limit, args.resume, args.id_column, args.r_max_column,
+        args.minimum_r_max,
     )
 
 
