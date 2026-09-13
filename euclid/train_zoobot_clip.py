@@ -48,7 +48,16 @@ def parse_args():
     data.add_argument('--num-workers', type=int, default=8)
 
     model = parser.add_argument_group('model')
-    model.add_argument('--zoobot-ckpt', type=Path, required=True)
+    encoder_source = model.add_mutually_exclusive_group(required=True)
+    encoder_source.add_argument(
+        '--zoobot-model-name',
+        help='Timm/Hugging Face encoder name, e.g. hf_hub:mwalmsley/zoobot-encoder-euclid.',
+    )
+    encoder_source.add_argument(
+        '--zoobot-ckpt',
+        type=Path,
+        help='Local FinetuneableZoobotClassifier checkpoint.',
+    )
     model.add_argument('--embed-dim', type=int, default=256)
     model.add_argument('--temperature', type=float, default=0.07)
     model.add_argument('--queue-size', type=int, default=4096)
@@ -79,7 +88,7 @@ def validate_args(args):
     stamp_dir = args.stamp_root / args.band
     if not stamp_dir.is_dir():
         raise FileNotFoundError(f'JPEG directory not found: {stamp_dir}')
-    if not args.zoobot_ckpt.is_file():
+    if args.zoobot_ckpt is not None and not args.zoobot_ckpt.is_file():
         raise FileNotFoundError(f'ZooBot checkpoint not found: {args.zoobot_ckpt}')
     if args.resume_from is not None and not args.resume_from.is_file():
         raise FileNotFoundError(f'Resume checkpoint not found: {args.resume_from}')
@@ -120,7 +129,8 @@ def main():
         val_ids=pair_index.val_ids,
     )
     model = CosmosWebZooBotCLIP(
-        zoobot_ckpt=str(args.zoobot_ckpt),
+        zoobot_ckpt=str(args.zoobot_ckpt) if args.zoobot_ckpt else None,
+        zoobot_model_name=args.zoobot_model_name,
         embed_dim=args.embed_dim,
         sfh_input_dim=n_bins,
         temperature=args.temperature,
@@ -160,7 +170,8 @@ def main():
 
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
-        f'realizations; posterior sampling={args.sample_posterior}',
+        f'realizations; posterior sampling={args.sample_posterior}; '
+        f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}',
         flush=True,
     )
     trainer = L.Trainer(

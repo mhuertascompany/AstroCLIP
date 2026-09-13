@@ -11,5 +11,6 @@ pyro-ppl
 python-dotenv
 scikit-image
 scikit-learn
+timm
 torchvision==0.15.0
 wandb

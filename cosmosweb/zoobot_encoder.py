@@ -1,11 +1,12 @@
 """
 ZooBOT-based image encoder for COSMOS-Web CLIP training.
 
-Uses a pretrained/finetuned ZooBOT EfficientNet backbone (frozen) as
-feature extractor, with a trainable MLP projection head.
+Uses a pretrained ZooBot backbone from the Hugging Face Hub or a locally
+fine-tuned ZooBot classifier checkpoint as a frozen feature extractor, with a
+trainable MLP projection head.
 
-The backbone is loaded from a FinetuneableZoobotClassifier checkpoint
-(e.g. the family morphology model trained on COSMOS-Web visuals).
+Hugging Face encoders are loaded through timm. Local classifier checkpoints are
+loaded through FinetuneableZoobotClassifier and reduced to their encoder.
 
 Input:  (B, 3, 224, 224)  grayscale JPEG replicated to 3 channels, ToTensor [0,1]
 Output: (B, embed_dim)
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import timm
 import torch
 import torch.nn as nn
 
@@ -27,9 +29,12 @@ class ZooBotImageEncoder(nn.Module):
 
     Parameters
     ----------
-    ckpt_path : str | Path
-        Path to a FinetuneableZoobotClassifier Lightning checkpoint
-        (e.g. family_2.ckpt trained on COSMOS-Web visual morphology).
+    ckpt_path : str | Path, optional
+        Path to a FinetuneableZoobotClassifier Lightning checkpoint.
+    model_name : str, optional
+        Timm model identifier, for example
+        ``hf_hub:mwalmsley/zoobot-encoder-euclid``. Exactly one source is
+        required.
     embed_dim : int
         Output embedding dimension.
     dropout : float
@@ -43,25 +48,36 @@ class ZooBotImageEncoder(nn.Module):
 
     def __init__(
         self,
-        ckpt_path:       str | Path,
+        ckpt_path:       str | Path | None = None,
+        model_name:      str | None = None,
         embed_dim:       int   = 256,
         dropout:         float = 0.1,
         unfreeze_blocks: int   = 0,
     ) -> None:
         super().__init__()
 
-        # ── load ZooBOT classifier and extract the EfficientNet backbone ──────
-        zoobot = finetune.FinetuneableZoobotClassifier.load_from_checkpoint(
-            str(ckpt_path), strict=False
-        )
-        zoobot.eval()
-
-        backbone = getattr(zoobot, 'encoder', None)
-        if backbone is None:
-            raise AttributeError(
-                "Cannot find 'encoder' attribute on FinetuneableZoobotClassifier. "
-                "Check your ZooBOT version or inspect the checkpoint manually."
+        if (ckpt_path is None) == (model_name is None):
+            raise ValueError('Provide exactly one of ckpt_path or model_name.')
+        if model_name is not None:
+            backbone = timm.create_model(
+                model_name,
+                pretrained=True,
+                num_classes=0,
             )
+            self.source = model_name
+        else:
+            # Load a fine-tuned ZooBot classifier and extract its encoder.
+            zoobot = finetune.FinetuneableZoobotClassifier.load_from_checkpoint(
+                str(ckpt_path), strict=False
+            )
+            zoobot.eval()
+            backbone = getattr(zoobot, 'encoder', None)
+            if backbone is None:
+                raise AttributeError(
+                    "Cannot find 'encoder' on FinetuneableZoobotClassifier. "
+                    "Check the ZooBot version or checkpoint."
+                )
+            self.source = str(ckpt_path)
 
         self.backbone = backbone
         self._backbone_frozen = unfreeze_blocks == 0

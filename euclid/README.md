@@ -389,18 +389,25 @@ sbatch euclid/slurm_train_zoobot_clip_100k.sh
 
 The full run uses a 90/10 split, batch size 128, a 4,096-element MoCo queue,
 mixed precision, and early stopping. It initially freezes the ZooBot backbone
-and trains the image projection and SFH encoder. The default starting checkpoint
-is the existing `family_2.ckpt` used by the COSMOS-Web framework. Supply another
-compatible `FinetuneableZoobotClassifier` checkpoint as the third positional
-argument to either SLURM script if desired. The first four positional arguments
-are the preprocessed HDF5 file, JPEG stamp root, ZooBot checkpoint, and output
-directory. A fifth argument to the full script resumes a Lightning checkpoint:
+and trains the image projection and SFH encoder. The default image backbone is
+the Euclid-native
+[`hf_hub:mwalmsley/zoobot-encoder-euclid`](https://huggingface.co/mwalmsley/zoobot-encoder-euclid),
+loaded through timm. The model has a 640-dimensional ConvNeXt Nano output and
+expects three-channel 224-pixel images, matching the prepared VIS stamps after
+grayscale channel replication. The model is downloaded on its first use and
+then read from `/n03data/huertas/.cache/huggingface`.
+
+The first four positional arguments are the preprocessed HDF5 file, JPEG stamp
+root, ZooBot source, and output directory. The ZooBot source may instead be a
+local compatible `FinetuneableZoobotClassifier` checkpoint such as the earlier
+COSMOS-Web `family_2.ckpt`. A fifth argument to the full script resumes the CLIP
+Lightning checkpoint:
 
 ```bash
 sbatch euclid/slurm_train_zoobot_clip_100k.sh \
     /path/to/sfh_clip.h5 \
     /path/to/zoobot_stamps \
-    /path/to/zoobot.ckpt \
+    hf_hub:mwalmsley/zoobot-encoder-euclid \
     /path/to/training_output \
     /path/to/training_output/checkpoints/last.ckpt
 ```

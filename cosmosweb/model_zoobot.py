@@ -45,7 +45,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
     def __init__(
         self,
-        zoobot_ckpt:      str,
+        zoobot_ckpt:      str | None = None,
+        zoobot_model_name: str | None = None,
         embed_dim:        int   = 256,
         sfh_input_dim:    int   = 50,
         temperature:      float = 0.07,
@@ -64,6 +65,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         # ── main encoders (receive gradients) ────────────────────────────────
         self.image_encoder = ZooBotImageEncoder(
             ckpt_path=zoobot_ckpt,
+            model_name=zoobot_model_name,
             embed_dim=embed_dim,
             unfreeze_blocks=unfreeze_blocks,
         )

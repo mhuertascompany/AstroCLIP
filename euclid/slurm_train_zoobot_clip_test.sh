@@ -15,22 +15,30 @@ set -euo pipefail
 
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
+export HF_HOME=${HF_HOME:-/n03data/huertas/.cache/huggingface}
+mkdir -p "${HF_HOME}"
 
 REPO_DIR=/n03data/huertas/python/AstroCLIP
 BASE_DIR=/n03data/huertas/euclid/sfh_clip/edfn_100k
 DATASET=${1:-${BASE_DIR}/sfh_clip_100k.h5}
 STAMP_ROOT=${2:-${BASE_DIR}/zoobot_stamps_rmax}
-ZOOBOT_CKPT=${3:-/n03data/huertas/COSMOS-Web/zoobot/models/ilbert_finetune/checkpoints/family_2.ckpt}
+ZOOBOT_SOURCE=${3:-hf_hub:mwalmsley/zoobot-encoder-euclid}
 OUTPUT_DIR=${4:-${BASE_DIR}/training_test}
 
 mkdir -p "${OUTPUT_DIR}"
 cd "${REPO_DIR}"
 
+if [[ -f "${ZOOBOT_SOURCE}" ]]; then
+    ENCODER_ARGS=(--zoobot-ckpt "${ZOOBOT_SOURCE}")
+else
+    ENCODER_ARGS=(--zoobot-model-name "${ZOOBOT_SOURCE}")
+fi
+
 python -u -m euclid.train_zoobot_clip \
     --dataset "${DATASET}" \
     --stamp-root "${STAMP_ROOT}" \
     --band VIS \
-    --zoobot-ckpt "${ZOOBOT_CKPT}" \
+    "${ENCODER_ARGS[@]}" \
     --output-dir "${OUTPUT_DIR}" \
     --run-name euclid_vis_sfh_smoke \
     --sample-posterior \
