@@ -98,6 +98,64 @@ The workflows have been checked against synthetic catalogs locally; the
 candide helper return type, source schema, and actual field overlap still need
 verification on the first real run.
 
+## Preprocess SFHs for CLIP
+
+The Euclid catalogs store 50 posterior SFH realizations per galaxy on a common
+physical lookback-time grid. Convert them to the representation used by the
+COSMOS-Web SFH encoder with:
+
+```bash
+python -m euclid.preprocess_sfhs \
+    --input /path/to/edfn_100k/sfh_000.h5 \
+    --output /path/to/edfn_100k/sfh_clip_100k.h5
+```
+
+For each galaxy, the converter uses cumulative mass fractions to rebin every
+one of the 50 posterior realizations onto a uniform grid in fractional
+lookback time (`lookback time / age of the Universe at the galaxy redshift`).
+It normalizes each rebinned realization to sum to one and stores
+`log10(weight + 1e-10)`. This removes absolute SFH amplitude while preserving
+shape and posterior uncertainty. Cumulative rebinning conserves the integrated
+weights and prevents narrow bursts from being missed between grid points. By
+default, the output retains the native number of time bins, giving `sfh` shape
+`(galaxy, 250)` for the Euclid DR1 catalogs. `sfh_time_grid` contains the shared
+`[0, 1]` grid, and `sfh_time_norm` contains the age of the Universe in Myr for
+each object. Set the SFH encoder input dimension to 250 for Euclid training.
+`--n-bins` remains available for experiments at another resolution.
+
+The `sfh` dataset is the median of the processed realizations and remains the
+deterministic encoder input. `sfh_realizations` has shape
+`(galaxy, 50, 250)` and can be sampled along its second axis during training so
+the SFH encoder sees the posterior uncertainty. `sfh_p16` and `sfh_p84` provide
+precomputed diagnostic bounds. All four datasets use the same log10 convention.
+`sfh_realization_valid` identifies realizations that contain mass within the
+age of the Universe implied by the catalog redshift; training should sample
+only valid entries. Invalid entries in `sfh_realizations` are NaN rather than a
+fabricated curve. `sfh_retained_mass_fraction` records how much native mass was
+inside the physical range before each realization was renormalized.
+
+The output retains `object_id` and all other scalar row metadata, and provides
+the aliases `galaxy_id` and `redshift`. These IDs can be joined to the cutout
+manifest without relying on row order. The original 50 realizations and
+two-dimensional derived posterior quantities remain in the source HDF5.
+
+For the 100,000-object candide sample:
+
+```bash
+sbatch euclid/slurm_preprocess_edfn_sfhs_100k.sh
+```
+
+This reads `edfn_100k/sfh_000.h5` and writes
+`edfn_100k/sfh_clip_100k.h5`. The converter refuses to overwrite an existing
+output and writes through a temporary file so an interrupted job cannot leave a
+partial product at the final path. To use different paths, pass the input and
+output after the script name:
+
+```bash
+sbatch euclid/slurm_preprocess_edfn_sfhs_100k.sh \
+    /path/to/input.h5 /path/to/new_output.h5
+```
+
 ## Bulk mosaic cutouts on ESA Datalabs
 
 `bulk_sfh_cutouts.py` follows **Cutouts_v3.ipynb**, using Astroquery to find
@@ -202,3 +260,66 @@ The actual authenticated IDR queries and mounted mosaic files still need a
 first run on Datalabs. The implementation uses the table/column names in the
 supplied notebook and the documented
 [Astroquery Euclid API](https://astroquery.readthedocs.io/en/latest/api/astroquery.esa.euclid.EuclidClass.html).
+
+## Prepare VIS cutouts for ZooBot
+
+After transferring the complete Datalabs cutout directory to candide, convert
+the successful VIS FITS cutouts into the JPEG layout used by the existing
+ZooBot CLIP loader:
+
+```bash
+python -m euclid.prepare_zoobot_cutouts \
+    --cutout-root /path/to/transferred_cutout_directory \
+    --catalog /path/to/edfn_100k/catalog.fits \
+    --output /path/to/zoobot_stamps \
+    --band VIS \
+    --image-size 224 \
+    --workers 8
+```
+
+`--cutout-root` must contain the original `manifest.csv` and `cutouts/VIS/`
+tree. `--catalog` is the matching `catalog.fits` created on candide. Only rows
+with source status `written` or `existing` are converted. Following
+`morphology_utils.py`, the converter estimates `R_MAX` in VIS pixels from
+`SEGMENTATION_AREA`, `KRON_RADIUS`, and `ELLIPTICITY`, crops each source to a
+square of half-width `R_MAX`, applies `arcsinh(flux * 100)`, clips at the
+99.85th percentile, and bicubically resizes it to 224 pixels. The result is
+saved as an 8-bit grayscale JPEG at
+`zoobot_stamps/VIS/VIS_<object_id>.jpg`. At training time the current ZooBot
+dataset loader replicates grayscale to three channels and applies its standard
+crop and augmentation transforms.
+
+The output manifest records the estimated radius and WCS-derived pixel center.
+Rows lacking any radius-estimation input are marked `invalid_morphology` and
+omitted, matching the reference utility's final-catalog conversion behavior.
+If an `R_MAX` crop does not fit inside the transferred fixed-size FITS cutout,
+the row fails explicitly. Regenerate larger Datalabs cutouts for those objects;
+this avoids silently changing their scale. If a catalog already contains the
+pipeline `R_MAX` in pixels, select it with `--r-max-column R_MAX`.
+
+The converter writes its own `manifest.csv` with one row per successful source
+cutout and uses atomic JPEG writes. Restart the same output with `--resume` to
+validate and reuse existing stamps. For a small check, use `--limit 100` and a
+separate output directory.
+
+First submit a 100-object Candide pilot:
+
+```bash
+sbatch euclid/slurm_prepare_zoobot_cutouts_test.sh
+```
+
+It writes stamps to
+`/n03data/huertas/euclid/sfh_clip/edfn_100k/zoobot_stamps_rmax_test100`.
+Check the job log and the output `manifest.csv`, then submit the complete job:
+
+```bash
+sbatch euclid/slurm_prepare_zoobot_cutouts_100k.sh
+```
+
+Both scripts use
+`/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/edfn_100k_cutouts`
+as the cutout root. This is the directory containing `manifest.csv`; the
+provided `cutouts/VIS` path is below it. They expect the matching catalog at
+`/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_edfn100k/catalog_sfh_100k.fits`.
+The first three positional arguments can override the cutout root, catalog,
+and output paths. The pilot accepts a fourth argument for its sample size.
