@@ -129,10 +129,13 @@ deterministic encoder input. `sfh_realizations` has shape
 the SFH encoder sees the posterior uncertainty. `sfh_p16` and `sfh_p84` provide
 precomputed diagnostic bounds. All four datasets use the same log10 convention.
 `sfh_realization_valid` identifies realizations that contain mass within the
-age of the Universe implied by the catalog redshift; training should sample
-only valid entries. Invalid entries in `sfh_realizations` are NaN rather than a
-fabricated curve. `sfh_retained_mass_fraction` records how much native mass was
-inside the physical range before each realization was renormalized.
+age of the Universe implied by the catalog redshift and have nonzero native
+weight; training samples only valid entries. Invalid entries in
+`sfh_realizations` are NaN rather than a fabricated curve. A zero-weight draw
+does not invalidate a galaxy when another posterior draw is usable. The
+converter fails only when a galaxy has no valid realization.
+`sfh_retained_mass_fraction` records how much native mass was inside the
+physical range before each realization was renormalized.
 
 The output retains `object_id` and all other scalar row metadata, and provides
 the aliases `galaxy_id` and `redshift`. These IDs can be joined to the cutout

@@ -78,6 +78,18 @@ class CommonGridTests(unittest.TestCase):
         self.assertGreater(retained[0], 0)
         self.assertEqual(retained[1], 0)
 
+    def test_zero_weight_realization_is_flagged(self):
+        age = np.arange(25.0, 1025.0, 50.0)
+        realizations = np.zeros((2, len(age)))
+        realizations[0] = np.exp(-age / 500.0)
+        result, _, retained = sfh_realizations_to_common_grid(
+            age, realizations, redshift=0.5, return_diagnostics=True,
+        )
+        self.assertTrue(np.isfinite(result[0]).all())
+        self.assertTrue(np.isnan(result[1]).all())
+        self.assertGreater(retained[0], 0)
+        self.assertEqual(retained[1], 0)
+
 
 class CatalogTests(unittest.TestCase):
     def test_default_uses_native_time_resolution(self):
@@ -137,6 +149,43 @@ class CatalogTests(unittest.TestCase):
                     realization_weights.sum(axis=2), 1.0, atol=1e-6,
                 )
                 self.assertTrue(f['sfh_realization_valid'][:].all())
+
+    def test_catalog_preserves_partial_zero_weight_posterior(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'input.h5'
+            output = root / 'output.h5'
+            with h5py.File(source, 'w') as f:
+                f['age'] = [25.0, 75.0, 125.0, 175.0]
+                f['object_id'] = np.array([101], dtype=np.int64)
+                f['phz_pp_median_redshift'] = [0.5]
+                f['sfh'] = np.array([
+                    [[1, 2, 3, 4], [0, 0, 0, 0], [4, 3, 2, 1]],
+                ], dtype=np.float32)
+
+            preprocess_catalog(source, output)
+            with h5py.File(output, 'r') as f:
+                np.testing.assert_array_equal(
+                    f['sfh_realization_valid'][0], [True, False, True],
+                )
+                self.assertTrue(np.isnan(f['sfh_realizations'][0, 1]).all())
+                self.assertTrue(np.isfinite(f['sfh'][0]).all())
+                self.assertEqual(f.attrs['sfh_invalid_realizations'], 1)
+
+    def test_catalog_rejects_galaxy_with_no_valid_realization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'input.h5'
+            output = root / 'output.h5'
+            with h5py.File(source, 'w') as f:
+                f['age'] = [25.0, 75.0, 125.0, 175.0]
+                f['object_id'] = np.array([101], dtype=np.int64)
+                f['phz_pp_median_redshift'] = [0.5]
+                f['sfh'] = np.zeros((1, 3, 4), dtype=np.float32)
+
+            with self.assertRaisesRegex(ValueError, 'No valid SFH realizations'):
+                preprocess_catalog(source, output)
+            self.assertFalse(output.exists())
 
 
 if __name__ == '__main__':

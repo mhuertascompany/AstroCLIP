@@ -108,9 +108,11 @@ def sfh_realizations_to_common_grid(age_myr, realizations, redshift,
         raise ValueError('eps must be finite and positive.')
 
     native_totals = realizations.sum(axis=1)
-    if np.any(native_totals <= 0):
-        raise ValueError('At least one SFH realization has zero total weight.')
-    normalized_native = realizations / native_totals[:, None]
+    native_valid = native_totals > 0
+    normalized_native = np.zeros_like(realizations)
+    normalized_native[native_valid] = (
+        realizations[native_valid] / native_totals[native_valid, None]
+    )
 
     universe_age_myr = float(COSMOLOGY.age(redshift).to_value('Myr'))
 
