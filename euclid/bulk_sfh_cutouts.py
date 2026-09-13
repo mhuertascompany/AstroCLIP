@@ -24,6 +24,11 @@ from astropy.nddata import Cutout2D
 from astropy.table import Table, vstack
 from astropy.wcs import WCS
 
+try:
+    from .fetch_mer_morphology import fetch_morphology
+except ImportError:  # Support direct execution from the euclid directory.
+    from fetch_mer_morphology import fetch_morphology
+
 
 BANDS = ('VIS', 'NIR-Y', 'NIR-J', 'NIR-H')
 SFH_COLUMNS = ('sfh_file', 'sfh_row', 'sfh_source_file', 'sfh_source_row',
@@ -332,14 +337,27 @@ def main():
     query = mosaic_query(bands, args.size_arcsec, args.processing_mode, args.release_name)
     all_cached = all((args.output / 'queries' / f'mosaics_{start:06d}_{min(start + args.batch_size, len(sources)):06d}.ecsv').exists()
                      for start in range(0, len(sources), args.batch_size))
+    morphology_output = args.output / 'morphology_catalog.fits'
+    morphology_cache = args.output / '.morphology_catalog_queries'
+    morphology_cached = morphology_output.exists() or all(
+        (morphology_cache / f'morphology_{start:06d}_{min(start + args.batch_size, len(sources)):06d}.ecsv').exists()
+        for start in range(0, len(sources), args.batch_size)
+    )
     client = None
     try:
-        if not all_cached:
+        if not all_cached or not morphology_cached:
             from astroquery.esa.euclid.core import EuclidClass
             client = EuclidClass(environment='IDR')
             client.ROW_LIMIT = -1
             client.login(**({'credentials_file': str(args.credentials_file.expanduser())}
                             if args.credentials_file else {}))
+        fetch_morphology(
+            args.sample, morphology_output, client,
+            batch_size=args.batch_size,
+            query_retries=args.query_retries,
+            retry_delay=args.retry_delay,
+            resume=True,
+        )
         matches = query_mosaics(
             client, sources, args.output, query, args.batch_size,
             args.query_retries, args.retry_delay,
@@ -352,6 +370,7 @@ def main():
         return
     records = make_cutouts(sample, sources, matches, args.output, bands, args.size_arcsec)
     print(f'SFH/image mapping: {args.output / "manifest.csv"}')
+    print(f'Exact MER morphology metadata: {morphology_output}')
     if any(r['status'] not in ('written', 'existing') for r in records):
         raise SystemExit('Some requested cutouts are missing; inspect manifest.csv (rerun with --resume).')
 

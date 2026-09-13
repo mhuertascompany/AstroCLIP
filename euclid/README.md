@@ -328,6 +328,12 @@ cutout and uses atomic JPEG writes. Restart the same output with `--resume` to
 validate and reuse existing stamps. For a small check, use `--limit 100` and a
 separate output directory.
 
+For future samples, `euclid.bulk_sfh_cutouts` performs the MER morphology join
+automatically during the normal Datalabs run. Its output directory contains
+`morphology_catalog.fits` alongside `manifest.csv`, `cutouts/`, and the query
+caches. The standalone `euclid.fetch_mer_morphology` command above is needed
+only for cutout datasets created before this integration.
+
 First submit a 100-object Candide pilot:
 
 ```bash
