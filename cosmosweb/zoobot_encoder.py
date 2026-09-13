@@ -94,6 +94,8 @@ class ZooBotImageEncoder(nn.Module):
                     param.requires_grad_(True)
             unfrozen_names = [n for n, _ in children[-unfreeze_blocks:]]
             print(f'[ZooBotImageEncoder] unfrozen backbone blocks: {unfrozen_names}')
+        if self._backbone_frozen:
+            self.backbone.eval()
 
         # Probe backbone output dimension with a dummy forward pass.
         # Move dummy to the same device as the backbone weights.

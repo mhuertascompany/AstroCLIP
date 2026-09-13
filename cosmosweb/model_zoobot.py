@@ -81,6 +81,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             p.requires_grad_(False)
         for p in self.sfh_encoder_m.parameters():
             p.requires_grad_(False)
+        self.image_encoder_m.eval()
+        self.sfh_encoder_m.eval()
 
         # ── learnable temperature ─────────────────────────────────────────────
         self.log_temp = nn.Parameter(torch.tensor(np.log(1.0 / temperature)))
@@ -91,6 +93,13 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         self.register_buffer('queue_img', F.normalize(torch.randn(D, Q), dim=0))
         self.register_buffer('queue_sfh', F.normalize(torch.randn(D, Q), dim=0))
         self.register_buffer('queue_ptr', torch.zeros(1, dtype=torch.long))
+
+    def train(self, mode: bool = True):
+        """Keep momentum targets deterministic while training query encoders."""
+        super().train(mode)
+        self.image_encoder_m.eval()
+        self.sfh_encoder_m.eval()
+        return self
 
     # ── momentum update ───────────────────────────────────────────────────────
 
