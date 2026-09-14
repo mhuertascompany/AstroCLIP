@@ -486,6 +486,23 @@ sbatch euclid/slurm_evaluate_zoobot_clip.sh \
 
 ### UMAP embedding diagnostics
 
+The first 100k product was created before the clean-catalog and MER morphology
+tables were merged into the sampled SFH HDF5. Restore those scalar fields in
+place, with an exact object-ID join, before regenerating the diagnostic PDF:
+
+```bash
+sbatch euclid/slurm_restore_morphology_metadata.sh
+```
+
+The default job reads
+`sfh_edfn100k/catalog_sfh_100k.fits` and
+`sfh_edfn100k/morphology_catalog_sfh_100k.fits`, stages all new HDF5 datasets
+before exposing them under their final names, and leaves the SFH arrays and row
+order unchanged. Existing datasets are retained. Future runs of
+`sample_edfn_sfhs` copy missing numeric scalar clean-catalog columns directly
+into each sampled SFH shard, so the normal preprocessor preserves them without
+this repair step.
+
 After the quantitative evaluation has written `validation_embeddings.npz` and
 `per_object.csv`, generate the Euclid diagnostic atlas without re-running the
 encoders:

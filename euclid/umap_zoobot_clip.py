@@ -163,6 +163,10 @@ def load_properties(h5_path, rows, galaxy_ids, archive_redshift,
             'fwhm': (['fwhm'], lambda x: x > 0),
             'kron_radius': (['kron_radius'], lambda x: x > 0),
             'semimajor_axis': (['semimajor_axis'], lambda x: x > 0),
+            'ellipticity': (
+                ['ellipticity'], lambda x: (x >= 0) & (x < 1),
+            ),
+            'segmentation_area': (['segmentation_area'], lambda x: x > 0),
             'point_like_probability': (
                 ['point_like_prob'], lambda x: (x >= 0) & (x <= 1),
             ),
@@ -200,6 +204,8 @@ def property_specs(properties):
         'fwhm': ('FWHM', 'magma'),
         'kron_radius': ('Kron radius', 'magma'),
         'semimajor_axis': ('Semimajor axis', 'magma'),
+        'ellipticity': ('Ellipticity', 'viridis'),
+        'segmentation_area': ('Segmentation area', 'magma'),
         'point_like_probability': ('Point-like probability', 'cividis'),
         'sfh_recent_10': ('SFH fraction: recent 10%', 'hot'),
         'sfh_recent_20': ('SFH fraction: recent 20%', 'hot'),
@@ -438,6 +444,7 @@ def main():
     morphology_keys = [
         'redshift', 'sersic_index', 'sersic_radius', 'axis_ratio', 'fwhm',
         'kron_radius', 'semimajor_axis', 'point_like_probability',
+        'ellipticity', 'segmentation_area',
     ]
     physical_keys = [
         'redshift', 'log_stellar_mass', 'sfh_recent_10', 'sfh_recent_20',

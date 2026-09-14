@@ -26,11 +26,17 @@ class SampleDirectoryTests(unittest.TestCase):
                     f[key] = [1., 2.]
             output = root / 'precreated'
             output.mkdir()
-            selected = match_and_sample(Table({'object_id': ids}), [source], output, n=2)
+            selected = match_and_sample(Table({
+                'object_id': ids,
+                'sersic_sersic_vis_radius': [1.5, 2.5],
+                'sersic_sersic_vis_axis_ratio': [0.4, 0.8],
+            }), [source], output, n=2)
             self.assertEqual(len(selected), 2)
             with h5py.File(output / 'sfh_000.h5', 'r') as f:
                 np.testing.assert_array_equal(f['object_id'][:], ids)
                 np.testing.assert_array_equal(f['sfh'][:], np.arange(12.).reshape(2, 2, 3))
+                np.testing.assert_allclose(f['sersic_sersic_vis_radius'][:], [1.5, 2.5])
+                np.testing.assert_allclose(f['sersic_sersic_vis_axis_ratio'][:], [0.4, 0.8])
             self.assertTrue((output / 'catalog.fits').is_file())
             self.assertTrue((output / 'object_ids.csv').is_file())
             before = {p.name: p.read_bytes() for p in output.iterdir()}

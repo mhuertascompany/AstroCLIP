@@ -20,6 +20,40 @@ import numpy as np
 from .sample_sfh_catalog import sample_catalog
 
 
+def append_scalar_catalog_metadata(path, table, selected_positions, destination_rows,
+                                   excluded=()):
+    """Append missing numeric scalar catalog columns to one sampled SFH shard."""
+    selected_positions = np.asarray(selected_positions, dtype=np.int64)
+    destination_rows = np.asarray(destination_rows, dtype=np.int64)
+    if len(selected_positions) != len(destination_rows):
+        raise ValueError('Metadata source and destination row counts differ.')
+    if not np.array_equal(np.sort(destination_rows), np.arange(len(destination_rows))):
+        raise ValueError('Metadata destination rows are not a complete shard permutation.')
+    excluded = set(excluded)
+    with h5py.File(path, 'r+') as target:
+        for key in table.colnames:
+            if key in excluded or key in target:
+                continue
+            column = np.ma.asarray(table[key][selected_positions])
+            if column.ndim != 1 or column.dtype.kind not in 'biuf':
+                continue
+            mask = np.ma.getmaskarray(column)
+            if np.any(mask):
+                values = np.asarray(column, dtype=np.float64)
+                values[mask] = np.nan
+            else:
+                values = np.asarray(column)
+            ordered = np.empty(len(values), dtype=values.dtype)
+            ordered[destination_rows] = values
+            output = target.create_dataset(
+                key, data=ordered, chunks=True,
+                compression='gzip', compression_opts=1,
+            )
+            output.attrs['description'] = (
+                'scalar metadata copied from matched clean_photo_phz catalog'
+            )
+
+
 def check_output_directory(output):
     """Allow a new or empty directory; never reuse an existing sample."""
     output = Path(output)
@@ -112,6 +146,11 @@ def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
         indices = sample_catalog(path, output / filenames[path], seed=seed,
                                  batch_size=batch_size, indices=source_rows)
         selected['sfh_row'][positions] = np.searchsorted(indices, source_rows)
+        append_scalar_catalog_metadata(
+            output / filenames[path], selected, positions,
+            np.asarray(selected['sfh_row'][positions], dtype=np.int64),
+            excluded=reserved,
+        )
     selected.write(output / 'catalog.fits')
     with (output / 'object_ids.csv').open('x', newline='') as stream:
         writer = csv.writer(stream)
