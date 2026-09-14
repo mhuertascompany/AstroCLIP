@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=euclid_clip_test
-#SBATCH --output=/n03data/huertas/euclid/sfh_clip/edfn_100k/train_clip_test_%j.out
-#SBATCH --error=/n03data/huertas/euclid/sfh_clip/edfn_100k/train_clip_test_%j.err
+#SBATCH --job-name=euclid_attn_test
+#SBATCH --output=/n03data/huertas/euclid/sfh_clip/edfn_100k/train_attn_test_%j.out
+#SBATCH --error=/n03data/huertas/euclid/sfh_clip/edfn_100k/train_attn_test_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodelist=n03
@@ -23,7 +23,7 @@ BASE_DIR=/n03data/huertas/euclid/sfh_clip/edfn_100k
 DATASET=${1:-${BASE_DIR}/sfh_clip_100k.h5}
 STAMP_ROOT=${2:-${BASE_DIR}/zoobot_stamps_rmax}
 ZOOBOT_SOURCE=${3:-hf_hub:mwalmsley/zoobot-encoder-euclid}
-OUTPUT_DIR=${4:-${BASE_DIR}/training_test}
+OUTPUT_DIR=${4:-${BASE_DIR}/training_test_transformer}
 
 mkdir -p "${OUTPUT_DIR}"
 cd "${REPO_DIR}"
@@ -40,14 +40,18 @@ python -u -m euclid.train_zoobot_clip \
     --band VIS \
     "${ENCODER_ARGS[@]}" \
     --output-dir "${OUTPUT_DIR}" \
-    --run-name euclid_vis_sfh_smoke \
+    --run-name euclid_vis_sfh_transformer_smoke \
     --sample-posterior \
     --max-pairs 1024 \
-    --batch-size 32 \
-    --queue-size 256 \
+    --batch-size 128 \
+    --queue-size 512 \
     --num-workers "${SLURM_CPUS_PER_TASK}" \
     --image-size 224 \
     --embed-dim 256 \
+    --sfh-encoder transformer \
+    --sfh-d-model 128 \
+    --sfh-n-heads 4 \
+    --sfh-n-layers 4 \
     --max-epochs 2 \
     --warmup-epochs 1 \
     --patience 2 \

@@ -64,6 +64,12 @@ def parse_args():
     model.add_argument('--momentum', type=float, default=0.995)
     model.add_argument('--unfreeze-blocks', type=int, default=0)
     model.add_argument('--backbone-lr-scale', type=float, default=0.1)
+    model.add_argument(
+        '--sfh-encoder', choices=('mlp', 'transformer'), default='transformer',
+    )
+    model.add_argument('--sfh-d-model', type=int, default=128)
+    model.add_argument('--sfh-n-heads', type=int, default=4)
+    model.add_argument('--sfh-n-layers', type=int, default=4)
 
     optimization = parser.add_argument_group('optimization')
     optimization.add_argument('--lr', type=float, default=1e-4)
@@ -98,6 +104,11 @@ def validate_args(args):
         raise ValueError('--queue-size must be at least --batch-size.')
     if args.queue_size % args.batch_size:
         raise ValueError('--queue-size must be divisible by --batch-size.')
+    if args.sfh_encoder == 'transformer':
+        if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
+            raise ValueError('SFH transformer dimensions must be positive.')
+        if args.sfh_d_model % args.sfh_n_heads:
+            raise ValueError('--sfh-d-model must be divisible by --sfh-n-heads.')
 
 
 def main():
@@ -142,6 +153,10 @@ def main():
         warmup_epochs=args.warmup_epochs,
         unfreeze_blocks=args.unfreeze_blocks,
         backbone_lr_scale=args.backbone_lr_scale,
+        sfh_encoder_type=args.sfh_encoder,
+        sfh_d_model=args.sfh_d_model,
+        sfh_n_heads=args.sfh_n_heads,
+        sfh_n_layers=args.sfh_n_layers,
     )
 
     checkpoint_dir = args.output_dir / 'checkpoints'
@@ -171,7 +186,8 @@ def main():
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
-        f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}',
+        f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
+        f'SFH encoder={args.sfh_encoder}',
         flush=True,
     )
     trainer = L.Trainer(

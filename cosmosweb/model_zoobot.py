@@ -37,7 +37,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .sfh_encoder import SFHEncoder
-from .sfh_transformer import SFHTransformerEncoder
+from .sfh_transformer import (
+    FixedGridSFHTransformerEncoder,
+    SFHTransformerEncoder,
+)
 from .zoobot_encoder import MultiFilterZooBotImageEncoder, ZooBotImageEncoder
 
 
@@ -58,6 +61,10 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         warmup_epochs:    int   = 5,
         unfreeze_blocks:  int   = 0,
         backbone_lr_scale: float = 0.1,
+        sfh_encoder_type: str = 'mlp',
+        sfh_d_model:      int = 128,
+        sfh_n_heads:      int = 4,
+        sfh_n_layers:     int = 4,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -69,10 +76,24 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             embed_dim=embed_dim,
             unfreeze_blocks=unfreeze_blocks,
         )
-        self.sfh_encoder = SFHEncoder(
-            input_dim=sfh_input_dim,
-            embed_dim=embed_dim,
-        )
+        if sfh_encoder_type == 'mlp':
+            self.sfh_encoder = SFHEncoder(
+                input_dim=sfh_input_dim,
+                embed_dim=embed_dim,
+            )
+        elif sfh_encoder_type == 'transformer':
+            self.sfh_encoder = FixedGridSFHTransformerEncoder(
+                n_bins=sfh_input_dim,
+                d_model=sfh_d_model,
+                n_heads=sfh_n_heads,
+                n_layers=sfh_n_layers,
+                embed_dim=embed_dim,
+            )
+        else:
+            raise ValueError(
+                f'Unknown sfh_encoder_type={sfh_encoder_type!r}; '
+                "choose 'mlp' or 'transformer'."
+            )
 
         # ── momentum encoders (EMA, no gradient) ─────────────────────────────
         self.image_encoder_m = copy.deepcopy(self.image_encoder)

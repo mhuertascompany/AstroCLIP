@@ -376,6 +376,13 @@ treating the posterior median as exact. Validation always uses the deterministic
 median `sfh` dataset. Disable posterior sampling for an ablation with
 `--no-sample-posterior`.
 
+The default SFH encoder uses all 250 common-grid bins as attention tokens. Each
+token contains log normalized SFH weight and fractional lookback time, plus a
+learned positional embedding. Four self-attention layers (width 128, four
+heads) and a CLS token capture both local and widely separated features before
+projection into the 256-dimensional CLIP space. Use `--sfh-encoder mlp` to run
+the original 197K-parameter fixed-grid MLP baseline.
+
 First run the two-epoch, 1,024-pair GPU smoke test on candide:
 
 ```bash
@@ -383,8 +390,9 @@ sbatch euclid/slurm_train_zoobot_clip_test.sh
 ```
 
 Its logs and checkpoints are written under
-`/n03data/huertas/euclid/sfh_clip/edfn_100k/training_test`. Once that succeeds,
-submit the complete matched sample:
+`/n03data/huertas/euclid/sfh_clip/edfn_100k/training_test_transformer`. This
+keeps the earlier MLP smoke-test artifacts separate. Once it succeeds, submit
+the complete matched sample:
 
 ```bash
 sbatch euclid/slurm_train_zoobot_clip_100k.sh
@@ -416,7 +424,8 @@ sbatch euclid/slurm_train_zoobot_clip_100k.sh \
 ```
 
 The best three checkpoints and `last.ckpt` are saved in
-`training/checkpoints`; CSV learning curves are saved in `training/logs`.
+`training_transformer/checkpoints`; CSV learning curves are saved in
+`training_transformer/logs`.
 `pair_split.npz` records the exact HDF5 rows and galaxy IDs used for each split.
 The trainer refuses queue and batch sizes that cannot safely update the MoCo
 queue.
