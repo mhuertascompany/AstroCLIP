@@ -391,8 +391,27 @@ sbatch euclid/slurm_train_zoobot_clip_test.sh
 
 Its logs and checkpoints are written under
 `/n03data/huertas/euclid/sfh_clip/edfn_100k/training_test_transformer`. This
-keeps the earlier MLP smoke-test artifacts separate. Once it succeeds, submit
-the complete matched sample:
+keeps the earlier MLP smoke-test artifacts separate.
+
+Before a full run, use the 10,000-pair optimization pilot:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_pilot.sh
+```
+
+The pilot uses posterior-median SFHs and disables the MoCo queue. This isolates
+the basic paired alignment from posterior-draw noise and from similar SFHs being
+treated as thousands of queued negatives. It gives the transformer three times
+the projection-head learning rate, uses two warmup epochs, and stops after 30
+epochs or eight unimproved validation epochs. Its output is kept under
+`training_pilot_transformer_median`.
+
+Validation logs include rank-1 and rank-5 retrieval, loss relative to the
+batch-size random baseline, positive and negative cosine similarity, and their
+alignment margin. A useful model should produce negative
+`val_loss_vs_random`, positive `val_alignment_margin`, and retrieval above
+chance. If this pilot learns clearly, transfer its settings to the complete
+matched sample:
 
 ```bash
 sbatch euclid/slurm_train_zoobot_clip_100k.sh

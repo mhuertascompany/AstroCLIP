@@ -65,6 +65,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_d_model:      int = 128,
         sfh_n_heads:      int = 4,
         sfh_n_layers:     int = 4,
+        sfh_lr_scale:     float = 1.0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -111,8 +112,12 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         # ── circular queues (registered as buffers → saved in checkpoint) ────
         Q = queue_size
         D = embed_dim
-        self.register_buffer('queue_img', F.normalize(torch.randn(D, Q), dim=0))
-        self.register_buffer('queue_sfh', F.normalize(torch.randn(D, Q), dim=0))
+        if Q < 0:
+            raise ValueError('queue_size cannot be negative.')
+        queue_img = F.normalize(torch.randn(D, Q), dim=0) if Q else torch.empty(D, 0)
+        queue_sfh = F.normalize(torch.randn(D, Q), dim=0) if Q else torch.empty(D, 0)
+        self.register_buffer('queue_img', queue_img)
+        self.register_buffer('queue_sfh', queue_sfh)
         self.register_buffer('queue_ptr', torch.zeros(1, dtype=torch.long))
 
     def train(self, mode: bool = True):
@@ -184,7 +189,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         B = images.size(0)
         Q = self.hparams.queue_size
 
-        if B > Q:
+        if Q and B > Q:
             raise ValueError(
                 f'batch_size ({B}) > queue_size ({Q}). '
                 'Reduce batch_size or increase queue_size.')
@@ -219,11 +224,17 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                         (logits_b.T.argmax(1) == labels).float().mean()) / 2
 
         # ── update queue ──────────────────────────────────────────────────────
-        self._dequeue_and_enqueue(img_k, sfh_k)
+        if Q:
+            self._dequeue_and_enqueue(img_k, sfh_k)
 
         self.log('train_loss',       loss, prog_bar=True,  sync_dist=True)
         self.log('train_rank1_batch', r1,  prog_bar=True,  sync_dist=True)
         self.log('train_logit_scale', T,   prog_bar=False, sync_dist=True)
+        self.log(
+            'train_loss_vs_random',
+            loss - loss.new_tensor(np.log(B + Q)),
+            sync_dist=True,
+        )
         return loss
 
     # ── validation step (batch-only InfoNCE, no queue) ────────────────────────
@@ -243,9 +254,28 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         with torch.no_grad():
             r1 = ((logits.argmax(1)   == labels).float().mean() +
                   (logits.T.argmax(1) == labels).float().mean()) / 2
+            k = min(5, logits.size(1))
+            r5_i2s = (logits.topk(k, dim=1).indices == labels[:, None]).any(1)
+            r5_s2i = (logits.T.topk(k, dim=1).indices == labels[:, None]).any(1)
+            r5 = (r5_i2s.float().mean() + r5_s2i.float().mean()) / 2
+            cosine = img_e @ sfh_e.T
+            positive_cosine = cosine.diagonal().mean()
+            if cosine.size(0) > 1:
+                negative_cosine = (
+                    cosine.sum() - cosine.diagonal().sum()
+                ) / (cosine.numel() - cosine.size(0))
+            else:
+                negative_cosine = positive_cosine.new_zeros(())
+            alignment_margin = positive_cosine - negative_cosine
+            random_loss = val_loss.new_tensor(np.log(logits.size(0)))
 
         self.log('val_loss',   val_loss, prog_bar=True,  sync_dist=True)
         self.log('val_rank1',  r1,       prog_bar=True,  sync_dist=True)
+        self.log('val_rank5', r5, prog_bar=True, sync_dist=True)
+        self.log('val_loss_vs_random', val_loss - random_loss, sync_dist=True)
+        self.log('val_positive_cosine', positive_cosine, sync_dist=True)
+        self.log('val_negative_cosine', negative_cosine, sync_dist=True)
+        self.log('val_alignment_margin', alignment_margin, sync_dist=True)
 
     # ── optimiser & scheduler ─────────────────────────────────────────────────
 
@@ -260,11 +290,18 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             p for n, p in self.named_parameters()
             if p.requires_grad
             and not n.startswith('image_encoder.backbone.')
+            and not n.startswith('sfh_encoder.')
             and not n.startswith('image_encoder_m.')
             and not n.startswith('sfh_encoder_m.')
         ]
+        sfh_params = [p for p in self.sfh_encoder.parameters() if p.requires_grad]
 
         param_groups = [{'params': other_params, 'lr': self.hparams.lr}]
+        if sfh_params:
+            param_groups.append({
+                'params': sfh_params,
+                'lr': self.hparams.lr * self.hparams.sfh_lr_scale,
+            })
         if backbone_params:
             param_groups.append({
                 'params': backbone_params,
@@ -280,7 +317,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             wu    = self.hparams.warmup_epochs
             total = self.hparams.epochs
             if epoch < wu:
-                return epoch / max(wu, 1)
+                return (epoch + 1) / max(wu, 1)
             progress = (epoch - wu) / max(total - wu, 1)
             return 0.5 * (1.0 + np.cos(np.pi * progress))
 

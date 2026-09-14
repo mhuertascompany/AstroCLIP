@@ -70,6 +70,7 @@ def parse_args():
     model.add_argument('--sfh-d-model', type=int, default=128)
     model.add_argument('--sfh-n-heads', type=int, default=4)
     model.add_argument('--sfh-n-layers', type=int, default=4)
+    model.add_argument('--sfh-lr-scale', type=float, default=1.0)
 
     optimization = parser.add_argument_group('optimization')
     optimization.add_argument('--lr', type=float, default=1e-4)
@@ -100,15 +101,19 @@ def validate_args(args):
         raise FileNotFoundError(f'Resume checkpoint not found: {args.resume_from}')
     if args.batch_size < 2:
         raise ValueError('--batch-size must be at least 2.')
-    if args.queue_size < args.batch_size:
-        raise ValueError('--queue-size must be at least --batch-size.')
-    if args.queue_size % args.batch_size:
+    if args.queue_size < 0:
+        raise ValueError('--queue-size cannot be negative.')
+    if args.queue_size and args.queue_size < args.batch_size:
+        raise ValueError('--queue-size must be zero or at least --batch-size.')
+    if args.queue_size and args.queue_size % args.batch_size:
         raise ValueError('--queue-size must be divisible by --batch-size.')
     if args.sfh_encoder == 'transformer':
         if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
             raise ValueError('SFH transformer dimensions must be positive.')
         if args.sfh_d_model % args.sfh_n_heads:
             raise ValueError('--sfh-d-model must be divisible by --sfh-n-heads.')
+    if args.sfh_lr_scale <= 0:
+        raise ValueError('--sfh-lr-scale must be positive.')
 
 
 def main():
@@ -157,6 +162,7 @@ def main():
         sfh_d_model=args.sfh_d_model,
         sfh_n_heads=args.sfh_n_heads,
         sfh_n_layers=args.sfh_n_layers,
+        sfh_lr_scale=args.sfh_lr_scale,
     )
 
     checkpoint_dir = args.output_dir / 'checkpoints'
