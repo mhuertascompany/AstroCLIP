@@ -417,6 +417,13 @@ matched sample:
 sbatch euclid/slurm_train_zoobot_clip_100k.sh
 ```
 
+The full job starts with posterior-median SFHs, a zero-length queue, and the
+pilot's 3x SFH-encoder learning rate. It trains for at most 50 epochs with two
+warmup epochs and patience 10. Results are written to the new
+`training_transformer_median_v2` directory so earlier weak-alignment runs remain
+available for comparison. After this phase converges, posterior sampling can be
+introduced in a shorter uncertainty fine-tuning phase from its best checkpoint.
+
 The full run uses a 90/10 split, batch size 128, a 4,096-element MoCo queue,
 mixed precision, and early stopping. It initially freezes the ZooBot backbone
 and trains the image projection and SFH encoder. The default image backbone is
@@ -443,8 +450,8 @@ sbatch euclid/slurm_train_zoobot_clip_100k.sh \
 ```
 
 The best three checkpoints and `last.ckpt` are saved in
-`training_transformer/checkpoints`; CSV learning curves are saved in
-`training_transformer/logs`.
+`training_transformer_median_v2/checkpoints`; CSV learning curves are saved in
+`training_transformer_median_v2/logs`.
 `pair_split.npz` records the exact HDF5 rows and galaxy IDs used for each split.
 The trainer refuses queue and batch sizes that cannot safely update the MoCo
 queue.
