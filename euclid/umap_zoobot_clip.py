@@ -392,11 +392,17 @@ def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s %(levelname)s %(message)s')
-    for path in (args.embeddings, args.dataset):
+    required_paths = {
+        'validation embedding archive': args.embeddings,
+        'preprocessed SFH dataset': args.dataset,
+    }
+    for label, path in required_paths.items():
         if not path.is_file():
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(f'Missing {label}: {path}')
     if args.per_object is not None and not args.per_object.is_file():
-        raise FileNotFoundError(args.per_object)
+        raise FileNotFoundError(
+            f'Missing per-object evaluation table: {args.per_object}'
+        )
     if args.n_neighbors < 2 or not 0 <= args.min_dist <= 1:
         raise ValueError('Use n-neighbors >= 2 and min-dist in [0, 1].')
 
