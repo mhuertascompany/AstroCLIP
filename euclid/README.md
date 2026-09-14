@@ -424,9 +424,9 @@ warmup epochs and patience 10. Results are written to the new
 available for comparison. After this phase converges, posterior sampling can be
 introduced in a shorter uncertainty fine-tuning phase from its best checkpoint.
 
-The full run uses a 90/10 split, batch size 128, a 4,096-element MoCo queue,
-mixed precision, and early stopping. It initially freezes the ZooBot backbone
-and trains the image projection and SFH encoder. The default image backbone is
+The full run uses a 90/10 split, batch size 128, no MoCo queue, mixed precision,
+and early stopping. It freezes the ZooBot backbone and trains the image
+projection and SFH encoder. The default image backbone is
 the Euclid-native
 [`hf_hub:mwalmsley/zoobot-encoder-euclid`](https://huggingface.co/mwalmsley/zoobot-encoder-euclid),
 loaded through timm. The model has a 640-dimensional ConvNeXt Nano output and
@@ -455,3 +455,31 @@ The best three checkpoints and `last.ckpt` are saved in
 `pair_split.npz` records the exact HDF5 rows and galaxy IDs used for each split.
 The trainer refuses queue and batch sizes that cannot safely update the MoCo
 queue.
+
+### Quantitative checkpoint evaluation
+
+Before making UMAPs or inspecting selected examples, evaluate the best
+checkpoint on the exact saved validation split:
+
+```bash
+sbatch euclid/slurm_evaluate_zoobot_clip.sh
+```
+
+The job measures full 9,955-object retrieval in both directions, rather than
+the batch-of-128 retrieval shown during training. It also checks the saved
+train/validation split and image IDs, compares paired cosine similarity with a
+permutation null, diagnoses embedding collapse, tests whether retrieved SFHs
+have similar raw shapes, measures stability across posterior SFH realizations,
+and reports performance in redshift quartiles. It writes `metrics.json`,
+`per_object.csv`, and reusable normalized validation embeddings under
+`training_transformer_median_v2/evaluation_best`.
+
+The default checkpoint is the best model from the first full median-SFH run.
+Any checkpoint and output directory can be supplied positionally. For example,
+compare the final state with the early-stopped best state using:
+
+```bash
+sbatch euclid/slurm_evaluate_zoobot_clip.sh \
+    /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/checkpoints/last.ckpt \
+    /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/evaluation_last
+```
