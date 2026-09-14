@@ -289,7 +289,7 @@ def property_pages(pdf, coordinates, props, title):
         plt.close(fig)
 
 
-def shared_manifold_page(pdf, image_xy, sfh_xy, rng, n_lines=500):
+def shared_manifold_page(pdf, image_xy, sfh_xy, rng, n_lines=500, run_label=None):
     n_objects = len(image_xy)
     selected = np.sort(rng.choice(n_objects, min(n_lines, n_objects), replace=False))
     paired_distance = np.linalg.norm(image_xy - sfh_xy, axis=1)
@@ -329,17 +329,19 @@ def shared_manifold_page(pdf, image_xy, sfh_xy, rng, n_lines=500):
     for ax in axes[:2]:
         ax.set_xticks([])
         ax.set_yticks([])
-    fig.suptitle(
+    heading = (
         'Image and SFH embeddings fitted in one shared UMAP\n'
-        '(2D distances are qualitative; retrieval metrics remain definitive)',
-        fontsize=11,
+        '(2D distances are qualitative; retrieval metrics remain definitive)'
     )
+    if run_label:
+        heading += f'\n{run_label}'
+    fig.suptitle(heading, fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.90])
     pdf.savefig(fig, dpi=170)
     plt.close(fig)
 
 
-def comparison_page(pdf, coordinate_sets, props):
+def comparison_page(pdf, coordinate_sets, props, run_label=None):
     for page_start in range(0, len(props), 4):
         page = props[page_start:page_start + 4]
         fig, axes = plt.subplots(len(page), 3, figsize=(12, 3.0 * len(page)), squeeze=False)
@@ -347,9 +349,10 @@ def comparison_page(pdf, coordinate_sets, props):
             for column, (name, coordinates) in enumerate(coordinate_sets):
                 scatter_property(axes[row, column], coordinates, prop, point_size=1.8)
                 axes[row, column].set_title(f'{name}: {prop.label}', fontsize=8)
-        fig.suptitle(
-            'The same property in independently fitted embedding spaces', fontsize=11,
-        )
+        heading = 'The same property in independently fitted embedding spaces'
+        if run_label:
+            heading += f'\n{run_label}'
+        fig.suptitle(heading, fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.97])
         pdf.savefig(fig, dpi=170)
         plt.close(fig)
@@ -378,6 +381,8 @@ def parse_args():
     parser.add_argument('--n-neighbors', type=int, default=15)
     parser.add_argument('--min-dist', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--run-label', default='',
+                        help='Checkpoint/run label printed on every PDF section.')
     parser.add_argument('--max-objects', type=int, default=0,
                         help='Random deterministic subset; zero uses all objects.')
     return parser.parse_args()
@@ -449,26 +454,29 @@ def main():
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(args.output) as pdf:
-        shared_manifold_page(pdf, xy_shared_image, xy_shared_sfh, rng)
+        shared_manifold_page(
+            pdf, xy_shared_image, xy_shared_sfh, rng, run_label=args.run_label,
+        )
+        suffix = f' - {args.run_label}' if args.run_label else ''
         property_pages(pdf, xy_image, morphology,
-                       'Euclid VIS image embedding: morphology')
+                       'Euclid VIS image embedding: morphology' + suffix)
         property_pages(pdf, xy_image, physical,
-                       'Euclid VIS image embedding: physical and SFH properties')
+                       'Euclid VIS image embedding: physical and SFH properties' + suffix)
         property_pages(pdf, xy_sfh, morphology,
-                       'Euclid SFH embedding: morphology transferred from images')
+                       'Euclid SFH embedding: morphology transferred from images' + suffix)
         property_pages(pdf, xy_sfh, physical,
-                       'Euclid SFH embedding: physical and SFH properties')
+                       'Euclid SFH embedding: physical and SFH properties' + suffix)
         property_pages(pdf, xy_joint, morphology,
-                       'Euclid averaged joint embedding: morphology')
+                       'Euclid averaged joint embedding: morphology' + suffix)
         property_pages(pdf, xy_joint, physical,
-                       'Euclid averaged joint embedding: physical and SFH properties')
+                       'Euclid averaged joint embedding: physical and SFH properties' + suffix)
         if alignment:
             property_pages(pdf, xy_joint, alignment,
-                           'Euclid averaged joint embedding: alignment quality')
+                           'Euclid averaged joint embedding: alignment quality' + suffix)
         comparison_page(
             pdf,
             [('Image', xy_image), ('SFH', xy_sfh), ('Joint average', xy_joint)],
-            comparison,
+            comparison, run_label=args.run_label,
         )
 
     npz_output = args.npz_output or args.output.with_suffix('.npz')

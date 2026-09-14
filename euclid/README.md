@@ -494,6 +494,16 @@ encoders:
 sbatch euclid/slurm_umap_zoobot_clip.sh
 ```
 
+The no-argument job is tied explicitly to:
+
+```text
+/n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/checkpoints/euclid_vis_sfh_transformer_median_100k-epoch=027-val_loss=4.4625.ckpt
+```
+
+It reads the embeddings previously exported for that checkpoint from
+`training_transformer_median_v2/evaluation_best`. The checkpoint basename is
+printed on every diagnostic section so the PDF retains its provenance.
+
 The PDF contains independently fitted image, SFH, and normalized-average UMAPs
 colored by redshift, stellar mass, Sérsic morphology, source size, point-source
 probability, derived SFH shape summaries, paired cosine, and retrieval rank. A
@@ -504,6 +514,13 @@ retrieval report remains the alignment measurement.
 
 The default outputs are
 `evaluation_best/euclid_clip_umap_diagnostics.pdf`, a companion `.npz` with all
-four coordinate sets and properties, and a `.csv` property table. An evaluation
-directory and output PDF can be supplied as positional arguments to the SLURM
-script.
+four coordinate sets and properties, and a `.csv` property table. A checkpoint,
+evaluation directory, and output PDF can be supplied as positional
+arguments to the SLURM script. For the final checkpoint, use:
+
+```bash
+sbatch euclid/slurm_umap_zoobot_clip.sh \
+    /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/checkpoints/last.ckpt \
+    /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/evaluation_last \
+    /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/evaluation_last/euclid_clip_umap_diagnostics.pdf
+```
