@@ -22,6 +22,8 @@ import torch.nn as nn
 
 from zoobot.pytorch.training import finetune
 
+from .backbone_unfreezing import unfreeze_last_feature_blocks
+
 
 class ZooBotImageEncoder(nn.Module):
     """
@@ -40,8 +42,9 @@ class ZooBotImageEncoder(nn.Module):
     dropout : float
         Dropout applied inside the MLP projection head.
     unfreeze_blocks : int
-        Number of top-level backbone children to unfreeze (counting from the
-        end).  0 = fully frozen (default).  2 = last two blocks trainable.
+        Number of terminal feature stages to unfreeze (counting from the end).
+        Pooling and classifier heads do not count as stages. 0 = fully frozen
+        (default). 2 = last two feature stages trainable.
         Unfrozen layers receive gradients and should be given a lower learning
         rate than the projection head (see backbone_lr_scale in the model).
     """
@@ -86,14 +89,14 @@ class ZooBotImageEncoder(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad_(False)
 
-        # Selectively unfreeze the last `unfreeze_blocks` top-level children
+        # Select actual terminal feature stages. Counting top-level children is
+        # incorrect for timm ConvNeXt because its final children are the output
+        # normalization and head rather than convolutional stages.
         if unfreeze_blocks > 0:
-            children = list(self.backbone.named_children())
-            for name, module in children[-unfreeze_blocks:]:
-                for param in module.parameters():
-                    param.requires_grad_(True)
-            unfrozen_names = [n for n, _ in children[-unfreeze_blocks:]]
-            print(f'[ZooBotImageEncoder] unfrozen backbone blocks: {unfrozen_names}')
+            unfrozen_names = unfreeze_last_feature_blocks(
+                self.backbone, unfreeze_blocks,
+            )
+            print(f'[ZooBotImageEncoder] unfrozen backbone modules: {unfrozen_names}')
         if self._backbone_frozen:
             self.backbone.eval()
 

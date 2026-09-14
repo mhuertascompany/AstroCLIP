@@ -541,3 +541,19 @@ sbatch euclid/slurm_umap_zoobot_clip.sh \
     /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/evaluation_last \
     /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/evaluation_last/euclid_clip_umap_diagnostics.pdf
 ```
+
+### Partial ZooBot unfreezing experiment
+
+Run a controlled comparison with the frozen-backbone baseline using:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_100k_unfreeze1.sh
+```
+
+This keeps the same deterministic split, posterior-median SFHs, transformer,
+batch size, and queue-free contrastive objective. It unfreezes the final
+ConvNeXt feature stage at `5e-6`, while the image projection and SFH
+transformer use `1e-4`. The run writes to
+`training_transformer_median_unfreeze1`, leaving the frozen baseline intact.
+The feature-stage selector uses timm's `feature_info`. The terminal feature
+normalization is also trainable but does not count toward `--unfreeze-blocks`.

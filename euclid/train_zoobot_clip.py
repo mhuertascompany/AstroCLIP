@@ -114,6 +114,10 @@ def validate_args(args):
             raise ValueError('--sfh-d-model must be divisible by --sfh-n-heads.')
     if args.sfh_lr_scale <= 0:
         raise ValueError('--sfh-lr-scale must be positive.')
+    if args.unfreeze_blocks < 0:
+        raise ValueError('--unfreeze-blocks cannot be negative.')
+    if args.backbone_lr_scale <= 0:
+        raise ValueError('--backbone-lr-scale must be positive.')
 
 
 def main():
