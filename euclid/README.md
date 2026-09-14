@@ -483,3 +483,27 @@ sbatch euclid/slurm_evaluate_zoobot_clip.sh \
     /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/checkpoints/last.ckpt \
     /n03data/huertas/euclid/sfh_clip/edfn_100k/training_transformer_median_v2/evaluation_last
 ```
+
+### UMAP embedding diagnostics
+
+After the quantitative evaluation has written `validation_embeddings.npz` and
+`per_object.csv`, generate the Euclid diagnostic atlas without re-running the
+encoders:
+
+```bash
+sbatch euclid/slurm_umap_zoobot_clip.sh
+```
+
+The PDF contains independently fitted image, SFH, and normalized-average UMAPs
+colored by redshift, stellar mass, Sérsic morphology, source size, point-source
+probability, derived SFH shape summaries, paired cosine, and retrieval rank. A
+fourth UMAP is fitted to the stacked image and SFH embeddings to show modality
+occupancy and matched-pair connections in one shared projection. Its 2D
+distances are treated as qualitative diagnostics; the full-dimensional
+retrieval report remains the alignment measurement.
+
+The default outputs are
+`evaluation_best/euclid_clip_umap_diagnostics.pdf`, a companion `.npz` with all
+four coordinate sets and properties, and a `.csv` property table. An evaluation
+directory and output PDF can be supplied as positional arguments to the SLURM
+script.
