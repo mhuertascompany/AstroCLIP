@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Usage:
-#   sbatch euclid/slurm_evaluate_zoobot_clip.sh [checkpoint] [output_dir]
+#   sbatch euclid/slurm_evaluate_zoobot_clip.sh [checkpoint] [output_dir] [pair_split]
 
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
@@ -25,6 +25,26 @@ BASE_DIR=/n03data/huertas/euclid/sfh_clip/edfn_100k
 TRAINING_DIR=${BASE_DIR}/training_transformer_median_v2
 CHECKPOINT=${1:-${TRAINING_DIR}/checkpoints/euclid_vis_sfh_transformer_median_100k-epoch=027-val_loss=4.4625.ckpt}
 OUTPUT_DIR=${2:-${TRAINING_DIR}/evaluation_best}
+CHECKPOINT_DIR=${CHECKPOINT%/*}
+CHECKPOINT_TRAINING_DIR=${CHECKPOINT_DIR%/*}
+PAIR_SPLIT=${3:-${CHECKPOINT_TRAINING_DIR}/pair_split.npz}
+
+if [[ ! -f "${CHECKPOINT}" ]]; then
+    echo "Missing checkpoint: ${CHECKPOINT}" >&2
+    exit 2
+fi
+if [[ ! -f "${PAIR_SPLIT}" ]]; then
+    echo "Missing saved train/validation split: ${PAIR_SPLIT}" >&2
+    exit 2
+fi
+if [[ ! -f "${BASE_DIR}/sfh_clip_100k.h5" ]]; then
+    echo "Missing preprocessed SFHs: ${BASE_DIR}/sfh_clip_100k.h5" >&2
+    exit 2
+fi
+if [[ ! -d "${BASE_DIR}/zoobot_stamps_rmax/VIS" ]]; then
+    echo "Missing VIS JPEG directory: ${BASE_DIR}/zoobot_stamps_rmax/VIS" >&2
+    exit 2
+fi
 
 cd "${REPO_DIR}"
 mkdir -p "${OUTPUT_DIR}"
@@ -33,7 +53,7 @@ python -u -m euclid.evaluate_zoobot_clip \
     --checkpoint "${CHECKPOINT}" \
     --dataset "${BASE_DIR}/sfh_clip_100k.h5" \
     --stamp-root "${BASE_DIR}/zoobot_stamps_rmax" \
-    --split "${TRAINING_DIR}/pair_split.npz" \
+    --split "${PAIR_SPLIT}" \
     --output-dir "${OUTPUT_DIR}" \
     --band VIS \
     --batch-size 128 \

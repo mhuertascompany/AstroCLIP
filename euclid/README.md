@@ -557,3 +557,16 @@ transformer use `1e-4`. The run writes to
 `training_transformer_median_unfreeze1`, leaving the frozen baseline intact.
 The feature-stage selector uses timm's `feature_info`. The terminal feature
 normalization is also trainable but does not count toward `--unfreeze-blocks`.
+
+For the completed unfreeze-one-stage run, submit quantitative evaluation and
+the dependent UMAP job together:
+
+```bash
+bash euclid/submit_unfreeze1_diagnostics.sh
+```
+
+The evaluation uses that run's own `pair_split.npz`. If it succeeds, SLURM
+automatically starts the UMAP job and writes `metrics.json`, reusable validation
+embeddings, the per-object retrieval table, and
+`evaluation_best/euclid_clip_umap_diagnostics.pdf` under
+`training_transformer_median_unfreeze1`.
