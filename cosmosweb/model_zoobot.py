@@ -22,6 +22,9 @@ Loss (per step)
   Loss     : mean of cross_entropy(logits_i2s, labels) and cross_entropy(logits_s2i, labels)
 
 Validation loss uses only the current batch (no queue) so it stays comparable.
+An opt-in SFH-aware mode replaces one-hot targets with a mixture of the exact
+pair and Wasserstein-nearest SFHs. Its default weight is zero, preserving the
+original objective and existing checkpoints.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from .sfh_transformer import (
     FixedGridSFHTransformerEncoder,
     SFHTransformerEncoder,
 )
+from .sfh_similarity import soft_cross_entropy, wasserstein_soft_targets
 from .zoobot_encoder import MultiFilterZooBotImageEncoder, ZooBotImageEncoder
 
 
@@ -66,8 +70,22 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_n_heads:      int = 4,
         sfh_n_layers:     int = 4,
         sfh_lr_scale:     float = 1.0,
+        soft_positive_weight: float = 0.0,
+        soft_positive_k:  int = 8,
+        sfh_log_epsilon:  float = 1e-10,
     ) -> None:
         super().__init__()
+        if not 0.0 <= soft_positive_weight <= 1.0:
+            raise ValueError('soft_positive_weight must lie in [0, 1].')
+        if soft_positive_k < 1:
+            raise ValueError('soft_positive_k must be positive.')
+        if sfh_log_epsilon <= 0:
+            raise ValueError('sfh_log_epsilon must be positive.')
+        if soft_positive_weight > 0 and queue_size:
+            raise ValueError(
+                'SFH soft positives currently require queue_size=0 because '
+                'the embedding queue does not store reference SFHs.'
+            )
         self.save_hyperparameters()
 
         # ── main encoders (receive gradients) ────────────────────────────────
@@ -186,6 +204,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         images, sfhs = batch['image'], batch['sfh']
+        sfh_reference = batch.get('sfh_reference', sfhs)
         B = images.size(0)
         Q = self.hparams.queue_size
 
@@ -212,13 +231,30 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         all_img = torch.cat([img_k, self.queue_img.T.clone().detach()], dim=0)
 
         # ── contrastive loss (symmetric) ──────────────────────────────────────
-        loss_i2s = self._infoNCE(img_q, all_sfh, T)
-        loss_s2i = self._infoNCE(sfh_q, all_img, T)
-        loss     = (loss_i2s + loss_s2i) / 2.0
+        logits_i2s = img_q @ all_sfh.T * T
+        logits_s2i = sfh_q @ all_img.T * T
+        labels = torch.arange(B, device=images.device, dtype=torch.long)
+        exact_loss = (
+            F.cross_entropy(logits_i2s, labels)
+            + F.cross_entropy(logits_s2i, labels)
+        ) / 2.0
+        if self.hparams.soft_positive_weight > 0:
+            targets, sfh_w1 = wasserstein_soft_targets(
+                sfh_reference,
+                soft_weight=self.hparams.soft_positive_weight,
+                n_neighbors=self.hparams.soft_positive_k,
+                epsilon=self.hparams.sfh_log_epsilon,
+            )
+            loss = (
+                soft_cross_entropy(logits_i2s, targets)
+                + soft_cross_entropy(logits_s2i, targets)
+            ) / 2.0
+        else:
+            sfh_w1 = None
+            loss = exact_loss
 
         # ── within-batch rank-1 (cheap training-time diagnostic) ─────────────
         with torch.no_grad():
-            labels   = torch.arange(B, device=images.device)
             logits_b = img_q @ sfh_k.T * T              # (B, B) batch-only
             r1       = ((logits_b.argmax(1) == labels).float().mean() +
                         (logits_b.T.argmax(1) == labels).float().mean()) / 2
@@ -228,6 +264,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             self._dequeue_and_enqueue(img_k, sfh_k)
 
         self.log('train_loss',       loss, prog_bar=True,  sync_dist=True)
+        self.log('train_exact_loss', exact_loss, prog_bar=False, sync_dist=True)
         self.log('train_rank1_batch', r1,  prog_bar=True,  sync_dist=True)
         self.log('train_logit_scale', T,   prog_bar=False, sync_dist=True)
         self.log(
@@ -235,12 +272,19 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             loss - loss.new_tensor(np.log(B + Q)),
             sync_dist=True,
         )
+        if sfh_w1 is not None:
+            off_diagonal = ~torch.eye(B, device=images.device, dtype=torch.bool)
+            self.log(
+                'train_sfh_w1_mean', sfh_w1[off_diagonal].mean(),
+                sync_dist=True,
+            )
         return loss
 
     # ── validation step (batch-only InfoNCE, no queue) ────────────────────────
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         images, sfhs = batch['image'], batch['sfh']
+        sfh_reference = batch.get('sfh_reference', sfhs)
         T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 
         img_e = F.normalize(self.encode_image(images), dim=-1)
@@ -248,8 +292,22 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
         logits  = T * (img_e @ sfh_e.T)
         labels  = torch.arange(logits.size(0), device=logits.device, dtype=torch.long)
-        val_loss = (F.cross_entropy(logits,   labels) +
-                    F.cross_entropy(logits.T, labels)) / 2.0
+        val_exact_loss = (F.cross_entropy(logits,   labels) +
+                          F.cross_entropy(logits.T, labels)) / 2.0
+        if self.hparams.soft_positive_weight > 0:
+            targets, _ = wasserstein_soft_targets(
+                sfh_reference,
+                soft_weight=self.hparams.soft_positive_weight,
+                n_neighbors=self.hparams.soft_positive_k,
+                epsilon=self.hparams.sfh_log_epsilon,
+            )
+            val_loss = (
+                soft_cross_entropy(logits, targets)
+                + soft_cross_entropy(logits.T, targets)
+            ) / 2.0
+            self.log('val_soft_loss', val_loss, sync_dist=True)
+        else:
+            val_loss = val_exact_loss
 
         with torch.no_grad():
             r1 = ((logits.argmax(1)   == labels).float().mean() +
@@ -270,6 +328,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             random_loss = val_loss.new_tensor(np.log(logits.size(0)))
 
         self.log('val_loss',   val_loss, prog_bar=True,  sync_dist=True)
+        self.log('val_exact_loss', val_exact_loss, sync_dist=True)
         self.log('val_rank1',  r1,       prog_bar=True,  sync_dist=True)
         self.log('val_rank5', r5, prog_bar=True, sync_dist=True)
         self.log('val_loss_vs_random', val_loss - random_loss, sync_dist=True)

@@ -8,6 +8,7 @@ validation set always uses the posterior-median SFH.
 import argparse
 from pathlib import Path
 
+import h5py
 import lightning as L
 import numpy as np
 from lightning.pytorch.callbacks import (
@@ -71,6 +72,14 @@ def parse_args():
     model.add_argument('--sfh-n-heads', type=int, default=4)
     model.add_argument('--sfh-n-layers', type=int, default=4)
     model.add_argument('--sfh-lr-scale', type=float, default=1.0)
+    model.add_argument(
+        '--soft-positive-weight', type=float, default=0.0,
+        help='Weight assigned to W1-neighbour SFHs; zero preserves exact InfoNCE.',
+    )
+    model.add_argument(
+        '--soft-positive-k', type=int, default=8,
+        help='Number of within-batch W1-nearest SFHs receiving soft target mass.',
+    )
 
     optimization = parser.add_argument_group('optimization')
     optimization.add_argument('--lr', type=float, default=1e-4)
@@ -107,6 +116,12 @@ def validate_args(args):
         raise ValueError('--queue-size must be zero or at least --batch-size.')
     if args.queue_size and args.queue_size % args.batch_size:
         raise ValueError('--queue-size must be divisible by --batch-size.')
+    if not 0 <= args.soft_positive_weight <= 1:
+        raise ValueError('--soft-positive-weight must lie in [0, 1].')
+    if args.soft_positive_k < 1:
+        raise ValueError('--soft-positive-k must be positive.')
+    if args.soft_positive_weight and args.queue_size:
+        raise ValueError('--soft-positive-weight requires --queue-size 0.')
     if args.sfh_encoder == 'transformer':
         if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
             raise ValueError('SFH transformer dimensions must be positive.')
@@ -124,6 +139,8 @@ def main():
     args = parse_args()
     validate_args(args)
     _, n_bins, n_realizations = inspect_sfh_file(args.dataset)
+    with h5py.File(args.dataset, 'r') as source:
+        sfh_log_epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
     L.seed_everything(args.seed, workers=True)
 
     datamodule = EuclidZooBotDataModule(
@@ -167,6 +184,9 @@ def main():
         sfh_n_heads=args.sfh_n_heads,
         sfh_n_layers=args.sfh_n_layers,
         sfh_lr_scale=args.sfh_lr_scale,
+        soft_positive_weight=args.soft_positive_weight,
+        soft_positive_k=args.soft_positive_k,
+        sfh_log_epsilon=sfh_log_epsilon,
     )
 
     checkpoint_dir = args.output_dir / 'checkpoints'
@@ -197,7 +217,9 @@ def main():
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
         f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
-        f'SFH encoder={args.sfh_encoder}',
+        f'SFH encoder={args.sfh_encoder}; '
+        f'SFH soft-positive weight={args.soft_positive_weight:g}, '
+        f'k={args.soft_positive_k}',
         flush=True,
     )
     trainer = L.Trainer(

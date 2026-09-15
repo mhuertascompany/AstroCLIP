@@ -17,6 +17,7 @@ import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.spatial.distance import cdist
 from torch.utils.data import DataLoader
 
 from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
@@ -253,27 +254,48 @@ def sfh_shape_neighborhood_test(image_embedding, sfh_embedding, raw_sfh, rng,
                                 subset_size=2000, k=10):
     """Test whether images retrieve SFHs with a similar physical shape."""
     size = min(len(raw_sfh), subset_size)
+    if size < 2:
+        raise ValueError('SFH neighborhood evaluation requires at least two objects.')
     selected = np.sort(rng.choice(len(raw_sfh), size=size, replace=False))
     image = image_embedding[selected]
     sfh_embedding = sfh_embedding[selected]
     linear = np.maximum(10.0 ** raw_sfh[selected] - 1e-10, 0.0)
-    norms = np.linalg.norm(linear, axis=1, keepdims=True)
-    linear = linear / np.maximum(norms, 1e-12)
+    linear /= np.maximum(linear.sum(axis=1, keepdims=True), 1e-12)
+    unit_linear = linear / np.maximum(
+        np.linalg.norm(linear, axis=1, keepdims=True), 1e-12,
+    )
 
     cross_similarity = image @ sfh_embedding.T
-    raw_similarity = linear @ linear.T
+    raw_similarity = unit_linear @ unit_linear.T
+    cumulative = np.cumsum(linear, axis=1)
+    raw_wasserstein = cdist(cumulative, cumulative, metric='cityblock')
+    raw_wasserstein /= max(linear.shape[1] - 1, 1)
     np.fill_diagonal(cross_similarity, -np.inf)
     np.fill_diagonal(raw_similarity, -np.inf)
+    np.fill_diagonal(raw_wasserstein, np.inf)
     k = min(k, size - 1)
     cross_top = np.argpartition(cross_similarity, -k, axis=1)[:, -k:]
     raw_top = np.argpartition(raw_similarity, -k, axis=1)[:, -k:]
+    wasserstein_top = np.argpartition(raw_wasserstein, k, axis=1)[:, :k]
     retrieved_shape_cosine = np.take_along_axis(
         raw_similarity, cross_top, axis=1,
     ).mean(axis=1)
     random_index = _derangement(size, rng)
-    random_shape_cosine = np.sum(linear * linear[random_index], axis=1)
-    overlaps = np.array([
+    random_shape_cosine = np.sum(
+        unit_linear * unit_linear[random_index], axis=1,
+    )
+    retrieved_shape_wasserstein = np.take_along_axis(
+        raw_wasserstein, cross_top, axis=1,
+    ).mean(axis=1)
+    random_shape_wasserstein = raw_wasserstein[np.arange(size), random_index]
+    cosine_overlaps = np.array([
         np.intersect1d(cross_top[row], raw_top[row], assume_unique=True).size / k
+        for row in range(size)
+    ])
+    wasserstein_overlaps = np.array([
+        np.intersect1d(
+            cross_top[row], wasserstein_top[row], assume_unique=True,
+        ).size / k
         for row in range(size)
     ])
     return {
@@ -283,7 +305,18 @@ def sfh_shape_neighborhood_test(image_embedding, sfh_embedding, raw_sfh, rng,
             retrieved_shape_cosine.mean()
         ),
         'mean_raw_sfh_cosine_of_random_neighbors': float(random_shape_cosine.mean()),
-        'raw_sfh_neighbor_overlap_at_k': float(overlaps.mean()),
+        # Retain the original key for compatibility with existing reports.
+        'raw_sfh_neighbor_overlap_at_k': float(cosine_overlaps.mean()),
+        'raw_sfh_cosine_neighbor_overlap_at_k': float(cosine_overlaps.mean()),
+        'mean_raw_sfh_wasserstein_of_cross_modal_neighbors': float(
+            retrieved_shape_wasserstein.mean()
+        ),
+        'mean_raw_sfh_wasserstein_of_random_neighbors': float(
+            random_shape_wasserstein.mean()
+        ),
+        'raw_sfh_wasserstein_neighbor_overlap_at_k': float(
+            wasserstein_overlaps.mean()
+        ),
         'chance_neighbor_overlap_at_k': float(k / (size - 1)),
     }
 

@@ -570,3 +570,50 @@ checkpoint, and then creates the UMAP atlas if evaluation succeeds. It writes
 `metrics.json`, reusable validation embeddings, the per-object retrieval table,
 and `evaluation_best/euclid_clip_umap_diagnostics.pdf` under
 `training_transformer_median_unfreeze1`.
+
+### SFH-aware soft-positive experiment
+
+The soft-positive experiment keeps the frozen Euclid ZooBot backbone, SFH
+transformer, deterministic split, posterior medians, batch size, optimizer, and
+queue-free training used by the exact-pair baseline. Its output directories are
+separate, so it cannot overwrite `training_transformer_median_v2`.
+
+For each batch, the code converts the stored log SFHs back to unit-normalized
+linear mass weights and computes pairwise Wasserstein-1 distances on the
+fractional-lookback-time grid. Each contrastive target retains 75% probability
+on its exact image--SFH pair and distributes 25% among its eight closest SFHs
+with an adaptive distance kernel. The target graph always uses posterior
+medians; later posterior sampling can therefore perturb the SFH encoder input
+without changing which histories are considered neighbours.
+
+Verify the new loss and dataloader path with a two-epoch, 1,024-pair job:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_soft_w1_test.sh
+```
+
+It writes to `training_test_soft_w1` and leaves the previous smoke tests intact.
+
+Run the controlled 10,000-pair pilot first:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_soft_w1_pilot.sh
+```
+
+It writes to `training_pilot_transformer_median_soft_w1`. `val_loss` is the
+mixed soft-positive objective, while `val_exact_loss`, rank-1, rank-5, and the
+alignment-margin metrics retain the exact-pair interpretation. Compare those
+quantities with `training_pilot_transformer_median`, rather than comparing the
+mixed `val_loss` numerically with exact InfoNCE.
+
+If the pilot improves SFH-neighbour recovery, run all matched objects:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_100k_soft_w1.sh
+```
+
+The full run writes to `training_transformer_median_soft_w1`. The normal
+evaluation script accepts its checkpoint, split, and a new output directory as
+positional arguments. Its SFH-neighbour report includes both cosine and
+Wasserstein shape distances and neighbour overlap, so the new objective can be
+judged in its intended geometry alongside exact retrieval.

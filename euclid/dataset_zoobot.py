@@ -102,12 +102,20 @@ class EuclidZooBotDataset(Dataset):
         if not np.all(np.isfinite(sfh)):
             raise ValueError(f'Nonfinite SFH for galaxy_id={galaxy_id}.')
 
+        # A deterministic reference is used to define SFH-neighbour targets,
+        # even when a posterior realization is sampled as encoder input.
+        if realization_index >= 0:
+            sfh_reference = np.asarray(source['sfh'][row], dtype=np.float32)
+        else:
+            sfh_reference = sfh
+
         path = self.stamp_dir / f'{self.band}_{galaxy_id}.jpg'
         with Image.open(path) as image:
             image_tensor = self.transform(image.convert('L'))
         return {
             'image': image_tensor,
             'sfh': torch.from_numpy(sfh.copy()),
+            'sfh_reference': torch.from_numpy(sfh_reference.copy()),
             'galaxy_id': torch.tensor(galaxy_id, dtype=torch.int64),
             'sfh_realization': torch.tensor(realization_index, dtype=torch.int64),
         }
