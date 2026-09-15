@@ -559,14 +559,14 @@ The feature-stage selector uses timm's `feature_info`. The terminal feature
 normalization is also trainable but does not count toward `--unfreeze-blocks`.
 
 For the completed unfreeze-one-stage run, submit quantitative evaluation and
-the dependent UMAP job together:
+UMAP generation together:
 
 ```bash
-bash euclid/submit_unfreeze1_diagnostics.sh
+sbatch euclid/slurm_unfreeze1_diagnostics.sh
 ```
 
-The evaluation uses that run's own `pair_split.npz`. If it succeeds, SLURM
-automatically starts the UMAP job and writes `metrics.json`, reusable validation
-embeddings, the per-object retrieval table, and
-`evaluation_best/euclid_clip_umap_diagnostics.pdf` under
+This single SLURM job uses that run's own `pair_split.npz`, evaluates the
+checkpoint, and then creates the UMAP atlas if evaluation succeeds. It writes
+`metrics.json`, reusable validation embeddings, the per-object retrieval table,
+and `evaluation_best/euclid_clip_umap_diagnostics.pdf` under
 `training_transformer_median_unfreeze1`.
