@@ -617,3 +617,155 @@ evaluation script accepts its checkpoint, split, and a new output directory as
 positional arguments. Its SFH-neighbour report includes both cosine and
 Wasserstein shape distances and neighbour overlap, so the new objective can be
 judged in its intended geometry alongside exact retrieval.
+
+### SFH encoder--decoder pretraining
+
+The SFH autoencoder keeps the four-layer, width-128 transformer used by the
+alignment baseline, so its encoder weights transfer exactly. A two-layer
+transformer decoder receives only the global 256-dimensional encoder output
+and 250 fractional-lookback-time queries. It cannot copy local encoder tokens,
+so the global representation must retain the complete SFH shape.
+
+During pretraining, the input is a random valid posterior realization and the
+target is the posterior-median SFH. One contiguous interval containing 35% of
+the bins is masked. The reconstruction is constrained to be non-negative and
+sum to one. Its loss gives equal weight to cumulative Wasserstein-1 distance
+and a Huber term weighted by the stored 16th--84th percentile width. The exact
+baseline's saved train/validation split is reused, preventing the SFH encoder
+from pretraining on the later CLIP validation galaxies.
+
+First verify the encoder, decoder, masking, and HDF5 path on 2,048 objects:
+
+```bash
+sbatch euclid/slurm_pretrain_sfh_autoencoder_test.sh
+```
+
+`val_w1` measures reconstruction of a deterministic posterior realization to
+the posterior median. `val_clean_w1` measures median-to-median reconstruction
+through the bottleneck. Both should decrease without becoming nonfinite. Then
+run the complete pretraining:
+
+```bash
+sbatch euclid/slurm_pretrain_sfh_autoencoder.sh
+```
+
+The full run writes to `sfh_autoencoder_v1`. Copy the `Best checkpoint` path
+from its output and verify that it can initialize the CLIP model:
+
+```bash
+AE_CKPT='/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/REPLACE_WITH_BEST.ckpt'
+sbatch euclid/slurm_train_zoobot_clip_sfh_autoencoder_test.sh "${AE_CKPT}"
+```
+
+After the two-epoch integration test succeeds, train the controlled 100k
+comparison:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_100k_sfh_autoencoder.sh "${AE_CKPT}"
+```
+
+This run writes to `training_transformer_median_sfh_autoencoder`. It retains
+the frozen Euclid ZooBot backbone, posterior-median inputs, exact-pair
+contrastive loss, optimizer, and split from the baseline. The only changes are
+SFH encoder initialization and a reconstruction regularizer with weight 0.1.
+`val_contrastive_loss` remains directly comparable with the baseline, while
+`val_loss` includes the auxiliary reconstruction term. Evaluate the resulting
+best checkpoint with `slurm_evaluate_zoobot_clip.sh` on the common baseline
+split before comparing its retrieval and SFH-neighbour metrics. For a
+decoder-enabled checkpoint, that evaluation also adds median reconstruction
+W1 and mean-absolute-error summaries to `metrics.json`.
+
+### Interactive Euclid embedding explorer
+
+`euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the
+Euclid data layout. The two linked UMAP panels can display different runs and
+embedding spaces while preserving selections by galaxy ID. Selected objects
+show their VIS stamps, median SFHs with 16th--84th percentile posterior bands,
+and the population SFH of the complete selection. Redshift and scalar-property
+filters are available, and selections can be saved to CSV.
+
+The app clusters in the full 256-dimensional image, SFH, or joint latent space
+when those arrays are present. UMAP coordinates are used for navigation and
+display. New diagnostic NPZ files include the raw embeddings automatically;
+the bundle exporter also merges them from the sibling
+`validation_embeddings.npz` for diagnostic files made with older code.
+
+The main comparison now uses the complete 100k exact-pair and soft-positive
+runs. Evaluate both best checkpoints against the exact-pair run's saved split,
+so every metric and plotted point refers to the same 9,955 validation galaxies:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_100k
+COMMON_SPLIT=${BASE}/training_transformer_median_v2/pair_split.npz
+
+sbatch euclid/slurm_evaluate_zoobot_clip.sh \
+  "${BASE}/training_transformer_median_v2/checkpoints/euclid_vis_sfh_transformer_median_100k-epoch=027-val_loss=4.4625.ckpt" \
+  "${BASE}/training_transformer_median_v2/evaluation_best_common_split" \
+  "${COMMON_SPLIT}"
+
+sbatch euclid/slurm_evaluate_zoobot_clip.sh \
+  "${BASE}/training_transformer_median_soft_w1/checkpoints/euclid_vis_sfh_transformer_median_soft_w1_100k-epoch=030-val_loss=4.5688.ckpt" \
+  "${BASE}/training_transformer_median_soft_w1/evaluation_best_common_split" \
+  "${COMMON_SPLIT}"
+```
+
+After both evaluation jobs finish, create their diagnostic NPZ files:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_100k
+
+sbatch euclid/slurm_umap_zoobot_clip.sh \
+  "${BASE}/training_transformer_median_v2/checkpoints/euclid_vis_sfh_transformer_median_100k-epoch=027-val_loss=4.4625.ckpt" \
+  "${BASE}/training_transformer_median_v2/evaluation_best_common_split" \
+  "${BASE}/training_transformer_median_v2/evaluation_best_common_split/euclid_clip_umap_diagnostics.pdf"
+
+sbatch euclid/slurm_umap_zoobot_clip.sh \
+  "${BASE}/training_transformer_median_soft_w1/checkpoints/euclid_vis_sfh_transformer_median_soft_w1_100k-epoch=030-val_loss=4.5688.ckpt" \
+  "${BASE}/training_transformer_median_soft_w1/evaluation_best_common_split" \
+  "${BASE}/training_transformer_median_soft_w1/evaluation_best_common_split/euclid_clip_umap_diagnostics.pdf"
+```
+
+After both UMAP jobs finish, create a compact transfer bundle. It extracts the
+median and percentile SFHs and packages the matched VIS stamps:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_100k
+
+sbatch euclid/slurm_export_explorer_bundle.sh \
+  "${BASE}/explorer_100k_exact_vs_soft_w1" \
+  "${BASE}/training_transformer_median_v2/evaluation_best_common_split/euclid_clip_umap_diagnostics.npz" \
+  "${BASE}/training_transformer_median_soft_w1/evaluation_best_common_split/euclid_clip_umap_diagnostics.npz"
+```
+
+Download the resulting `explorer_100k_exact_vs_soft_w1` directory. It contains all
+files needed locally:
+
+- `euclid_explorer.h5`: compact SFH medians, posterior intervals, and time grid.
+- Two diagnostic `.npz` files: UMAP coordinates, physical properties, alignment
+  metrics, and raw embeddings for the exact and soft-positive runs.
+- `VIS_stamps.tar`: only the JPEGs for the common validation galaxies.
+- `manifest.json`: provenance and file inventory.
+
+The checkpoints, full 100k HDF5 file, PDF diagnostics, and separate evaluation
+CSV files are not needed on the laptop. After downloading, extract the stamps
+and install the small local viewer environment:
+
+```bash
+tar -xf explorer_100k_exact_vs_soft_w1/VIS_stamps.tar \
+  -C explorer_100k_exact_vs_soft_w1
+python3 -m venv .venv-euclid-explorer
+source .venv-euclid-explorer/bin/activate
+python -m pip install -r euclid/requirements_explorer.txt
+```
+
+Launch the linked comparison:
+
+```bash
+python -m euclid.explore_embeddings \
+  --h5 explorer_100k_exact_vs_soft_w1/euclid_explorer.h5 \
+  --stamps explorer_100k_exact_vs_soft_w1/VIS \
+  --umap explorer_100k_exact_vs_soft_w1/00_training_transformer_median_v2_euclid_clip_umap_diagnostics.npz \
+  --umap explorer_100k_exact_vs_soft_w1/01_training_transformer_median_soft_w1_euclid_clip_umap_diagnostics.npz \
+  --label 'exact-pair 100k' \
+  --label 'soft-W1 100k'
+```

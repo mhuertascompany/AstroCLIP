@@ -1,0 +1,7 @@
+panel>=1.4
+bokeh>=3.4
+h5py>=3.8
+matplotlib>=3.7
+numpy>=1.24
+pillow>=9.5
+scikit-learn>=1.3

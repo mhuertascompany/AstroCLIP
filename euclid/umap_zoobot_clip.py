@@ -496,6 +496,9 @@ def main():
     npz_data = {
         'galaxy_id': galaxy_ids,
         'h5_row': rows,
+        'image_embedding': image,
+        'sfh_embedding': sfh,
+        'joint_embedding': joint,
         'xy_image': xy_image,
         'xy_sfh': xy_sfh,
         'xy_joint': xy_joint,

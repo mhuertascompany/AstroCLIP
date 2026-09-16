@@ -4,6 +4,7 @@ from .evaluate_zoobot_clip import (
     embedding_diagnostics,
     retrieval_ranks,
     sfh_shape_neighborhood_test,
+    summarize_sfh_reconstruction,
     summarize_ranks,
 )
 
@@ -50,3 +51,10 @@ def test_shape_neighborhood_prefers_matching_shapes():
         result['mean_raw_sfh_cosine_of_cross_modal_neighbors'] >
         result['mean_raw_sfh_cosine_of_random_neighbors']
     )
+
+
+def test_sfh_reconstruction_summary_is_zero_for_exact_shape():
+    target = np.array([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]])
+    result = summarize_sfh_reconstruction(target, np.log10(target + 1e-10))
+    assert result['w1_mean'] < 1e-10
+    assert result['mae_mean'] < 1e-10

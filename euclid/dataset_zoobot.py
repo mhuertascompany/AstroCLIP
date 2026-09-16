@@ -116,6 +116,12 @@ class EuclidZooBotDataset(Dataset):
             'image': image_tensor,
             'sfh': torch.from_numpy(sfh.copy()),
             'sfh_reference': torch.from_numpy(sfh_reference.copy()),
+            'sfh_p16': torch.from_numpy(
+                np.asarray(source['sfh_p16'][row], dtype=np.float32).copy(),
+            ),
+            'sfh_p84': torch.from_numpy(
+                np.asarray(source['sfh_p84'][row], dtype=np.float32).copy(),
+            ),
             'galaxy_id': torch.tensor(galaxy_id, dtype=torch.int64),
             'sfh_realization': torch.tensor(realization_index, dtype=torch.int64),
         }

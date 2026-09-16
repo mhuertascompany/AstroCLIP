@@ -19,6 +19,7 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import CSVLogger
 
 from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
+from cosmosweb.sfh_autoencoder import load_sfh_autoencoder_checkpoint
 
 from .dataset_zoobot import EuclidZooBotDataModule
 from .training_index import inspect_sfh_file
@@ -73,6 +74,16 @@ def parse_args():
     model.add_argument('--sfh-n-layers', type=int, default=4)
     model.add_argument('--sfh-lr-scale', type=float, default=1.0)
     model.add_argument(
+        '--sfh-pretrained-checkpoint', type=Path,
+        help='SFH encoder-decoder checkpoint used to initialize a new CLIP run.',
+    )
+    model.add_argument(
+        '--sfh-reconstruction-weight', type=float, default=0.0,
+        help='Auxiliary SFH reconstruction weight during contrastive training.',
+    )
+    model.add_argument('--sfh-reconstruction-w1-weight', type=float, default=0.5)
+    model.add_argument('--sfh-decoder-layers', type=int, default=2)
+    model.add_argument(
         '--soft-positive-weight', type=float, default=0.0,
         help='Weight assigned to W1-neighbour SFHs; zero preserves exact InfoNCE.',
     )
@@ -108,6 +119,11 @@ def validate_args(args):
         raise FileNotFoundError(f'ZooBot checkpoint not found: {args.zoobot_ckpt}')
     if args.resume_from is not None and not args.resume_from.is_file():
         raise FileNotFoundError(f'Resume checkpoint not found: {args.resume_from}')
+    if (args.sfh_pretrained_checkpoint is not None
+            and not args.sfh_pretrained_checkpoint.is_file()):
+        raise FileNotFoundError(
+            f'SFH pretraining checkpoint not found: {args.sfh_pretrained_checkpoint}'
+        )
     if args.batch_size < 2:
         raise ValueError('--batch-size must be at least 2.')
     if args.queue_size < 0:
@@ -129,6 +145,14 @@ def validate_args(args):
             raise ValueError('--sfh-d-model must be divisible by --sfh-n-heads.')
     if args.sfh_lr_scale <= 0:
         raise ValueError('--sfh-lr-scale must be positive.')
+    if args.sfh_reconstruction_weight < 0:
+        raise ValueError('--sfh-reconstruction-weight cannot be negative.')
+    if not 0 <= args.sfh_reconstruction_w1_weight <= 1:
+        raise ValueError('--sfh-reconstruction-w1-weight must lie in [0, 1].')
+    if args.sfh_decoder_layers < 1:
+        raise ValueError('--sfh-decoder-layers must be positive.')
+    if args.sfh_reconstruction_weight and args.sfh_encoder != 'transformer':
+        raise ValueError('SFH reconstruction requires --sfh-encoder transformer.')
     if args.unfreeze_blocks < 0:
         raise ValueError('--unfreeze-blocks cannot be negative.')
     if args.backbone_lr_scale <= 0:
@@ -187,7 +211,29 @@ def main():
         soft_positive_weight=args.soft_positive_weight,
         soft_positive_k=args.soft_positive_k,
         sfh_log_epsilon=sfh_log_epsilon,
+        sfh_reconstruction_weight=args.sfh_reconstruction_weight,
+        sfh_reconstruction_w1_weight=args.sfh_reconstruction_w1_weight,
+        sfh_decoder_layers=args.sfh_decoder_layers,
     )
+    if args.sfh_pretrained_checkpoint is not None and args.resume_from is None:
+        load_sfh_autoencoder_checkpoint(
+            model.sfh_encoder,
+            args.sfh_pretrained_checkpoint,
+            decoder=model.sfh_decoder,
+        )
+        model.sfh_encoder_m.load_state_dict(model.sfh_encoder.state_dict())
+        print(
+            f'Initialized SFH encoder'
+            f'{" and decoder" if model.sfh_decoder is not None else ""} from '
+            f'{args.sfh_pretrained_checkpoint}',
+            flush=True,
+        )
+    elif args.sfh_pretrained_checkpoint is not None:
+        print(
+            'Ignoring --sfh-pretrained-checkpoint because --resume-from restores '
+            'the complete CLIP state.',
+            flush=True,
+        )
 
     checkpoint_dir = args.output_dir / 'checkpoints'
     log_dir = args.output_dir / 'logs'
@@ -218,6 +264,7 @@ def main():
         f'realizations; posterior sampling={args.sample_posterior}; '
         f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
         f'SFH encoder={args.sfh_encoder}; '
+        f'SFH reconstruction weight={args.sfh_reconstruction_weight:g}; '
         f'SFH soft-positive weight={args.soft_positive_weight:g}, '
         f'k={args.soft_positive_k}',
         flush=True,

@@ -108,6 +108,7 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
 def extract_embeddings(model, loader, device):
     image_embeddings = []
     sfh_embeddings = []
+    reconstructions = []
     seen_ids = []
     use_amp = device.type == 'cuda'
     model.eval()
@@ -118,17 +119,45 @@ def extract_embeddings(model, loader, device):
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=use_amp):
                 image_embedding = F.normalize(model.encode_image(images), dim=-1)
-                sfh_embedding = F.normalize(model.encode_sfh(sfhs), dim=-1)
+                sfh_features = model.encode_sfh(sfhs)
+                sfh_embedding = F.normalize(sfh_features, dim=-1)
+                if model.sfh_decoder is not None:
+                    reconstructions.append(
+                        model.sfh_decoder(sfh_features).float().cpu().numpy()
+                    )
             image_embeddings.append(image_embedding.float().cpu().numpy())
             sfh_embeddings.append(sfh_embedding.float().cpu().numpy())
             seen_ids.append(batch['galaxy_id'].numpy())
             if batch_index % 20 == 0:
                 log.info('Encoded %d validation batches', batch_index + 1)
+    reconstruction = (
+        np.concatenate(reconstructions) if reconstructions else None
+    )
     return (
         np.concatenate(image_embeddings),
         np.concatenate(sfh_embeddings),
         np.concatenate(seen_ids),
+        reconstruction,
     )
+
+
+def summarize_sfh_reconstruction(prediction, target_log, epsilon=1e-10):
+    """Report per-object shape errors for a decoder-enabled checkpoint."""
+    prediction = np.asarray(prediction, dtype=np.float64)
+    target = np.maximum(10.0 ** np.asarray(target_log, dtype=np.float64) - epsilon, 0.0)
+    target /= np.maximum(target.sum(axis=1, keepdims=True), epsilon)
+    if prediction.shape != target.shape:
+        raise ValueError('SFH reconstruction and target shapes differ.')
+    w1 = np.abs(np.cumsum(prediction, axis=1) - np.cumsum(target, axis=1)).mean(axis=1)
+    mae = np.abs(prediction - target).mean(axis=1)
+    return {
+        'n_objects': len(prediction),
+        'w1_mean': float(w1.mean()),
+        'w1_median': float(np.median(w1)),
+        'w1_p90': float(np.percentile(w1, 90)),
+        'mae_mean': float(mae.mean()),
+        'mae_median': float(np.median(mae)),
+    }
 
 
 def retrieval_ranks(query, gallery, chunk_size=512):
@@ -503,7 +532,7 @@ def main():
         args.dataset, args.stamp_root, val_rows, val_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
     )
-    image_embedding, sfh_embedding, encoded_ids = extract_embeddings(
+    image_embedding, sfh_embedding, encoded_ids, reconstruction = extract_embeddings(
         model, loader, device,
     )
     if not np.array_equal(encoded_ids, val_ids):
@@ -555,6 +584,11 @@ def main():
             device, rng, subset_size=args.posterior_subset,
             n_draws=args.posterior_draws, batch_size=args.batch_size,
         )
+    if reconstruction is not None:
+        report['sfh_reconstruction'] = summarize_sfh_reconstruction(
+            reconstruction, raw_sfh,
+            epsilon=float(model.hparams.sfh_log_epsilon),
+        )
 
     report_path = args.output_dir / 'metrics.json'
     report_path.write_text(json.dumps(report, indent=2) + '\n')
@@ -578,6 +612,7 @@ def main():
         'shuffled_alignment': report['shuffled_alignment'],
         'sfh_shape_neighborhood': report['sfh_shape_neighborhood'],
         'posterior_robustness': report.get('posterior_robustness'),
+        'sfh_reconstruction': report.get('sfh_reconstruction'),
         'output': str(report_path),
     }, indent=2), flush=True)
 

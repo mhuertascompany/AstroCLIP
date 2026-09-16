@@ -40,6 +40,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .sfh_encoder import SFHEncoder
+from .sfh_autoencoder import FixedGridSFHDecoder, sfh_reconstruction_loss
 from .sfh_transformer import (
     FixedGridSFHTransformerEncoder,
     SFHTransformerEncoder,
@@ -73,6 +74,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         soft_positive_weight: float = 0.0,
         soft_positive_k:  int = 8,
         sfh_log_epsilon:  float = 1e-10,
+        sfh_reconstruction_weight: float = 0.0,
+        sfh_reconstruction_w1_weight: float = 0.5,
+        sfh_decoder_layers: int = 2,
     ) -> None:
         super().__init__()
         if not 0.0 <= soft_positive_weight <= 1.0:
@@ -81,6 +85,10 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError('soft_positive_k must be positive.')
         if sfh_log_epsilon <= 0:
             raise ValueError('sfh_log_epsilon must be positive.')
+        if sfh_reconstruction_weight < 0:
+            raise ValueError('sfh_reconstruction_weight cannot be negative.')
+        if not 0 <= sfh_reconstruction_w1_weight <= 1:
+            raise ValueError('sfh_reconstruction_w1_weight must lie in [0, 1].')
         if soft_positive_weight > 0 and queue_size:
             raise ValueError(
                 'SFH soft positives currently require queue_size=0 because '
@@ -113,6 +121,18 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 f'Unknown sfh_encoder_type={sfh_encoder_type!r}; '
                 "choose 'mlp' or 'transformer'."
             )
+        if sfh_reconstruction_weight > 0:
+            if sfh_encoder_type != 'transformer':
+                raise ValueError('SFH reconstruction requires the transformer encoder.')
+            self.sfh_decoder = FixedGridSFHDecoder(
+                n_bins=sfh_input_dim,
+                embed_dim=embed_dim,
+                d_model=sfh_d_model,
+                n_heads=sfh_n_heads,
+                n_layers=sfh_decoder_layers,
+            )
+        else:
+            self.sfh_decoder = None
 
         # ── momentum encoders (EMA, no gradient) ─────────────────────────────
         self.image_encoder_m = copy.deepcopy(self.image_encoder)
@@ -217,7 +237,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
         # ── query embeddings (main encoders, receive gradients) ───────────────
         img_q = F.normalize(self.encode_image(images), dim=-1)   # (B, D)
-        sfh_q = F.normalize(self.encode_sfh(sfhs),    dim=-1)    # (B, D)
+        sfh_features = self.encode_sfh(sfhs)
+        sfh_q = F.normalize(sfh_features, dim=-1)                # (B, D)
 
         # ── key embeddings (momentum encoders, no gradient) ───────────────────
         with torch.no_grad():
@@ -245,13 +266,32 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 n_neighbors=self.hparams.soft_positive_k,
                 epsilon=self.hparams.sfh_log_epsilon,
             )
-            loss = (
+            contrastive_loss = (
                 soft_cross_entropy(logits_i2s, targets)
                 + soft_cross_entropy(logits_s2i, targets)
             ) / 2.0
         else:
             sfh_w1 = None
-            loss = exact_loss
+            contrastive_loss = exact_loss
+
+        if self.sfh_decoder is not None:
+            reconstruction = self.sfh_decoder(sfh_features)
+            reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
+                reconstruction,
+                sfh_reference,
+                batch.get('sfh_p16'),
+                batch.get('sfh_p84'),
+                epsilon=self.hparams.sfh_log_epsilon,
+                w1_weight=self.hparams.sfh_reconstruction_w1_weight,
+            )
+            loss = (
+                contrastive_loss
+                + self.hparams.sfh_reconstruction_weight * reconstruction_loss
+            )
+            self.log('train_reconstruction_loss', reconstruction_loss, sync_dist=True)
+            self.log('train_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
+        else:
+            loss = contrastive_loss
 
         # ── within-batch rank-1 (cheap training-time diagnostic) ─────────────
         with torch.no_grad():
@@ -264,12 +304,13 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             self._dequeue_and_enqueue(img_k, sfh_k)
 
         self.log('train_loss',       loss, prog_bar=True,  sync_dist=True)
+        self.log('train_contrastive_loss', contrastive_loss, sync_dist=True)
         self.log('train_exact_loss', exact_loss, prog_bar=False, sync_dist=True)
         self.log('train_rank1_batch', r1,  prog_bar=True,  sync_dist=True)
         self.log('train_logit_scale', T,   prog_bar=False, sync_dist=True)
         self.log(
             'train_loss_vs_random',
-            loss - loss.new_tensor(np.log(B + Q)),
+            contrastive_loss - contrastive_loss.new_tensor(np.log(B + Q)),
             sync_dist=True,
         )
         if sfh_w1 is not None:
@@ -288,7 +329,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 
         img_e = F.normalize(self.encode_image(images), dim=-1)
-        sfh_e = F.normalize(self.encode_sfh(sfhs),    dim=-1)
+        sfh_features = self.encode_sfh(sfhs)
+        sfh_e = F.normalize(sfh_features, dim=-1)
 
         logits  = T * (img_e @ sfh_e.T)
         labels  = torch.arange(logits.size(0), device=logits.device, dtype=torch.long)
@@ -301,13 +343,32 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 n_neighbors=self.hparams.soft_positive_k,
                 epsilon=self.hparams.sfh_log_epsilon,
             )
-            val_loss = (
+            val_contrastive_loss = (
                 soft_cross_entropy(logits, targets)
                 + soft_cross_entropy(logits.T, targets)
             ) / 2.0
-            self.log('val_soft_loss', val_loss, sync_dist=True)
+            self.log('val_soft_loss', val_contrastive_loss, sync_dist=True)
         else:
-            val_loss = val_exact_loss
+            val_contrastive_loss = val_exact_loss
+
+        if self.sfh_decoder is not None:
+            reconstruction = self.sfh_decoder(sfh_features)
+            reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
+                reconstruction,
+                sfh_reference,
+                batch.get('sfh_p16'),
+                batch.get('sfh_p84'),
+                epsilon=self.hparams.sfh_log_epsilon,
+                w1_weight=self.hparams.sfh_reconstruction_w1_weight,
+            )
+            val_loss = (
+                val_contrastive_loss
+                + self.hparams.sfh_reconstruction_weight * reconstruction_loss
+            )
+            self.log('val_reconstruction_loss', reconstruction_loss, sync_dist=True)
+            self.log('val_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
+        else:
+            val_loss = val_contrastive_loss
 
         with torch.no_grad():
             r1 = ((logits.argmax(1)   == labels).float().mean() +
@@ -325,13 +386,16 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             else:
                 negative_cosine = positive_cosine.new_zeros(())
             alignment_margin = positive_cosine - negative_cosine
-            random_loss = val_loss.new_tensor(np.log(logits.size(0)))
+            random_loss = val_contrastive_loss.new_tensor(np.log(logits.size(0)))
 
         self.log('val_loss',   val_loss, prog_bar=True,  sync_dist=True)
+        self.log('val_contrastive_loss', val_contrastive_loss, sync_dist=True)
         self.log('val_exact_loss', val_exact_loss, sync_dist=True)
         self.log('val_rank1',  r1,       prog_bar=True,  sync_dist=True)
         self.log('val_rank5', r5, prog_bar=True, sync_dist=True)
-        self.log('val_loss_vs_random', val_loss - random_loss, sync_dist=True)
+        self.log(
+            'val_loss_vs_random', val_contrastive_loss - random_loss, sync_dist=True,
+        )
         self.log('val_positive_cosine', positive_cosine, sync_dist=True)
         self.log('val_negative_cosine', negative_cosine, sync_dist=True)
         self.log('val_alignment_margin', alignment_margin, sync_dist=True)
@@ -350,10 +414,13 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             if p.requires_grad
             and not n.startswith('image_encoder.backbone.')
             and not n.startswith('sfh_encoder.')
+            and not n.startswith('sfh_decoder.')
             and not n.startswith('image_encoder_m.')
             and not n.startswith('sfh_encoder_m.')
         ]
         sfh_params = [p for p in self.sfh_encoder.parameters() if p.requires_grad]
+        if self.sfh_decoder is not None:
+            sfh_params.extend(p for p in self.sfh_decoder.parameters() if p.requires_grad)
 
         param_groups = [{'params': other_params, 'lr': self.hparams.lr}]
         if sfh_params:
