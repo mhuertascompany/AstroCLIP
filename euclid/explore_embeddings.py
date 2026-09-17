@@ -1,10 +1,11 @@
-"""Interactive local explorer for Euclid image--SFH embedding diagnostics.
+"""Interactive local explorer for Euclid image--SFH or SFH-only embeddings.
 
-The app accepts one or more ``euclid_clip_umap_diagnostics.npz`` archives.
+The app accepts one or more compatible UMAP NPZ archives.
 Both panels share the same selected galaxy IDs, while their run, embedding
 space, and color property can be changed independently. Lasso selections show
-the corresponding VIS stamps, median SFHs with posterior intervals, and the
-population SFH of the complete selection.
+median SFHs with posterior intervals and the population SFH of the complete
+selection. When ``--stamps`` is supplied, it also shows the corresponding VIS
+stamps.
 
 Run directly::
 
@@ -78,6 +79,9 @@ _PROPERTY_LABELS = {
     'sfh_t50_lookback': 'SFH t50 fractional lookback',
     'sfh_entropy': 'Normalized SFH entropy',
     'sfh_log_old_recent': 'log(old 20% / recent 20%)',
+    'sfh_posterior_width': 'Mean SFH posterior width',
+    'reconstruction_w1': 'Reconstruction W1',
+    'reconstruction_mae': 'Reconstruction MAE',
     'paired_cosine': 'Matched image–SFH cosine',
     'image_to_sfh_rank_percentile': 'Image→SFH rank percentile',
     'sfh_to_image_rank_percentile': 'SFH→image rank percentile',
@@ -115,8 +119,8 @@ def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--h5', type=Path, required=True,
                         help='Compact euclid_explorer.h5 or full sfh_clip HDF5.')
-    parser.add_argument('--stamps', type=Path, required=True,
-                        help='Extracted VIS directory, or its parent directory.')
+    parser.add_argument('--stamps', type=Path,
+                        help='Optional extracted VIS directory, or its parent.')
     parser.add_argument('--umap', type=Path, action='append', required=True,
                         help='Diagnostic NPZ; repeat to compare runs.')
     parser.add_argument('--label', action='append', default=[],
@@ -148,7 +152,7 @@ def _default_run_label(path):
 
 def _load_archive(path):
     with np.load(path) as archive:
-        required = {'galaxy_id', 'xy_image', 'xy_sfh', 'xy_joint'}
+        required = {'galaxy_id'}
         missing = sorted(required.difference(archive.files))
         if missing:
             raise ValueError(f'Missing arrays in {path}: {missing}')
@@ -164,6 +168,10 @@ def _load_archive(path):
             if values.shape != (len(ids), 2):
                 raise ValueError(f'{key} in {path} must have shape ({len(ids)}, 2).')
             coordinates[label] = values
+        if not coordinates:
+            raise ValueError(
+                f'{path} contains none of the supported UMAP coordinate arrays.'
+            )
 
         embeddings = {}
         for label, key in (
@@ -267,6 +275,8 @@ def load_data(h5_path, archive_paths, labels=None):
 
 
 def _stamp_directory(path, band):
+    if path is None:
+        return None
     if (path / band).is_dir():
         return path / band
     return path
@@ -277,7 +287,8 @@ def _linear_sfh(log_sfh, epsilon):
     return weights / np.maximum(weights.sum(axis=-1, keepdims=True), epsilon)
 
 
-def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon):
+def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
+                reconstruction=None):
     median = _linear_sfh(median_log, epsilon)
     if p16_log is not None and p84_log is not None:
         lower = np.maximum(10.0 ** p16_log - epsilon, epsilon)
@@ -285,6 +296,11 @@ def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon):
         ax.fill_between(time, lower, upper, color='steelblue', alpha=0.22,
                         linewidth=0, label='16–84% posterior')
     ax.plot(time, median, color='steelblue', linewidth=1.1, label='median')
+    if reconstruction is not None:
+        ax.plot(
+            time, reconstruction, color='darkorange', linewidth=1.0,
+            linestyle='--', label='decoder reconstruction',
+        )
     ax.set_yscale('log')
     ax.set_xlim(float(time.min()), float(time.max()))
     ax.set_xlabel('Fractional lookback time', fontsize=5)
@@ -313,33 +329,44 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band):
         median = _read_rows(source['sfh'], rows)
         p16 = _read_rows(source['sfh_p16'], rows) if 'sfh_p16' in source else None
         p84 = _read_rows(source['sfh_p84'], rows) if 'sfh_p84' in source else None
+        reconstruction = (
+            _read_rows(source['sfh_reconstruction'], rows)
+            if 'sfh_reconstruction' in source else None
+        )
         time = np.asarray(source['sfh_time_grid'][:], dtype=float)
         epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
 
     nrows = max(1, (n + NCOLS - 1) // NCOLS)
-    fig_images, image_axes = plt.subplots(
-        nrows, NCOLS, figsize=(NCOLS * 1.7, nrows * 1.7), squeeze=False,
-    )
+    if stamp_dir is not None:
+        fig_images, image_axes = plt.subplots(
+            nrows, NCOLS, figsize=(NCOLS * 1.7, nrows * 1.7), squeeze=False,
+        )
+    else:
+        fig_images, image_axes = None, None
     fig_sfhs, sfh_axes = plt.subplots(
         nrows, NCOLS, figsize=(NCOLS * 1.9, nrows * 1.7), squeeze=False,
     )
-    for axes in (image_axes.flat, sfh_axes.flat):
+    axes_groups = [sfh_axes.flat]
+    if image_axes is not None:
+        axes_groups.append(image_axes.flat)
+    for axes in axes_groups:
         for axis in axes:
             axis.set_visible(False)
 
     for index, (galaxy_id, z) in enumerate(zip(ids, redshift)):
-        image_axis = image_axes.flat[index]
-        image_axis.set_visible(True)
-        stamp = stamp_dir / f'{band}_{int(galaxy_id)}.jpg'
-        if stamp.is_file():
-            with Image.open(stamp) as image:
-                image_axis.imshow(np.asarray(image.convert('L')), cmap='gray',
-                                  interpolation='nearest')
-        else:
-            image_axis.text(0.5, 0.5, 'missing stamp', ha='center', va='center')
-        image_axis.set_xticks([])
-        image_axis.set_yticks([])
-        image_axis.set_title(f'{int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
+        if image_axes is not None:
+            image_axis = image_axes.flat[index]
+            image_axis.set_visible(True)
+            stamp = stamp_dir / f'{band}_{int(galaxy_id)}.jpg'
+            if stamp.is_file():
+                with Image.open(stamp) as image:
+                    image_axis.imshow(np.asarray(image.convert('L')), cmap='gray',
+                                      interpolation='nearest')
+            else:
+                image_axis.text(0.5, 0.5, 'missing stamp', ha='center', va='center')
+            image_axis.set_xticks([])
+            image_axis.set_yticks([])
+            image_axis.set_title(f'{int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
 
         sfh_axis = sfh_axes.flat[index]
         sfh_axis.set_visible(True)
@@ -348,10 +375,12 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band):
             p16[index] if p16 is not None else None,
             p84[index] if p84 is not None else None,
             epsilon,
+            reconstruction[index] if reconstruction is not None else None,
         )
         sfh_axis.set_title(f'{int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
 
-    fig_images.tight_layout(pad=0.4)
+    if fig_images is not None:
+        fig_images.tight_layout(pad=0.4)
     fig_sfhs.tight_layout(pad=0.4)
     return fig_images, fig_sfhs
 
@@ -359,15 +388,24 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band):
 def _population_sfh(h5_path, rows):
     with h5py.File(h5_path, 'r') as source:
         log_sfhs = _read_rows(source['sfh'], rows)
+        reconstruction = (
+            _read_rows(source['sfh_reconstruction'], rows)
+            if 'sfh_reconstruction' in source else None
+        )
         time = np.asarray(source['sfh_time_grid'][:], dtype=float)
         epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
     weights = _linear_sfh(log_sfhs, epsilon)
     lower, median, upper = np.percentile(weights, [16, 50, 84], axis=0)
     fig, axis = plt.subplots(figsize=(5, 2.6))
-    axis.fill_between(time, lower, upper, color='darkorange', alpha=0.25,
+    axis.fill_between(time, lower, upper, color='steelblue', alpha=0.25,
                       label='16–84% of selected galaxies')
-    axis.plot(time, median, color='darkorange', linewidth=1.5,
+    axis.plot(time, median, color='steelblue', linewidth=1.5,
               label=f'population median (N={len(rows):,})')
+    if reconstruction is not None:
+        axis.plot(
+            time, np.median(reconstruction, axis=0), color='darkorange',
+            linewidth=1.2, linestyle='--', label='median reconstruction',
+        )
     axis.set_yscale('log')
     axis.set_xlim(float(time.min()), float(time.max()))
     axis.set_xlabel('Fractional lookback time', fontsize=8)
@@ -436,7 +474,13 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
 
     left_embedding_default = next(iter(data['runs'][left_run_default]['coordinates']))
     right_embedding_default = next(iter(data['runs'][right_run_default]['coordinates']))
-    left_color_default = 'Sérsic index n' if 'Sérsic index n' in all_properties else all_properties[0]
+    if stamp_dir is None and 'Redshift z' in all_properties:
+        left_color_default = 'Redshift z'
+    else:
+        left_color_default = (
+            'Sérsic index n'
+            if 'Sérsic index n' in all_properties else all_properties[0]
+        )
     right_color_default = (
         'SFH fraction: recent 20%'
         if 'SFH fraction: recent 20%' in all_properties
@@ -624,7 +668,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         image_fig, sfh_fig = _gallery(
             h5_path, stamp_dir, selected, data, rng, band,
         )
-        image_pane.object = _fig_to_html(image_fig)
+        if image_fig is not None:
+            image_pane.object = _fig_to_html(image_fig)
         sfh_pane.object = _fig_to_html(sfh_fig)
         rows = data['h5_rows'][np.asarray(selected, dtype=int)]
         population_pane.object = _fig_to_html(_population_sfh(h5_path, rows))
@@ -767,7 +812,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     update_right_coordinates()
 
     sidebar = pn.Column(
-        pn.pane.Markdown('## Euclid image–SFH explorer'),
+        pn.pane.Markdown('## Euclid embedding explorer'),
         pn.layout.Divider(),
         redshift_slider,
         pn.layout.Divider(),
@@ -788,6 +833,16 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         width=240,
     )
 
+    detail_columns = []
+    if stamp_dir is not None:
+        detail_columns.append(
+            pn.Column(pn.pane.Markdown(f'#### {band} stamps'), image_pane),
+        )
+    detail_columns.extend([
+        pn.Column(pn.pane.Markdown('#### SFHs with posterior intervals'), sfh_pane),
+        pn.Column(pn.pane.Markdown('#### Population SFH'), population_pane),
+    ])
+
     return pn.Column(
         pn.Row(
             pn.Column(left_run, left_embedding, left_color, left_range,
@@ -797,11 +852,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             sidebar,
         ),
         pn.layout.Divider(),
-        pn.Row(
-            pn.Column(pn.pane.Markdown(f'#### {band} stamps'), image_pane),
-            pn.Column(pn.pane.Markdown('#### SFHs with posterior intervals'), sfh_pane),
-            pn.Column(pn.pane.Markdown('#### Population SFH'), population_pane),
-        ),
+        pn.Row(*detail_columns),
     )
 
 
@@ -810,7 +861,7 @@ for _path in [_ARGS.h5, *_ARGS.umap]:
     if not _path.is_file():
         raise FileNotFoundError(_path)
 _STAMP_DIR = _stamp_directory(_ARGS.stamps, _ARGS.band)
-if not _STAMP_DIR.is_dir():
+if _STAMP_DIR is not None and not _STAMP_DIR.is_dir():
     raise FileNotFoundError(_STAMP_DIR)
 _DATA = load_data(_ARGS.h5, _ARGS.umap, _ARGS.label or None)
 app = build_app(

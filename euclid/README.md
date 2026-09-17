@@ -646,14 +646,56 @@ through the bottleneck. Both should decrease without becoming nonfinite. Then
 run the complete pretraining:
 
 ```bash
-sbatch euclid/slurm_pretrain_sfh_autoencoder.sh
+sbatch --partition=pscomp --nodelist=n36 \
+  euclid/slurm_pretrain_sfh_autoencoder.sh
 ```
 
 The full run writes to `sfh_autoencoder_v1`. Copy the `Best checkpoint` path
-from its output and verify that it can initialize the CLIP model:
+from its output. Before starting CLIP, export the held-out validation embeddings
+and fit their UMAP:
 
 ```bash
 AE_CKPT='/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/REPLACE_WITH_BEST.ckpt'
+sbatch euclid/slurm_export_sfh_autoencoder_embeddings.sh "${AE_CKPT}"
+```
+
+The export runs on `n36` in `pscomp` and writes
+`sfh_autoencoder_v1/explorer_validation` containing:
+
+- `sfh_autoencoder_umap.npz`: UMAP coordinates, full 256-dimensional encoder
+  embeddings, redshift, morphology, SFH-shape summaries, posterior width, and
+  per-object reconstruction errors.
+- `euclid_explorer.h5`: the median and percentile SFHs plus decoder
+  reconstructions for the 9,955 held-out validation galaxies.
+- `metrics.json`: reconstruction statistics, an SFH-shape-neighbourhood probe,
+  and a redshift probe comparing the latent against raw-SFH and random-pair
+  baselines.
+
+Download those three files and launch the local explorer without image stamps:
+
+```bash
+conda activate astroclip-mac
+python -m euclid.explore_embeddings \
+  --h5 /path/to/explorer_validation/euclid_explorer.h5 \
+  --umap /path/to/explorer_validation/sfh_autoencoder_umap.npz \
+  --label 'SFH autoencoder validation'
+```
+
+Set one panel to `Redshift z` and the other to an SFH-shape property such as
+recent mass fraction, mean lookback time, t50, or entropy. Reconstruction W1
+identifies regions represented poorly by the bottleneck, and lasso selections
+overlay the decoder reconstruction on the measured SFH. The cluster action uses
+the full latent rather than the two-dimensional UMAP. Redshift structure is
+physically expected because the SFH population evolves. In `metrics.json`,
+compare latent and raw-SFH redshift R2, their neighbour delta-z values, and the
+latent-neighbour SFH similarity against the random baseline. Repeat selections
+within narrow redshift intervals before interpreting a trend as an encoder
+artifact.
+
+After this diagnostic looks satisfactory, verify that the checkpoint can
+initialize the CLIP model:
+
+```bash
 sbatch euclid/slurm_train_zoobot_clip_sfh_autoencoder_test.sh "${AE_CKPT}"
 ```
 

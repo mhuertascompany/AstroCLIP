@@ -36,7 +36,7 @@ class SFHAutoencoderTests(unittest.TestCase):
         torch.testing.assert_close(mask.sum(dim=1), torch.tensor([3, 3]))
         self.assertTrue(torch.all(masked[mask] == -10.0))
         for row in mask:
-            positions = torch.flatnonzero(row)
+            positions = torch.nonzero(row, as_tuple=False).flatten()
             self.assertTrue(torch.all(torch.diff(positions) == 1))
 
     def test_reconstruction_loss_prefers_the_target(self):
