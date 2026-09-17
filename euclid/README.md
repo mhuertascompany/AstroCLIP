@@ -717,6 +717,38 @@ split before comparing its retrieval and SFH-neighbour metrics. For a
 decoder-enabled checkpoint, that evaluation also adds median reconstruction
 W1 and mean-absolute-error summaries to `metrics.json`.
 
+#### Frozen SFH autoencoder with a linear CLIP projection
+
+Full fine-tuning can return the pretrained SFH transformer to the same optimum
+as a randomly initialized exact-pair model. The frozen-projection experiment
+keeps the pretrained SFH encoder and decoder fixed and inserts a bias-free
+256-by-256 linear projection before the contrastive loss. That projection is
+initialized to the identity. The ZooBot backbone also remains frozen, so the
+trainable cross-modal maps are the existing image projection and the new SFH
+projection; the autoencoder representation and reconstruction cannot drift.
+
+Run the three-epoch integration test first:
+
+```bash
+AE_CKPT='/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt'
+sbatch euclid/slurm_train_zoobot_clip_sfh_frozen_projection_test.sh "${AE_CKPT}"
+```
+
+Then train all matched objects:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_100k_sfh_frozen_projection.sh "${AE_CKPT}"
+```
+
+The full run writes to `training_sfh_frozen_linear_projection`. Its evaluation
+archive stores both `sfh_embedding` (after the trainable linear projection) and
+`sfh_preprojection_embedding` (the unchanged autoencoder latent). Evaluation
+also reports the overlap of their nearest-neighbour graphs and the correlation
+of their pairwise cosine similarities. The UMAP diagnostic and interactive
+explorer expose `SFH encoder` and `SFH autoencoder latent` as separate spaces.
+This distinguishes successful image alignment from destruction of the original
+SFH geometry.
+
 ### Interactive Euclid embedding explorer
 
 `euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the

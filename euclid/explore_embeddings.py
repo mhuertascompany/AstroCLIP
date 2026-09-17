@@ -99,13 +99,14 @@ _COORDINATES = {
     'Joint average': 'xy_joint',
     'Image encoder': 'xy_image',
     'SFH encoder': 'xy_sfh',
+    'SFH autoencoder latent': 'xy_sfh_preprojection',
     'Shared UMAP: image': 'xy_shared_image',
     'Shared UMAP: SFH': 'xy_shared_sfh',
 }
 
 _ARCHIVE_RESERVED = {
     'galaxy_id', 'h5_row', 'image_embedding', 'sfh_embedding',
-    'joint_embedding', *_COORDINATES.values(),
+    'sfh_preprojection_embedding', 'joint_embedding', *_COORDINATES.values(),
 }
 
 _BLANK_HTML = (
@@ -178,6 +179,7 @@ def _load_archive(path):
             ('Joint average', 'joint_embedding'),
             ('Image encoder', 'image_embedding'),
             ('SFH encoder', 'sfh_embedding'),
+            ('SFH autoencoder latent', 'sfh_preprojection_embedding'),
         ):
             if key not in archive:
                 continue

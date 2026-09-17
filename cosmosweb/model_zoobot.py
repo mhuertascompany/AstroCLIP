@@ -49,6 +49,24 @@ from .sfh_similarity import soft_cross_entropy, wasserstein_soft_targets
 from .zoobot_encoder import MultiFilterZooBotImageEncoder, ZooBotImageEncoder
 
 
+def make_sfh_projection(kind: str, embed_dim: int) -> nn.Module:
+    """Build the optional map from the SFH latent into the CLIP space.
+
+    The linear option starts as the identity, so an autoencoder latent is
+    unchanged before contrastive training.  Keeping this map outside the SFH
+    encoder lets the latter remain a fixed, reconstructive representation.
+    """
+    if kind == 'identity':
+        return nn.Identity()
+    if kind == 'linear':
+        projection = nn.Linear(embed_dim, embed_dim, bias=False)
+        nn.init.eye_(projection.weight)
+        return projection
+    raise ValueError(
+        f'Unknown sfh_projection_type={kind!r}; choose identity or linear.'
+    )
+
+
 class CosmosWebZooBotCLIP(L.LightningModule):
 
     def __init__(
@@ -77,6 +95,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_reconstruction_weight: float = 0.0,
         sfh_reconstruction_w1_weight: float = 0.5,
         sfh_decoder_layers: int = 2,
+        sfh_projection_type: str = 'identity',
+        freeze_sfh_encoder: bool = False,
+        freeze_sfh_decoder: bool = False,
     ) -> None:
         super().__init__()
         if not 0.0 <= soft_positive_weight <= 1.0:
@@ -89,6 +110,13 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError('sfh_reconstruction_weight cannot be negative.')
         if not 0 <= sfh_reconstruction_w1_weight <= 1:
             raise ValueError('sfh_reconstruction_w1_weight must lie in [0, 1].')
+        if sfh_projection_type not in {'identity', 'linear'}:
+            raise ValueError('sfh_projection_type must be identity or linear.')
+        if freeze_sfh_decoder and sfh_reconstruction_weight <= 0:
+            raise ValueError(
+                'freeze_sfh_decoder requires a positive reconstruction weight '
+                'so that a decoder is constructed.'
+            )
         if soft_positive_weight > 0 and queue_size:
             raise ValueError(
                 'SFH soft positives currently require queue_size=0 because '
@@ -121,6 +149,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 f'Unknown sfh_encoder_type={sfh_encoder_type!r}; '
                 "choose 'mlp' or 'transformer'."
             )
+        self.sfh_projection = make_sfh_projection(
+            sfh_projection_type, embed_dim,
+        )
         if sfh_reconstruction_weight > 0:
             if sfh_encoder_type != 'transformer':
                 raise ValueError('SFH reconstruction requires the transformer encoder.')
@@ -134,15 +165,28 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         else:
             self.sfh_decoder = None
 
+        if freeze_sfh_encoder:
+            for parameter in self.sfh_encoder.parameters():
+                parameter.requires_grad_(False)
+            self.sfh_encoder.eval()
+        if freeze_sfh_decoder:
+            for parameter in self.sfh_decoder.parameters():
+                parameter.requires_grad_(False)
+            self.sfh_decoder.eval()
+
         # ── momentum encoders (EMA, no gradient) ─────────────────────────────
         self.image_encoder_m = copy.deepcopy(self.image_encoder)
         self.sfh_encoder_m   = copy.deepcopy(self.sfh_encoder)
+        self.sfh_projection_m = copy.deepcopy(self.sfh_projection)
         for p in self.image_encoder_m.parameters():
             p.requires_grad_(False)
         for p in self.sfh_encoder_m.parameters():
             p.requires_grad_(False)
+        for p in self.sfh_projection_m.parameters():
+            p.requires_grad_(False)
         self.image_encoder_m.eval()
         self.sfh_encoder_m.eval()
+        self.sfh_projection_m.eval()
 
         # ── learnable temperature ─────────────────────────────────────────────
         self.log_temp = nn.Parameter(torch.tensor(np.log(1.0 / temperature)))
@@ -163,6 +207,11 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         super().train(mode)
         self.image_encoder_m.eval()
         self.sfh_encoder_m.eval()
+        self.sfh_projection_m.eval()
+        if self.hparams.freeze_sfh_encoder:
+            self.sfh_encoder.eval()
+        if self.sfh_decoder is not None and self.hparams.freeze_sfh_decoder:
+            self.sfh_decoder.eval()
         return self
 
     # ── momentum update ───────────────────────────────────────────────────────
@@ -175,6 +224,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             pm.data.mul_(m).add_((1.0 - m) * p.data)
         for p, pm in zip(self.sfh_encoder.parameters(),
                          self.sfh_encoder_m.parameters()):
+            pm.data.mul_(m).add_((1.0 - m) * p.data)
+        for p, pm in zip(self.sfh_projection.parameters(),
+                         self.sfh_projection_m.parameters()):
             pm.data.mul_(m).add_((1.0 - m) * p.data)
 
     # ── queue management ──────────────────────────────────────────────────────
@@ -198,8 +250,14 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
         return self.image_encoder(image)
 
-    def encode_sfh(self, sfh: torch.Tensor) -> torch.Tensor:
+    def encode_sfh_latent(self, sfh: torch.Tensor) -> torch.Tensor:
         return self.sfh_encoder(sfh)
+
+    def project_sfh(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.sfh_projection(latent)
+
+    def encode_sfh(self, sfh: torch.Tensor) -> torch.Tensor:
+        return self.project_sfh(self.encode_sfh_latent(sfh))
 
     def forward(
         self, image: torch.Tensor, sfh: torch.Tensor
@@ -237,14 +295,16 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
         # ── query embeddings (main encoders, receive gradients) ───────────────
         img_q = F.normalize(self.encode_image(images), dim=-1)   # (B, D)
-        sfh_features = self.encode_sfh(sfhs)
-        sfh_q = F.normalize(sfh_features, dim=-1)                # (B, D)
+        sfh_latent = self.encode_sfh_latent(sfhs)
+        sfh_q = F.normalize(self.project_sfh(sfh_latent), dim=-1)  # (B, D)
 
         # ── key embeddings (momentum encoders, no gradient) ───────────────────
         with torch.no_grad():
             self._momentum_update()
             img_k = F.normalize(self.image_encoder_m(images), dim=-1)  # (B, D)
-            sfh_k = F.normalize(self.sfh_encoder_m(sfhs),    dim=-1)   # (B, D)
+            sfh_k = F.normalize(
+                self.sfh_projection_m(self.sfh_encoder_m(sfhs)), dim=-1,
+            )
 
         # ── all keys = current batch (momentum) + queue ───────────────────────
         # Shape: (B + Q, D)
@@ -275,7 +335,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             contrastive_loss = exact_loss
 
         if self.sfh_decoder is not None:
-            reconstruction = self.sfh_decoder(sfh_features)
+            reconstruction = self.sfh_decoder(sfh_latent)
             reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
                 reconstruction,
                 sfh_reference,
@@ -329,8 +389,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 
         img_e = F.normalize(self.encode_image(images), dim=-1)
-        sfh_features = self.encode_sfh(sfhs)
-        sfh_e = F.normalize(sfh_features, dim=-1)
+        sfh_latent = self.encode_sfh_latent(sfhs)
+        sfh_e = F.normalize(self.project_sfh(sfh_latent), dim=-1)
 
         logits  = T * (img_e @ sfh_e.T)
         labels  = torch.arange(logits.size(0), device=logits.device, dtype=torch.long)
@@ -352,7 +412,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             val_contrastive_loss = val_exact_loss
 
         if self.sfh_decoder is not None:
-            reconstruction = self.sfh_decoder(sfh_features)
+            reconstruction = self.sfh_decoder(sfh_latent)
             reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
                 reconstruction,
                 sfh_reference,
@@ -415,6 +475,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             and not n.startswith('image_encoder.backbone.')
             and not n.startswith('sfh_encoder.')
             and not n.startswith('sfh_decoder.')
+            and not n.startswith('sfh_projection_m.')
             and not n.startswith('image_encoder_m.')
             and not n.startswith('sfh_encoder_m.')
         ]

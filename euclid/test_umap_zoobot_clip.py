@@ -5,7 +5,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .umap_zoobot_clip import (
+from euclid.umap_zoobot_clip import (
     _normalize_rows,
     _sfh_properties,
     load_embeddings,
@@ -28,12 +28,13 @@ class EuclidUmapDiagnosticsTests(unittest.TestCase):
                 image_embedding=np.array([[2.0, 0.0], [0.0, 3.0]]),
                 sfh_embedding=np.array([[4.0, 0.0], [0.0, 5.0]]),
             )
-            ids, rows, redshift, image, sfh = load_embeddings(path)
+            ids, rows, redshift, image, sfh, preprojection = load_embeddings(path)
             np.testing.assert_array_equal(ids, [10, 20])
             np.testing.assert_array_equal(rows, [0, 1])
             np.testing.assert_allclose(np.linalg.norm(image, axis=1), 1.0)
             np.testing.assert_allclose(np.linalg.norm(sfh, axis=1), 1.0)
             np.testing.assert_allclose(redshift, [0.5, 1.0])
+            self.assertIsNone(preprojection)
 
     def test_sfh_properties_respect_recent_to_old_time_direction(self):
         with tempfile.TemporaryDirectory() as directory:

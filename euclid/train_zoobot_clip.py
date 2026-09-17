@@ -84,6 +84,18 @@ def parse_args():
     model.add_argument('--sfh-reconstruction-w1-weight', type=float, default=0.5)
     model.add_argument('--sfh-decoder-layers', type=int, default=2)
     model.add_argument(
+        '--sfh-projection', choices=('identity', 'linear'), default='identity',
+        help='Map from the SFH encoder latent into CLIP space (default: identity).',
+    )
+    model.add_argument(
+        '--freeze-sfh-encoder', action='store_true',
+        help='Keep the SFH encoder fixed while training the CLIP projection.',
+    )
+    model.add_argument(
+        '--freeze-sfh-decoder', action='store_true',
+        help='Keep the pretrained reconstruction decoder fixed.',
+    )
+    model.add_argument(
         '--soft-positive-weight', type=float, default=0.0,
         help='Weight assigned to W1-neighbour SFHs; zero preserves exact InfoNCE.',
     )
@@ -153,6 +165,17 @@ def validate_args(args):
         raise ValueError('--sfh-decoder-layers must be positive.')
     if args.sfh_reconstruction_weight and args.sfh_encoder != 'transformer':
         raise ValueError('SFH reconstruction requires --sfh-encoder transformer.')
+    if ((args.freeze_sfh_encoder or args.freeze_sfh_decoder)
+            and args.sfh_pretrained_checkpoint is None
+            and args.resume_from is None):
+        raise ValueError(
+            'Freezing the SFH autoencoder requires --sfh-pretrained-checkpoint '
+            'for a new run, or --resume-from.'
+        )
+    if args.freeze_sfh_decoder and args.sfh_reconstruction_weight <= 0:
+        raise ValueError(
+            '--freeze-sfh-decoder requires --sfh-reconstruction-weight > 0.'
+        )
     if args.unfreeze_blocks < 0:
         raise ValueError('--unfreeze-blocks cannot be negative.')
     if args.backbone_lr_scale <= 0:
@@ -214,6 +237,9 @@ def main():
         sfh_reconstruction_weight=args.sfh_reconstruction_weight,
         sfh_reconstruction_w1_weight=args.sfh_reconstruction_w1_weight,
         sfh_decoder_layers=args.sfh_decoder_layers,
+        sfh_projection_type=args.sfh_projection,
+        freeze_sfh_encoder=args.freeze_sfh_encoder,
+        freeze_sfh_decoder=args.freeze_sfh_decoder,
     )
     if args.sfh_pretrained_checkpoint is not None and args.resume_from is None:
         load_sfh_autoencoder_checkpoint(
@@ -222,6 +248,7 @@ def main():
             decoder=model.sfh_decoder,
         )
         model.sfh_encoder_m.load_state_dict(model.sfh_encoder.state_dict())
+        model.sfh_projection_m.load_state_dict(model.sfh_projection.state_dict())
         print(
             f'Initialized SFH encoder'
             f'{" and decoder" if model.sfh_decoder is not None else ""} from '
@@ -264,6 +291,8 @@ def main():
         f'realizations; posterior sampling={args.sample_posterior}; '
         f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
         f'SFH encoder={args.sfh_encoder}; '
+        f'SFH encoder frozen={args.freeze_sfh_encoder}; '
+        f'SFH projection={args.sfh_projection}; '
         f'SFH reconstruction weight={args.sfh_reconstruction_weight:g}; '
         f'SFH soft-positive weight={args.soft_positive_weight:g}, '
         f'k={args.soft_positive_k}',

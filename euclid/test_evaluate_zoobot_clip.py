@@ -1,7 +1,8 @@
 import numpy as np
 
-from .evaluate_zoobot_clip import (
+from euclid.evaluate_zoobot_clip import (
     embedding_diagnostics,
+    projection_geometry_diagnostics,
     retrieval_ranks,
     sfh_shape_neighborhood_test,
     summarize_sfh_reconstruction,
@@ -34,6 +35,19 @@ def test_embedding_diagnostics_distinguish_rank():
     healthy = embedding_diagnostics(diverse, rng, n_random_pairs=100)
     assert collapsed['effective_rank'] == 0.0
     assert healthy['effective_rank'] > 2.5
+
+
+def test_projection_geometry_detects_preserved_neighborhoods():
+    rng = np.random.default_rng(11)
+    before = rng.normal(size=(100, 12)).astype(np.float32)
+    before /= np.linalg.norm(before, axis=1, keepdims=True)
+    result = projection_geometry_diagnostics(
+        before, before.copy(), rng, subset_size=100, k=5,
+        n_random_pairs=500,
+    )
+    assert result['pre_post_neighbor_overlap_at_k'] == 1.0
+    assert result['random_pair_cosine_correlation'] > 0.999
+    assert result['random_pair_cosine_mean_absolute_change'] == 0.0
 
 
 def test_shape_neighborhood_prefers_matching_shapes():

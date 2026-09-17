@@ -108,6 +108,7 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
 def extract_embeddings(model, loader, device):
     image_embeddings = []
     sfh_embeddings = []
+    sfh_preprojection_embeddings = []
     reconstructions = []
     seen_ids = []
     use_amp = device.type == 'cuda'
@@ -119,14 +120,18 @@ def extract_embeddings(model, loader, device):
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=use_amp):
                 image_embedding = F.normalize(model.encode_image(images), dim=-1)
-                sfh_features = model.encode_sfh(sfhs)
-                sfh_embedding = F.normalize(sfh_features, dim=-1)
+                sfh_latent = model.encode_sfh_latent(sfhs)
+                sfh_embedding = F.normalize(model.project_sfh(sfh_latent), dim=-1)
+                sfh_preprojection = F.normalize(sfh_latent, dim=-1)
                 if model.sfh_decoder is not None:
                     reconstructions.append(
-                        model.sfh_decoder(sfh_features).float().cpu().numpy()
+                        model.sfh_decoder(sfh_latent).float().cpu().numpy()
                     )
             image_embeddings.append(image_embedding.float().cpu().numpy())
             sfh_embeddings.append(sfh_embedding.float().cpu().numpy())
+            sfh_preprojection_embeddings.append(
+                sfh_preprojection.float().cpu().numpy()
+            )
             seen_ids.append(batch['galaxy_id'].numpy())
             if batch_index % 20 == 0:
                 log.info('Encoded %d validation batches', batch_index + 1)
@@ -136,6 +141,7 @@ def extract_embeddings(model, loader, device):
     return (
         np.concatenate(image_embeddings),
         np.concatenate(sfh_embeddings),
+        np.concatenate(sfh_preprojection_embeddings),
         np.concatenate(seen_ids),
         reconstruction,
     )
@@ -276,6 +282,49 @@ def embedding_diagnostics(embedding, rng, n_random_pairs=20000):
         'participation_ratio': float(participation_ratio),
         'random_pair_cosine_mean': float(random_cosines.mean()),
         'random_pair_cosine_std': float(random_cosines.std()),
+    }
+
+
+def projection_geometry_diagnostics(preprojection, projected, rng,
+                                    subset_size=2000, k=10,
+                                    n_random_pairs=20000):
+    """Measure geometry changed by the trainable SFH projection head."""
+    if preprojection.shape != projected.shape or preprojection.ndim != 2:
+        raise ValueError('Pre- and post-projection embeddings must have equal 2D shapes.')
+    size = min(len(preprojection), subset_size)
+    if size < 2:
+        raise ValueError('Projection diagnostics require at least two objects.')
+    selected = np.sort(rng.choice(len(preprojection), size=size, replace=False))
+    before = preprojection[selected]
+    after = projected[selected]
+    before_similarity = before @ before.T
+    after_similarity = after @ after.T
+    np.fill_diagonal(before_similarity, -np.inf)
+    np.fill_diagonal(after_similarity, -np.inf)
+    k = min(k, size - 1)
+    before_top = np.argpartition(before_similarity, -k, axis=1)[:, -k:]
+    after_top = np.argpartition(after_similarity, -k, axis=1)[:, -k:]
+    overlap = np.mean([
+        np.intersect1d(before_top[row], after_top[row]).size / k
+        for row in range(size)
+    ])
+
+    left = rng.integers(0, len(preprojection), size=n_random_pairs)
+    right = rng.integers(0, len(preprojection), size=n_random_pairs)
+    same = left == right
+    right[same] = (right[same] + 1) % len(preprojection)
+    cosine_before = np.sum(preprojection[left] * preprojection[right], axis=1)
+    cosine_after = np.sum(projected[left] * projected[right], axis=1)
+    correlation = np.corrcoef(cosine_before, cosine_after)[0, 1]
+    return {
+        'n_objects_for_neighbors': int(size),
+        'k': int(k),
+        'pre_post_neighbor_overlap_at_k': float(overlap),
+        'chance_neighbor_overlap_at_k': float(k / (size - 1)),
+        'random_pair_cosine_correlation': float(correlation),
+        'random_pair_cosine_mean_absolute_change': float(
+            np.mean(np.abs(cosine_after - cosine_before))
+        ),
     }
 
 
@@ -532,9 +581,8 @@ def main():
         args.dataset, args.stamp_root, val_rows, val_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
     )
-    image_embedding, sfh_embedding, encoded_ids, reconstruction = extract_embeddings(
-        model, loader, device,
-    )
+    (image_embedding, sfh_embedding, sfh_preprojection_embedding,
+     encoded_ids, reconstruction) = extract_embeddings(model, loader, device)
     if not np.array_equal(encoded_ids, val_ids):
         raise ValueError('Embedding extraction changed validation ID order.')
 
@@ -569,7 +617,13 @@ def main():
         'embedding_diagnostics': {
             'image': embedding_diagnostics(image_embedding, rng),
             'sfh': embedding_diagnostics(sfh_embedding, rng),
+            'sfh_preprojection': embedding_diagnostics(
+                sfh_preprojection_embedding, rng,
+            ),
         },
+        'sfh_projection_geometry': projection_geometry_diagnostics(
+            sfh_preprojection_embedding, sfh_embedding, rng,
+        ),
         'sfh_shape_neighborhood': sfh_shape_neighborhood_test(
             image_embedding, sfh_embedding, raw_sfh, rng,
             subset_size=args.shape_subset,
@@ -604,6 +658,7 @@ def main():
             redshift=redshifts,
             image_embedding=image_embedding,
             sfh_embedding=sfh_embedding,
+            sfh_preprojection_embedding=sfh_preprojection_embedding,
         )
 
     print(json.dumps({
