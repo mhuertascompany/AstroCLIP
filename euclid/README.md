@@ -859,6 +859,32 @@ smooth, featured, edge-on, spiral, bar, and disturbed/merger probabilities.
 The ZooBot values in MER are Dirichlet concentrations, so the diagnostic code
 normalizes answers within each morphology question before plotting them.
 
+If the original random 100k sample contains too few bright objects, count the
+entire EDFN clean catalog after matching it to the `EDFN_2fwhm_aper.h5` SFHs:
+
+```bash
+sbatch euclid/slurm_census_edfn_bright_sfhs.sh
+```
+
+This reports both the clean-catalog count and the SFH-matched count at VIS limits
+20.5, 21, 21.5, 22, 22.5, 23, and 23.5 without writing a sample. Choose the
+brightest limit that provides enough training objects, then sample from that
+restricted population. For example, after confirming that 50,000 objects are
+available at VIS<22.5:
+
+```bash
+sbatch euclid/slurm_sample_edfn_bright_sfhs.sh 22.5 50000
+```
+
+The output would be
+`/n03data/huertas/euclid/sfh_clip/edfn_vislt22p5_50000`. The sampler applies the
+VIS cut before random selection, requires `VIS_DET=1`, uses only the matching
+2-FWHM SFH catalog, and records the selection in the FITS metadata. Use a third
+argument to choose another new output directory. This new sample needs its own
+SFH preprocessing, Datalabs cutout extraction, ZooBot JPEG conversion, and
+train/validation split; do not mix its products with the original random 100k
+directory.
+
 ### Interactive Euclid embedding explorer
 
 `euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the

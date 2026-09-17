@@ -11,6 +11,7 @@ references, and object_ids.csv provides a lightweight matching manifest.
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import h5py
 import numpy as np
 
 from .sample_sfh_catalog import sample_catalog
+from .vis_selection import flux_ujy_to_ab_magnitude
 
 
 def append_scalar_catalog_metadata(path, table, selected_positions, destination_rows,
@@ -64,16 +66,56 @@ def check_output_directory(output):
         )
 
 
-def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
-                     id_column='object_id', batch_size=128):
+def _column_name(table, requested):
+    names = {name.lower(): name for name in table.colnames}
+    name = names.get(requested.lower())
+    if name is None:
+        raise ValueError(
+            f'No {requested!r} column. Available: {table.colnames}'
+        )
+    return name
+
+
+def catalog_vis_magnitude(table, flux_column='flux_detection_total',
+                          detection_column='vis_det',
+                          require_vis_detection=True):
+    """Return row-aligned total VIS AB magnitudes from a clean MER catalog."""
+    flux_name = _column_name(table, flux_column)
+    flux = np.asarray(
+        np.ma.asarray(table[flux_name], dtype=np.float64).filled(np.nan),
+        dtype=np.float64,
+    )
+    if flux.ndim != 1:
+        raise ValueError(f'{flux_name} must be a scalar column.')
+    magnitude = flux_ujy_to_ab_magnitude(flux)
+    if require_vis_detection:
+        detection_name = _column_name(table, detection_column)
+        detection = np.asarray(
+            np.ma.asarray(table[detection_name], dtype=np.float64).filled(np.nan),
+            dtype=np.float64,
+        )
+        if detection.shape != flux.shape:
+            raise ValueError(f'{detection_name} is not aligned with {flux_name}.')
+        magnitude[~(np.isfinite(detection) & (detection == 1))] = np.nan
+    return magnitude
+
+
+def match_and_sample(table, sfh_files, output=None, n=10_000, seed=42,
+                     id_column='object_id', batch_size=128, max_vis_mag=None,
+                     flux_column='flux_detection_total',
+                     detection_column='vis_det', require_vis_detection=True,
+                     report_vis_limits=(), dry_run=False):
     """Uniformly sample unique field-catalog galaxies that have available SFHs."""
     from astropy.table import Table
 
     # open_table helpers may return an Astropy table, a FITS record array,
     # or a pandas DataFrame.
     table = Table.from_pandas(table) if hasattr(table, 'to_records') else Table(table)
-    output = Path(output)
-    check_output_directory(output)
+    output = Path(output) if output is not None else None
+    if not dry_run:
+        if output is None:
+            raise ValueError('An output directory is required unless --dry-run is used.')
+        check_output_directory(output)
     if id_column not in table.colnames:
         raise ValueError(f'No {id_column!r} column. Available: {table.colnames}')
     if n <= 0 or batch_size <= 0:
@@ -90,7 +132,28 @@ def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
     catalog_ids = id_keys(ids)
     if len(set(catalog_ids)) != len(catalog_ids):
         raise ValueError('Photometric catalog has duplicate object IDs.')
-    wanted = set(catalog_ids)
+    vis_magnitude = None
+    selection = np.ones(len(table), dtype=bool)
+    if max_vis_mag is not None or report_vis_limits:
+        vis_magnitude = catalog_vis_magnitude(
+            table, flux_column, detection_column, require_vis_detection,
+        )
+    if max_vis_mag is not None:
+        if not np.isfinite(max_vis_mag):
+            raise ValueError('max_vis_mag must be finite.')
+        selection = np.isfinite(vis_magnitude) & (vis_magnitude <= max_vis_mag)
+        print(
+            f'VIS<={max_vis_mag:g}: {np.count_nonzero(selection):,}/'
+            f'{len(table):,} field-catalog objects',
+            flush=True,
+        )
+    scan_selection = selection
+    if max_vis_mag is not None and report_vis_limits:
+        scan_limit = max(float(max_vis_mag), max(map(float, report_vis_limits)))
+        scan_selection = np.isfinite(vis_magnitude) & (vis_magnitude <= scan_limit)
+    wanted = {
+        gid for gid, selected in zip(catalog_ids, scan_selection) if selected
+    }
     matches = {}
     sfh_files = sorted({Path(p).resolve() for p in sfh_files})
     if not sfh_files:
@@ -115,9 +178,31 @@ def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
                 found += 1
             print(f'{path.name}: {found:,} matching field-catalog IDs')
 
-    eligible = np.array([i for i, gid in enumerate(catalog_ids) if gid in matches])
-    print(f'Field catalog: {len(table):,}; with SFHs: {len(eligible):,}; '
-          f'without SFHs: {len(table) - len(eligible):,}')
+    matched_mask = np.array([gid in matches for gid in catalog_ids], dtype=bool)
+    eligible = np.flatnonzero(selection & matched_mask)
+    print(f'Field catalog: {len(table):,}; selected with SFHs: {len(eligible):,}; '
+          f'selected without SFHs: {np.count_nonzero(selection & ~matched_mask):,}')
+    report = {
+        'n_field_catalog': int(len(table)),
+        'n_sfh_matched_after_selection': int(len(eligible)),
+        'max_vis_mag': float(max_vis_mag) if max_vis_mag is not None else None,
+        'require_vis_detection': bool(require_vis_detection),
+    }
+    if report_vis_limits:
+        report['counts_at_or_brighter_than'] = {
+            f'{float(limit):g}': {
+                'catalog': int(np.count_nonzero(
+                    np.isfinite(vis_magnitude) & (vis_magnitude <= limit)
+                )),
+                'with_sfh': int(np.count_nonzero(
+                    matched_mask & np.isfinite(vis_magnitude) & (vis_magnitude <= limit)
+                )),
+            }
+            for limit in report_vis_limits
+        }
+        print(json.dumps(report, indent=2), flush=True)
+    if dry_run:
+        return report
     if len(eligible) < n:
         raise ValueError(f'Only {len(eligible):,} matched galaxies; requested {n:,}.')
     chosen = np.sort(np.random.default_rng(seed).choice(eligible, n, replace=False))
@@ -136,6 +221,10 @@ def match_and_sample(table, sfh_files, output, n=10_000, seed=42,
     selected.meta['SAMPSEED'] = seed
     selected.meta['NFIELD'] = len(table)
     selected.meta['NMATCH'] = len(eligible)
+    if max_vis_mag is not None:
+        selected.meta['MAXVIS'] = float(max_vis_mag)
+        selected.meta['VISFLUX'] = flux_column
+        selected.meta['VISDET'] = detection_column
 
     check_output_directory(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -172,11 +261,20 @@ def main():
                         default=Path('/n17data/wozny/These/science_DR1/SFHs/ready_to_use_sfhs'))
     parser.add_argument('--sfh-files', type=Path, nargs='+',
                         help='Explicit files, overriding the directory scan.')
-    parser.add_argument('--output', type=Path, required=True, help='New or empty output directory.')
+    parser.add_argument('--output', type=Path, help='New or empty output directory.')
     parser.add_argument('--n', type=int, default=10_000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--id-column', default='object_id')
     parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--max-vis-mag', type=float,
+                        help='Select VIS-detected objects at or above this brightness.')
+    parser.add_argument('--flux-column', default='flux_detection_total')
+    parser.add_argument('--detection-column', default='vis_det')
+    parser.add_argument('--require-vis-detection', action=argparse.BooleanOptionalAction,
+                        default=True)
+    parser.add_argument('--report-vis-limits', type=float, nargs='+', default=())
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Report matched counts without creating a sample.')
     args = parser.parse_args()
 
     sys.path.insert(0, str(args.utils_dir))
@@ -192,7 +290,10 @@ def main():
         files = [p for p in args.sfh_dir.rglob('*')
                  if p.is_file() and p.suffix.lower() in {'.h5', '.hdf5', '.hdf'}]
     match_and_sample(table, files, args.output, args.n, args.seed,
-                     args.id_column, args.batch_size)
+                     args.id_column, args.batch_size, args.max_vis_mag,
+                     args.flux_column, args.detection_column,
+                     args.require_vis_detection, args.report_vis_limits,
+                     args.dry_run)
 
 
 if __name__ == '__main__':
