@@ -32,6 +32,24 @@ class SFHProjectionTests(unittest.TestCase):
         torch.testing.assert_close(projection(latent), latent)
         self.assertEqual(sum(p.numel() for p in projection.parameters()), 0)
 
+    def test_residual_mlp_starts_as_identity_and_can_depart_from_it(self):
+        import torch
+
+        from cosmosweb.model_zoobot import make_sfh_projection
+
+        projection = make_sfh_projection(
+            'residual_mlp', 8, hidden_dim=16, residual_scale=0.1,
+        )
+        latent = torch.randn(4, 8)
+        torch.testing.assert_close(projection(latent), latent)
+
+        optimizer = torch.optim.SGD(projection.parameters(), lr=0.1)
+        projection(latent).square().sum().backward()
+        self.assertIsNotNone(projection.fc2.weight.grad)
+        self.assertGreater(projection.fc2.weight.grad.abs().sum().item(), 0)
+        optimizer.step()
+        self.assertFalse(torch.equal(projection(latent), latent))
+
     def test_frozen_autoencoder_is_separate_from_trainable_projection(self):
         import torch
         import torch.nn as nn
@@ -56,8 +74,10 @@ class SFHProjectionTests(unittest.TestCase):
                 sfh_encoder_type='transformer', sfh_d_model=16,
                 sfh_n_heads=4, sfh_n_layers=1, sfh_decoder_layers=1,
                 sfh_reconstruction_weight=0.1,
-                sfh_projection_type='linear', freeze_sfh_encoder=True,
-                freeze_sfh_decoder=True, queue_size=0,
+                sfh_projection_type='residual_mlp',
+                sfh_projection_hidden_dim=16,
+                freeze_sfh_encoder=True, freeze_sfh_decoder=True,
+                queue_size=0,
             )
 
         self.assertTrue(all(

@@ -749,6 +749,32 @@ explorer expose `SFH encoder` and `SFH autoencoder latent` as separate spaces.
 This distinguishes successful image alignment from destruction of the original
 SFH geometry.
 
+#### Frozen SFH autoencoder with a residual MLP projection
+
+If the linear projection underfits, the residual-MLP experiment adds nonlinear
+alignment capacity without changing the pretrained autoencoder. Its projection
+is `LayerNorm -> 256 -> 512 -> GELU -> 256`, followed by a residual connection
+with fixed scale 0.1. The last layer starts at zero, so the projected embedding
+is exactly equal to the autoencoder latent before the first optimizer step.
+
+Run the integration test and then the complete sample in separate output
+directories:
+
+```bash
+AE_CKPT='/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt'
+
+sbatch euclid/slurm_train_zoobot_clip_sfh_frozen_mlp_projection_test.sh \
+  "${AE_CKPT}"
+
+sbatch euclid/slurm_train_zoobot_clip_100k_sfh_frozen_mlp_projection.sh \
+  "${AE_CKPT}"
+```
+
+The full output is `training_sfh_frozen_residual_mlp_projection`. Evaluate it
+on the baseline common split. The same pre/post-projection geometry diagnostics
+and explorer fields used by the linear run allow the autoencoder, fine-tuned,
+linear-projection, and residual-MLP representations to be compared directly.
+
 ### Interactive Euclid embedding explorer
 
 `euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the

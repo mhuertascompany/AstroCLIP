@@ -49,7 +49,37 @@ from .sfh_similarity import soft_cross_entropy, wasserstein_soft_targets
 from .zoobot_encoder import MultiFilterZooBotImageEncoder, ZooBotImageEncoder
 
 
-def make_sfh_projection(kind: str, embed_dim: int) -> nn.Module:
+class ResidualSFHProjection(nn.Module):
+    """Near-identity nonlinear map from a fixed SFH latent to CLIP space."""
+
+    def __init__(self, embed_dim: int, hidden_dim: int | None = None,
+                 residual_scale: float = 0.1) -> None:
+        super().__init__()
+        hidden_dim = hidden_dim or 2 * embed_dim
+        if embed_dim < 1 or hidden_dim < 1:
+            raise ValueError('Projection dimensions must be positive.')
+        if residual_scale <= 0:
+            raise ValueError('residual_scale must be positive.')
+        self.norm = nn.LayerNorm(embed_dim)
+        self.fc1 = nn.Linear(embed_dim, hidden_dim)
+        self.activation = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, embed_dim)
+        self.residual_scale = float(residual_scale)
+
+        # The branch starts at zero, making the complete projection exactly
+        # the identity before CLIP training. Gradients reach fc2 immediately;
+        # after its first update they also reach the earlier branch layers.
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        residual = self.fc2(self.activation(self.fc1(self.norm(latent))))
+        return latent + self.residual_scale * residual
+
+
+def make_sfh_projection(kind: str, embed_dim: int,
+                        hidden_dim: int | None = None,
+                        residual_scale: float = 0.1) -> nn.Module:
     """Build the optional map from the SFH latent into the CLIP space.
 
     The linear option starts as the identity, so an autoencoder latent is
@@ -62,8 +92,14 @@ def make_sfh_projection(kind: str, embed_dim: int) -> nn.Module:
         projection = nn.Linear(embed_dim, embed_dim, bias=False)
         nn.init.eye_(projection.weight)
         return projection
+    if kind == 'residual_mlp':
+        return ResidualSFHProjection(
+            embed_dim, hidden_dim=hidden_dim,
+            residual_scale=residual_scale,
+        )
     raise ValueError(
-        f'Unknown sfh_projection_type={kind!r}; choose identity or linear.'
+        f'Unknown sfh_projection_type={kind!r}; choose identity, linear, '
+        'or residual_mlp.'
     )
 
 
@@ -96,6 +132,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_reconstruction_w1_weight: float = 0.5,
         sfh_decoder_layers: int = 2,
         sfh_projection_type: str = 'identity',
+        sfh_projection_hidden_dim: int | None = None,
+        sfh_projection_residual_scale: float = 0.1,
         freeze_sfh_encoder: bool = False,
         freeze_sfh_decoder: bool = False,
     ) -> None:
@@ -110,8 +148,17 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError('sfh_reconstruction_weight cannot be negative.')
         if not 0 <= sfh_reconstruction_w1_weight <= 1:
             raise ValueError('sfh_reconstruction_w1_weight must lie in [0, 1].')
-        if sfh_projection_type not in {'identity', 'linear'}:
-            raise ValueError('sfh_projection_type must be identity or linear.')
+        if sfh_projection_type not in {'identity', 'linear', 'residual_mlp'}:
+            raise ValueError(
+                'sfh_projection_type must be identity, linear, or residual_mlp.'
+            )
+        if (
+            sfh_projection_hidden_dim is not None
+            and sfh_projection_hidden_dim < 1
+        ):
+            raise ValueError('sfh_projection_hidden_dim must be positive.')
+        if sfh_projection_residual_scale <= 0:
+            raise ValueError('sfh_projection_residual_scale must be positive.')
         if freeze_sfh_decoder and sfh_reconstruction_weight <= 0:
             raise ValueError(
                 'freeze_sfh_decoder requires a positive reconstruction weight '
@@ -151,6 +198,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             )
         self.sfh_projection = make_sfh_projection(
             sfh_projection_type, embed_dim,
+            hidden_dim=sfh_projection_hidden_dim,
+            residual_scale=sfh_projection_residual_scale,
         )
         if sfh_reconstruction_weight > 0:
             if sfh_encoder_type != 'transformer':
