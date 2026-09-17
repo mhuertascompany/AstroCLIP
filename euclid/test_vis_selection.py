@@ -4,6 +4,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from astropy.table import Table
 
 from euclid.vis_selection import (
     bright_row_mask,
@@ -36,6 +37,38 @@ class VisSelectionTests(unittest.TestCase):
             report, _ = summarize_sample(path, [21.0, 22.0])
             self.assertEqual(report['counts_at_or_brighter_than']['21'], 1)
             self.assertEqual(report['counts_at_or_brighter_than']['22'], 2)
+
+    def test_external_catalog_is_exactly_joined_by_object_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'sample.h5'
+            catalog = root / 'catalog.fits'
+            with h5py.File(path, 'w') as target:
+                target['galaxy_id'] = [20, 10, 30]
+            magnitudes = np.array([22.5, 20.0, 21.0])
+            Table({
+                'object_id': [30, 20, 10],
+                'flux_detection_total': 10 ** ((23.9 - magnitudes) / 2.5),
+                'vis_det': [1, 1, 1],
+            }).write(catalog)
+            mask, measured = bright_row_mask(path, 21.5, catalog=catalog)
+            np.testing.assert_array_equal(mask, [True, True, False])
+            np.testing.assert_allclose(measured, [20.0, 21.0, 22.5])
+
+    def test_external_catalog_requires_all_hdf5_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'sample.h5'
+            catalog = root / 'catalog.fits'
+            with h5py.File(path, 'w') as target:
+                target['galaxy_id'] = [10, 20]
+            Table({
+                'object_id': [10],
+                'flux_detection_total': [10.0],
+                'vis_det': [1],
+            }).write(catalog)
+            with self.assertRaisesRegex(ValueError, 'matches 1/2'):
+                bright_row_mask(path, 22.0, catalog=catalog)
 
 
 if __name__ == '__main__':

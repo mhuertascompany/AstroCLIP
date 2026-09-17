@@ -26,6 +26,7 @@ OUTPUT=${BASE}/bright_samples/vis_lt_${TAG}.fits
 cd /n03data/huertas/python/AstroCLIP
 python -u -m euclid.vis_selection \
     --dataset "${BASE}/sfh_clip_100k.h5" \
+    --catalog "${BASE}/sfh_edfn100k/catalog_sfh_100k.fits" \
     --stamp-root "${BASE}/zoobot_stamps_rmax" \
     --limits 20.5 21.0 21.5 22.0 22.5 \
     --max-vis-mag "${MAX_VIS_MAG}" \

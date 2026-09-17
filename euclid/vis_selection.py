@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import h5py
 import numpy as np
+from astropy.table import Table
+from astropy.units import UnitsWarning
 
 
 VIS_AB_ZEROPOINT_UJY = 23.9
@@ -32,6 +35,16 @@ def _dataset_name(source, requested):
     return name
 
 
+def _column_name(table, requested):
+    names = {name.lower(): name for name in table.colnames}
+    name = names.get(requested.lower())
+    if name is None:
+        raise ValueError(
+            f'Cannot find catalog column {requested!r}; available: {table.colnames}'
+        )
+    return name
+
+
 def read_vis_magnitude(source, flux_column='flux_detection_total',
                        detection_column='vis_det', require_vis_detection=True):
     """Read a scalar microJy flux column and return row-aligned VIS AB magnitudes."""
@@ -52,26 +65,93 @@ def read_vis_magnitude(source, flux_column='flux_detection_total',
     return magnitude, flux, detected, flux_name, detection_name
 
 
+def read_catalog_vis_magnitude(catalog, target_ids,
+                               flux_column='flux_detection_total',
+                               detection_column='vis_det',
+                               require_vis_detection=True,
+                               id_column='object_id'):
+    """Read and exactly align VIS photometry from a FITS catalog to HDF5 IDs."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UnitsWarning)
+        table = Table.read(catalog)
+    id_name = _column_name(table, id_column)
+    source_ids = np.asarray(table[id_name])
+    if source_ids.dtype.kind not in 'iu' or np.any(np.ma.getmaskarray(table[id_name])):
+        raise ValueError(f'{id_name} must contain unmasked integer object IDs.')
+    source_ids = np.asarray(source_ids, dtype=np.int64)
+    if len(np.unique(source_ids)) != len(source_ids):
+        raise ValueError(f'{id_name} contains duplicate object IDs.')
+    target_ids = np.asarray(target_ids, dtype=np.int64)
+    order = np.argsort(source_ids)
+    sorted_ids = source_ids[order]
+    locations = np.searchsorted(sorted_ids, target_ids)
+    matched = locations < len(sorted_ids)
+    matched[matched] &= sorted_ids[locations[matched]] == target_ids[matched]
+    if not np.all(matched):
+        missing = target_ids[~matched]
+        preview = ', '.join(map(str, missing[:5]))
+        raise ValueError(
+            f'Photometry catalog matches {np.count_nonzero(matched):,}/'
+            f'{len(target_ids):,} HDF5 objects; first missing IDs: {preview}'
+        )
+
+    flux_name = _column_name(table, flux_column)
+    flux = np.asarray(
+        np.ma.asarray(table[flux_name], dtype=np.float64).filled(np.nan),
+        dtype=np.float64,
+    )[order[locations]]
+    if flux.ndim != 1:
+        raise ValueError(f'{flux_name} must be a scalar row-aligned column.')
+    magnitude = flux_ujy_to_ab_magnitude(flux)
+    detected = np.ones(len(target_ids), dtype=bool)
+    detection_name = None
+    if require_vis_detection:
+        detection_name = _column_name(table, detection_column)
+        detection = np.asarray(
+            np.ma.asarray(table[detection_name], dtype=np.float64).filled(np.nan),
+            dtype=np.float64,
+        )[order[locations]]
+        detected = np.isfinite(detection) & (detection == 1)
+        magnitude[~detected] = np.nan
+    return magnitude, flux, detected, flux_name, detection_name
+
+
 def bright_row_mask(path, max_vis_mag, flux_column='flux_detection_total',
-                    detection_column='vis_det', require_vis_detection=True):
+                    detection_column='vis_det', require_vis_detection=True,
+                    catalog=None, id_column='object_id'):
     if not np.isfinite(max_vis_mag):
         raise ValueError('max_vis_mag must be finite.')
     with h5py.File(path, 'r') as source:
-        magnitude, _, _, _, _ = read_vis_magnitude(
-            source, flux_column, detection_column, require_vis_detection,
-        )
+        if catalog is None:
+            magnitude, _, _, _, _ = read_vis_magnitude(
+                source, flux_column, detection_column, require_vis_detection,
+            )
+        else:
+            magnitude, _, _, _, _ = read_catalog_vis_magnitude(
+                catalog, source['galaxy_id'][:], flux_column, detection_column,
+                require_vis_detection, id_column,
+            )
     return np.isfinite(magnitude) & (magnitude <= max_vis_mag), magnitude
 
 
 def summarize_sample(dataset, limits, stamp_root=None, band='VIS',
                      flux_column='flux_detection_total',
-                     detection_column='vis_det', require_vis_detection=True):
+                     detection_column='vis_det', require_vis_detection=True,
+                     catalog=None, id_column='object_id'):
     dataset = Path(dataset)
     with h5py.File(dataset, 'r') as source:
         ids = np.asarray(source['galaxy_id'][:], dtype=np.int64)
-        magnitude, flux, detected, flux_name, detection_name = read_vis_magnitude(
-            source, flux_column, detection_column, require_vis_detection,
-        )
+        if catalog is None:
+            magnitude, flux, detected, flux_name, detection_name = read_vis_magnitude(
+                source, flux_column, detection_column, require_vis_detection,
+            )
+        else:
+            magnitude, flux, detected, flux_name, detection_name = (
+                read_catalog_vis_magnitude(
+                    catalog, ids, flux_column, detection_column,
+                    require_vis_detection, id_column,
+                )
+            )
         redshift = (
             np.asarray(source['redshift'][:], dtype=np.float32)
             if 'redshift' in source else np.full(len(ids), np.nan, dtype=np.float32)
@@ -92,6 +172,7 @@ def summarize_sample(dataset, limits, stamp_root=None, band='VIS',
     }
     report = {
         'dataset': str(dataset),
+        'photometry_catalog': str(catalog) if catalog is not None else None,
         'n_objects': int(len(ids)),
         'n_with_stamps': int(np.count_nonzero(stamps)),
         'n_vis_detected_with_positive_flux_and_stamp': int(np.count_nonzero(usable)),
@@ -136,6 +217,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--stamp-root', type=Path)
+    parser.add_argument('--catalog', type=Path,
+                        help='FITS catalog containing photometry, joined by object ID.')
+    parser.add_argument('--id-column', default='object_id')
     parser.add_argument('--band', default='VIS')
     parser.add_argument('--limits', type=float, nargs='+',
                         default=(20.5, 21.0, 21.5, 22.0))
@@ -153,6 +237,7 @@ def main():
     report, arrays = summarize_sample(
         args.dataset, args.limits, args.stamp_root, args.band,
         args.flux_column, args.detection_column, args.require_vis_detection,
+        args.catalog, args.id_column,
     )
     if args.output is not None:
         report['selection_output'] = str(args.output)

@@ -46,9 +46,14 @@ def parse_args():
     )
     data.add_argument(
         '--vis-flux-column', default='flux_detection_total',
-        help='HDF5 microJy flux used for the VIS AB-magnitude cut.',
+        help='HDF5 or selection-catalog microJy flux used for the VIS cut.',
     )
     data.add_argument('--vis-detection-column', default='vis_det')
+    data.add_argument(
+        '--selection-catalog', type=Path,
+        help='Optional FITS photometry catalog joined to HDF5 rows by object ID.',
+    )
+    data.add_argument('--selection-id-column', default='object_id')
     data.add_argument(
         '--require-vis-detection', action=argparse.BooleanOptionalAction,
         default=True,
@@ -234,6 +239,8 @@ def main():
         vis_flux_column=args.vis_flux_column,
         vis_detection_column=args.vis_detection_column,
         require_vis_detection=args.require_vis_detection,
+        selection_catalog=args.selection_catalog,
+        selection_id_column=args.selection_id_column,
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +257,10 @@ def main():
             vis_flux_column=np.asarray(args.vis_flux_column),
             vis_detection_column=np.asarray(args.vis_detection_column),
             require_vis_detection=np.asarray(args.require_vis_detection),
+            selection_catalog=np.asarray(
+                str(args.selection_catalog) if args.selection_catalog else ''
+            ),
+            selection_id_column=np.asarray(args.selection_id_column),
         )
     np.savez_compressed(args.output_dir / 'pair_split.npz', **split_data)
     model = CosmosWebZooBotCLIP(

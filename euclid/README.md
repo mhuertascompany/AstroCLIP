@@ -783,7 +783,9 @@ existing HDF5 and JPEG pairs without making another SFH catalog or image set.
 `FLUX_DETECTION_TOTAL` is interpreted as microJy only for `VIS_DET=1`, using
 `VIS_AB = 23.9 - 2.5 log10(flux_microJy)`. The original seed-42 validation
 membership is retained before the magnitude cut, preventing objects from moving
-between train and validation when comparing magnitude limits.
+between train and validation when comparing magnitude limits. These photometry
+columns are read from `sfh_edfn100k/catalog_sfh_100k.fits` and joined exactly to
+the preprocessed HDF5 by `OBJECT_ID`; the HDF5 itself is not modified.
 
 First count the available pairs at several limits and write the VIS<22 ID table:
 

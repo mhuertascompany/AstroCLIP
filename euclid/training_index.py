@@ -61,7 +61,8 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
                      seed=42, max_pairs=None, max_vis_mag=None,
                      vis_flux_column='flux_detection_total',
                      vis_detection_column='vis_det',
-                     require_vis_detection=True):
+                     require_vis_detection=True, selection_catalog=None,
+                     selection_id_column='object_id'):
     """Match IDs by filename and make a deterministic random train/val split."""
     if not 0 < val_fraction < 1:
         raise ValueError('val_fraction must lie strictly between zero and one.')
@@ -81,6 +82,7 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
         bright, _ = bright_row_mask(
             sfh_path, max_vis_mag, vis_flux_column,
             vis_detection_column, require_vis_detection,
+            selection_catalog, selection_id_column,
         )
         paired &= bright
     paired_rows = np.flatnonzero(paired)

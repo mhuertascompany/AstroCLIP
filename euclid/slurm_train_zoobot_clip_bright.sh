@@ -42,6 +42,7 @@ mkdir -p "${OUTPUT}" "${HF_HOME}"
 cd /n03data/huertas/python/AstroCLIP
 python -u -m euclid.train_zoobot_clip \
     --dataset "${BASE}/sfh_clip_100k.h5" \
+    --selection-catalog "${BASE}/sfh_edfn100k/catalog_sfh_100k.fits" \
     --stamp-root "${BASE}/zoobot_stamps_rmax" \
     --band VIS \
     --max-vis-mag "${MAX_VIS_MAG}" \
