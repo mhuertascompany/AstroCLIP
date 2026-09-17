@@ -843,6 +843,9 @@ the repository root in the EUCLID-TOOLS environment:
   --resume
 ```
 
+In the authenticated IDR schema this queries
+`catalogue.mer_morphology_deep_survey`, matching the EDFN deep-survey sample.
+
 Transfer that FITS table back to Candide. After all jobs reading the HDF5 have
 finished, add the bright-subset metadata without changing the SFHs or row order:
 

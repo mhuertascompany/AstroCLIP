@@ -50,7 +50,10 @@ MER_ZOOBOT_COLUMNS = (
 )
 
 
-def zoobot_query(table_name='catalogue.mer_morphology'):
+DEFAULT_MORPHOLOGY_TABLE = 'catalogue.mer_morphology_deep_survey'
+
+
+def zoobot_query(table_name=DEFAULT_MORPHOLOGY_TABLE):
     columns = ',\n       '.join(f'morph.{name}' for name in MER_ZOOBOT_COLUMNS)
     return f"""SELECT src.sample_row, src.object_id,
        {columns}
@@ -100,7 +103,7 @@ def validate_results(sources, results):
 
 def fetch_zoobot_morphology(sample, output, client=None, batch_size=1000,
                              query_retries=5, retry_delay=5,
-                             table_name='catalogue.mer_morphology', resume=False):
+                             table_name=DEFAULT_MORPHOLOGY_TABLE, resume=False):
     sample, output = Path(sample), Path(output)
     if output.exists():
         if resume:
@@ -144,7 +147,7 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1000)
     parser.add_argument('--query-retries', type=int, default=5)
     parser.add_argument('--retry-delay', type=float, default=5)
-    parser.add_argument('--table-name', default='catalogue.mer_morphology')
+    parser.add_argument('--table-name', default=DEFAULT_MORPHOLOGY_TABLE)
     parser.add_argument('--credentials-file', type=Path)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()

@@ -53,7 +53,7 @@ class MerZoobotMorphologyTests(unittest.TestCase):
 
     def test_query_uses_morphology_table(self):
         query = zoobot_query()
-        self.assertIn('catalogue.mer_morphology', query)
+        self.assertIn('catalogue.mer_morphology_deep_survey', query)
         self.assertIn('morph.smooth_or_featured_smooth', query)
         self.assertIn('morph.object_id = src.object_id', query)
 
