@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 
 from euclid.umap_zoobot_clip import (
+    _dirichlet_fraction,
     _normalize_rows,
     _sfh_properties,
     load_embeddings,
@@ -53,6 +54,21 @@ class EuclidUmapDiagnosticsTests(unittest.TestCase):
             self.assertLess(props['sfh_mean_lookback'][0], props['sfh_mean_lookback'][1])
             self.assertLess(props['sfh_t50_lookback'][0], props['sfh_t50_lookback'][1])
             self.assertLess(props['sfh_log_old_recent'][0], props['sfh_log_old_recent'][1])
+
+    def test_dirichlet_fraction_normalizes_within_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'morphology.h5'
+            with h5py.File(path, 'w') as target:
+                target['smooth'] = [2.0, 1.0, np.nan]
+                target['featured'] = [1.0, 3.0, np.nan]
+                target['artifact'] = [1.0, 0.0, np.nan]
+            with h5py.File(path, 'r') as source:
+                values = _dirichlet_fraction(
+                    source, np.arange(3), ('smooth',),
+                    ('smooth', 'featured', 'artifact'),
+                )
+            np.testing.assert_allclose(values[:2], [0.5, 0.25])
+            self.assertTrue(np.isnan(values[2]))
 
 
 if __name__ == '__main__':

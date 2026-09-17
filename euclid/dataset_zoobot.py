@@ -130,7 +130,10 @@ class EuclidZooBotDataset(Dataset):
 class EuclidZooBotDataModule(L.LightningDataModule):
     def __init__(self, sfh_path, stamp_root, band='VIS', batch_size=128,
                  num_workers=8, image_size=224, val_fraction=0.1, seed=42,
-                 sample_posterior=True, max_pairs=None):
+                 sample_posterior=True, max_pairs=None, max_vis_mag=None,
+                 vis_flux_column='flux_detection_total',
+                 vis_detection_column='vis_det',
+                 require_vis_detection=True):
         super().__init__()
         self.sfh_path = sfh_path
         self.stamp_root = stamp_root
@@ -142,6 +145,10 @@ class EuclidZooBotDataModule(L.LightningDataModule):
         self.seed = seed
         self.sample_posterior = sample_posterior
         self.max_pairs = max_pairs
+        self.max_vis_mag = max_vis_mag
+        self.vis_flux_column = vis_flux_column
+        self.vis_detection_column = vis_detection_column
+        self.require_vis_detection = require_vis_detection
         self.pair_index = None
 
     def setup(self, stage=None):
@@ -149,10 +156,17 @@ class EuclidZooBotDataModule(L.LightningDataModule):
             self.pair_index = build_pair_index(
                 self.sfh_path, self.stamp_root, self.band,
                 self.val_fraction, self.seed, self.max_pairs,
+                self.max_vis_mag, self.vis_flux_column,
+                self.vis_detection_column, self.require_vis_detection,
             )
             index = self.pair_index
+            selection = (
+                f'; VIS<={self.max_vis_mag:g} AB'
+                if self.max_vis_mag is not None else ''
+            )
             print(
-                f'[EuclidZooBot] paired {index.n_paired:,}/{index.n_sfh:,}; '
+                f'[EuclidZooBot] stamps={index.n_stamp_paired:,}/{index.n_sfh:,}; '
+                f'paired after selection={index.n_paired:,}{selection}; '
                 f'train={len(index.train_rows):,}, val={len(index.val_rows):,}; '
                 f'{index.n_bins} bins, {index.n_realizations} realizations',
                 flush=True,

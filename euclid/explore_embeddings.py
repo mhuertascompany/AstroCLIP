@@ -61,6 +61,7 @@ _PALETTES = {
 
 _PROPERTY_LABELS = {
     'redshift': 'Redshift z',
+    'vis_magnitude': 'VIS total magnitude (AB)',
     'log_stellar_mass': 'log M★',
     'sersic_index': 'Sérsic index n',
     'sersic_radius': 'Sérsic radius',
@@ -71,6 +72,20 @@ _PROPERTY_LABELS = {
     'ellipticity': 'Ellipticity',
     'segmentation_area': 'Segmentation area',
     'point_like_probability': 'Point-like probability',
+    'concentration': 'Concentration',
+    'asymmetry': 'Asymmetry',
+    'smoothness': 'CAS smoothness',
+    'gini': 'Gini coefficient',
+    'moment_20': 'M20',
+    't_type': 'MER T-type',
+    'etg_or_ltg': 'MER ETG/LTG score',
+    'major_merger_probability': 'Major-merger probability',
+    'zoobot_smooth_probability': 'ZooBot P(smooth)',
+    'zoobot_featured_probability': 'ZooBot P(featured/disk)',
+    'zoobot_edge_on_probability': 'ZooBot P(edge-on)',
+    'zoobot_spiral_probability': 'ZooBot P(spiral arms)',
+    'zoobot_bar_probability': 'ZooBot P(bar)',
+    'zoobot_merger_probability': 'ZooBot P(disturbed/merger)',
     'sfh_recent_10': 'SFH fraction: recent 10%',
     'sfh_recent_20': 'SFH fraction: recent 20%',
     'sfh_old_20': 'SFH fraction: oldest 20%',
@@ -89,6 +104,7 @@ _PROPERTY_LABELS = {
 
 _PROPERTY_PALETTES = {
     'Redshift z': 'plasma',
+    'VIS total magnitude (AB)': 'viridis',
     'log M★': 'inferno',
     'Matched image–SFH cosine': 'coolwarm',
     'Image→SFH rank percentile': 'viridis',

@@ -775,6 +775,88 @@ on the baseline common split. The same pre/post-projection geometry diagnostics
 and explorer fields used by the linear run allow the autoencoder, fine-tuned,
 linear-projection, and residual-MLP representations to be compared directly.
 
+#### Bright VIS controlled sample
+
+The full SFH sample extends well below the magnitude range where resolved VIS
+morphology is reliable. A controlled bright-sample experiment filters the
+existing HDF5 and JPEG pairs without making another SFH catalog or image set.
+`FLUX_DETECTION_TOTAL` is interpreted as microJy only for `VIS_DET=1`, using
+`VIS_AB = 23.9 - 2.5 log10(flux_microJy)`. The original seed-42 validation
+membership is retained before the magnitude cut, preventing objects from moving
+between train and validation when comparing magnitude limits.
+
+First count the available pairs at several limits and write the VIS<22 ID table:
+
+```bash
+sbatch euclid/slurm_summarize_vis_bright_sample.sh 22.0
+```
+
+The output reports counts at 20.5, 21, 21.5, 22, and 22.5. Run the controlled
+baseline architecture at VIS<22, then optionally repeat at VIS<21 after checking
+that enough pairs remain:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_bright_test.sh 22.0
+sbatch euclid/slurm_train_zoobot_clip_bright.sh 22.0
+
+# Stricter comparison
+sbatch euclid/slurm_train_zoobot_clip_bright.sh 21.0
+```
+
+Outputs are separated as `training_transformer_median_vislt22p0` and
+`training_transformer_median_vislt21p0`. Retrieval sets have different sizes,
+so compare rank percentiles, paired-minus-shuffled cosine, and SFH-neighbour
+quality in addition to raw recall at K.
+
+For a controlled test, evaluate both the new bright model and the original
+full-sample model on the bright run's saved validation split. Substitute the
+actual best bright checkpoint printed by the training job:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_100k
+BRIGHT=${BASE}/training_transformer_median_vislt22p0
+BRIGHT_CKPT=${BRIGHT}/checkpoints/<best-bright-checkpoint>.ckpt
+BASELINE_CKPT=${BASE}/training_transformer_median_v2/checkpoints/euclid_vis_sfh_transformer_median_100k-epoch=027-val_loss=4.4625.ckpt
+
+sbatch -p pscomp -w n36 euclid/slurm_evaluate_zoobot_clip.sh \
+  "${BRIGHT_CKPT}" "${BRIGHT}/evaluation_best" "${BRIGHT}/pair_split.npz"
+sbatch -p pscomp -w n36 euclid/slurm_evaluate_zoobot_clip.sh \
+  "${BASELINE_CKPT}" "${BRIGHT}/evaluation_baseline_on_bright" \
+  "${BRIGHT}/pair_split.npz"
+```
+
+This separates the effect of training on brighter galaxies from the simpler
+effect that a bright validation set has clearer images. The cut will also shift
+the redshift and stellar-mass distributions, so inspect those properties before
+attributing an improvement specifically to morphology.
+
+The census job also writes `bright_samples/vis_lt_22p0.fits`. Transfer this
+small ID table to ESA Datalabs and query the official MER morphology table from
+the repository root in the EUCLID-TOOLS environment:
+
+```bash
+/opt/miniforge/envs/euclid-tools/bin/python -m euclid.fetch_mer_zoobot_morphology \
+  --sample /path/to/vis_lt_22p0.fits \
+  --output /path/to/mer_zoobot_vis_lt_22p0.fits \
+  --resume
+```
+
+Transfer that FITS table back to Candide. After all jobs reading the HDF5 have
+finished, add the bright-subset metadata without changing the SFHs or row order:
+
+```bash
+python -m euclid.restore_morphology_metadata \
+  --dataset /n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_clip_100k.h5 \
+  --catalog /path/to/mer_zoobot_vis_lt_22p0.fits \
+  --allow-missing
+```
+
+Subsequent UMAP archives and explorer bundles include VIS magnitude; CAS,
+Gini, and M20; MER T-type and major-merger scores; and normalized ZooBot
+smooth, featured, edge-on, spiral, bar, and disturbed/merger probabilities.
+The ZooBot values in MER are Dirichlet concentrations, so the diagnostic code
+normalizes answers within each morphology question before plotting them.
+
 ### Interactive Euclid embedding explorer
 
 `euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the

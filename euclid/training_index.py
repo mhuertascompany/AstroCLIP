@@ -6,6 +6,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from .vis_selection import bright_row_mask
+
 
 @dataclass(frozen=True)
 class EuclidPairIndex:
@@ -17,6 +19,7 @@ class EuclidPairIndex:
     n_realizations: int
     n_sfh: int
     n_paired: int
+    n_stamp_paired: int
 
 
 def inspect_sfh_file(path):
@@ -55,7 +58,10 @@ def inspect_sfh_file(path):
 
 
 def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
-                     seed=42, max_pairs=None):
+                     seed=42, max_pairs=None, max_vis_mag=None,
+                     vis_flux_column='flux_detection_total',
+                     vis_detection_column='vis_det',
+                     require_vis_detection=True):
     """Match IDs by filename and make a deterministic random train/val split."""
     if not 0 < val_fraction < 1:
         raise ValueError('val_fraction must lie strictly between zero and one.')
@@ -70,6 +76,13 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
         (stamp_dir / f'{band}_{int(object_id)}.jpg').is_file()
         for object_id in ids
     ], dtype=bool)
+    n_stamp_paired = int(np.count_nonzero(paired))
+    if max_vis_mag is not None:
+        bright, _ = bright_row_mask(
+            sfh_path, max_vis_mag, vis_flux_column,
+            vis_detection_column, require_vis_detection,
+        )
+        paired &= bright
     paired_rows = np.flatnonzero(paired)
     if len(paired_rows) < 2:
         raise ValueError(f'Only {len(paired_rows)} SFH/image pairs were found.')
@@ -101,4 +114,5 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
         n_realizations=n_realizations,
         n_sfh=len(ids),
         n_paired=len(paired_rows),
+        n_stamp_paired=n_stamp_paired,
     )

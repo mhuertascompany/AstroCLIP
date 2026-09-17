@@ -22,6 +22,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
+from .vis_selection import flux_ujy_to_ab_magnitude
+
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +93,25 @@ def _catalog_property(source, rows, candidates, valid=None):
                 values[~valid(values)] = np.nan
             return values, name
     return None, None
+
+
+def _dirichlet_fraction(source, rows, numerator, answers):
+    """Convert MER ZooBot Dirichlet concentrations to a question fraction."""
+    if any(name not in source for name in answers):
+        return None
+    values = {
+        name: _read_rows(source[name], rows).astype(np.float64)
+        for name in answers
+    }
+    denominator = sum(values.values())
+    selected = sum(values[name] for name in numerator)
+    output = np.full(len(rows), np.nan, dtype=np.float32)
+    valid = (
+        np.isfinite(denominator) & (denominator > 0)
+        & np.isfinite(selected)
+    )
+    output[valid] = (selected[valid] / denominator[valid]).astype(np.float32)
+    return output
 
 
 def _sfh_properties(source, rows):
@@ -179,12 +200,70 @@ def load_properties(h5_path, rows, galaxy_ids, archive_redshift,
             'point_like_probability': (
                 ['point_like_prob'], lambda x: (x >= 0) & (x <= 1),
             ),
+            'concentration': (['concentration'], lambda x: np.isfinite(x)),
+            'asymmetry': (['asymmetry'], lambda x: np.isfinite(x)),
+            'smoothness': (['smoothness'], lambda x: np.isfinite(x)),
+            'gini': (['gini'], lambda x: np.isfinite(x)),
+            'moment_20': (['moment_20'], lambda x: np.isfinite(x)),
+            't_type': (['t_type'], lambda x: np.isfinite(x)),
+            'etg_or_ltg': (['etg_or_ltg'], lambda x: np.isfinite(x)),
+            'major_merger_probability': (
+                ['major_merger'], lambda x: (x >= 0) & (x <= 1),
+            ),
         }
         for key, (candidates, valid) in catalog_specs.items():
             value, source_name = _catalog_property(source, rows, candidates, valid)
             if value is not None:
                 properties[key] = value
                 sources[key] = source_name
+        flux, flux_name = _catalog_property(
+            source, rows, ['flux_detection_total'], lambda x: x > 0,
+        )
+        if flux is not None:
+            vis_magnitude = flux_ujy_to_ab_magnitude(flux).astype(np.float32)
+            if 'vis_det' in source:
+                vis_detected = _read_rows(source['vis_det'], rows) == 1
+                vis_magnitude[~vis_detected] = np.nan
+            properties['vis_magnitude'] = vis_magnitude
+            sources['vis_magnitude'] = f'derived from {flux_name} (microJy)'
+
+        zoo_questions = {
+            'zoobot_smooth_probability': (
+                ('smooth_or_featured_smooth',),
+                ('smooth_or_featured_smooth',
+                 'smooth_or_featured_featured_or_disk',
+                 'smooth_or_featured_artifact_star_zoom'),
+            ),
+            'zoobot_featured_probability': (
+                ('smooth_or_featured_featured_or_disk',),
+                ('smooth_or_featured_smooth',
+                 'smooth_or_featured_featured_or_disk',
+                 'smooth_or_featured_artifact_star_zoom'),
+            ),
+            'zoobot_edge_on_probability': (
+                ('disk_edge_on_yes',),
+                ('disk_edge_on_yes', 'disk_edge_on_no'),
+            ),
+            'zoobot_spiral_probability': (
+                ('has_spiral_arms_yes',),
+                ('has_spiral_arms_yes', 'has_spiral_arms_no'),
+            ),
+            'zoobot_bar_probability': (
+                ('bar_strong', 'bar_weak'),
+                ('bar_strong', 'bar_weak', 'bar_no'),
+            ),
+            'zoobot_merger_probability': (
+                ('merging_minor_disturbance', 'merging_major_disturbance',
+                 'merging_merger'),
+                ('merging_none', 'merging_minor_disturbance',
+                 'merging_major_disturbance', 'merging_merger'),
+            ),
+        }
+        for key, (numerator, answers) in zoo_questions.items():
+            values = _dirichlet_fraction(source, rows, numerator, answers)
+            if values is not None:
+                properties[key] = values
+                sources[key] = 'derived from MER ZooBot Dirichlet concentrations'
         properties.update(_sfh_properties(source, rows))
         sources.update({key: 'derived from sfh' for key in properties if key.startswith('sfh_')})
 
@@ -206,6 +285,7 @@ def load_properties(h5_path, rows, galaxy_ids, archive_redshift,
 def property_specs(properties):
     definitions = {
         'redshift': ('Redshift z', 'plasma'),
+        'vis_magnitude': ('VIS total magnitude (AB)', 'viridis_r'),
         'log_stellar_mass': (r'log $M_\star/M_\odot$', 'inferno'),
         'sersic_index': ('Sérsic index n', 'viridis'),
         'sersic_radius': ('Sérsic radius', 'viridis'),
@@ -216,6 +296,20 @@ def property_specs(properties):
         'ellipticity': ('Ellipticity', 'viridis'),
         'segmentation_area': ('Segmentation area', 'magma'),
         'point_like_probability': ('Point-like probability', 'cividis'),
+        'concentration': ('Concentration', 'viridis'),
+        'asymmetry': ('Asymmetry', 'magma'),
+        'smoothness': ('CAS smoothness', 'magma'),
+        'gini': ('Gini coefficient', 'viridis'),
+        'moment_20': (r'$M_{20}$', 'coolwarm'),
+        't_type': ('MER T-type', 'coolwarm'),
+        'etg_or_ltg': ('MER ETG/LTG score', 'coolwarm'),
+        'major_merger_probability': ('Major-merger probability', 'magma'),
+        'zoobot_smooth_probability': ('ZooBot P(smooth)', 'viridis'),
+        'zoobot_featured_probability': ('ZooBot P(featured/disk)', 'viridis'),
+        'zoobot_edge_on_probability': ('ZooBot P(edge-on)', 'magma'),
+        'zoobot_spiral_probability': ('ZooBot P(spiral arms)', 'magma'),
+        'zoobot_bar_probability': ('ZooBot P(bar)', 'magma'),
+        'zoobot_merger_probability': ('ZooBot P(disturbed/merger)', 'magma'),
         'sfh_recent_10': ('SFH fraction: recent 10%', 'hot'),
         'sfh_recent_20': ('SFH fraction: recent 20%', 'hot'),
         'sfh_old_20': ('SFH fraction: oldest 20%', 'cividis'),

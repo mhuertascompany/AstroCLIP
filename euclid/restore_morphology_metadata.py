@@ -19,6 +19,8 @@ import numpy as np
 from astropy.table import Table
 from astropy.units import UnitsWarning
 
+from .fetch_mer_zoobot_morphology import MER_ZOOBOT_COLUMNS
+
 
 DEFAULT_COLUMNS = (
     'sersic_sersic_vis_axis_ratio',
@@ -35,7 +37,7 @@ DEFAULT_COLUMNS = (
     'point_like_prob',
     'segmentation_area',
     'ellipticity',
-)
+) + MER_ZOOBOT_COLUMNS
 
 
 def _column_name(table, requested):

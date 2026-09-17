@@ -9,7 +9,8 @@ from PIL import Image
 from euclid.training_index import build_pair_index, inspect_sfh_file
 
 
-def write_sfh_file(path, ids, n_realizations=3, n_bins=4):
+def write_sfh_file(path, ids, n_realizations=3, n_bins=4,
+                   vis_magnitudes=None, vis_detected=None):
     ids = np.asarray(ids, dtype=np.int64)
     with h5py.File(path, 'w') as target:
         target.create_dataset('galaxy_id', data=ids)
@@ -32,6 +33,19 @@ def write_sfh_file(path, ids, n_realizations=3, n_bins=4):
             'sfh_time_grid', data=np.linspace(0, 1, n_bins, dtype=np.float32),
         )
         target.attrs['n_galaxies'] = len(ids)
+        if vis_magnitudes is not None:
+            vis_magnitudes = np.asarray(vis_magnitudes, dtype=np.float64)
+            target.create_dataset(
+                'flux_detection_total',
+                data=10.0 ** ((23.9 - vis_magnitudes) / 2.5),
+            )
+            target.create_dataset(
+                'vis_det',
+                data=(
+                    np.ones(len(ids), dtype=np.int16)
+                    if vis_detected is None else np.asarray(vis_detected)
+                ),
+            )
 
 
 class EuclidTrainingIndexTest(unittest.TestCase):
@@ -89,6 +103,42 @@ class EuclidTrainingIndexTest(unittest.TestCase):
         write_sfh_file(duplicate_path, [1, 1])
         with self.assertRaisesRegex(ValueError, 'duplicates'):
             inspect_sfh_file(duplicate_path)
+
+    def test_vis_magnitude_cut_preserves_base_validation_membership(self):
+        bright_path = self.root / 'bright.h5'
+        magnitudes = np.linspace(20.0, 23.8, len(self.ids))
+        write_sfh_file(bright_path, self.ids, vis_magnitudes=magnitudes)
+        unrestricted = build_pair_index(
+            bright_path, self.root / 'stamps', val_fraction=0.25, seed=7,
+        )
+        bright = build_pair_index(
+            bright_path, self.root / 'stamps', val_fraction=0.25, seed=7,
+            max_vis_mag=22.0,
+        )
+        expected = {
+            int(value) for value, magnitude in zip(self.ids, magnitudes)
+            if magnitude <= 22.0 and value in self.available
+        }
+        self.assertSetEqual(
+            set(np.concatenate([bright.train_ids, bright.val_ids])), expected,
+        )
+        self.assertSetEqual(set(bright.val_ids), set(unrestricted.val_ids) & expected)
+        self.assertEqual(bright.n_stamp_paired, len(self.available))
+
+    def test_vis_cut_excludes_nir_detected_objects(self):
+        path = self.root / 'detection.h5'
+        detected = np.ones(len(self.ids), dtype=np.int16)
+        detected[0] = 0
+        write_sfh_file(
+            path, self.ids, vis_magnitudes=np.full(len(self.ids), 20.0),
+            vis_detected=detected,
+        )
+        index = build_pair_index(
+            path, self.root / 'stamps', val_fraction=0.25, seed=7,
+            max_vis_mag=22.0,
+        )
+        selected = set(np.concatenate([index.train_ids, index.val_ids]))
+        self.assertNotIn(int(self.ids[0]), selected)
 
 
 if __name__ == '__main__':

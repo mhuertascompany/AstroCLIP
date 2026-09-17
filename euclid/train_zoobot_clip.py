@@ -41,6 +41,20 @@ def parse_args():
     data.add_argument('--max-pairs', type=int,
                       help='Limit matched pairs for a smoke test.')
     data.add_argument(
+        '--max-vis-mag', type=float,
+        help='Keep VIS-detected objects at or brighter than this AB magnitude.',
+    )
+    data.add_argument(
+        '--vis-flux-column', default='flux_detection_total',
+        help='HDF5 microJy flux used for the VIS AB-magnitude cut.',
+    )
+    data.add_argument('--vis-detection-column', default='vis_det')
+    data.add_argument(
+        '--require-vis-detection', action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Require VIS_DET=1 when applying a VIS magnitude cut.',
+    )
+    data.add_argument(
         '--sample-posterior',
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -147,6 +161,8 @@ def validate_args(args):
         )
     if args.batch_size < 2:
         raise ValueError('--batch-size must be at least 2.')
+    if args.max_vis_mag is not None and not np.isfinite(args.max_vis_mag):
+        raise ValueError('--max-vis-mag must be finite.')
     if args.queue_size < 0:
         raise ValueError('--queue-size cannot be negative.')
     if args.queue_size and args.queue_size < args.batch_size:
@@ -214,17 +230,28 @@ def main():
         seed=args.seed,
         sample_posterior=args.sample_posterior,
         max_pairs=args.max_pairs,
+        max_vis_mag=args.max_vis_mag,
+        vis_flux_column=args.vis_flux_column,
+        vis_detection_column=args.vis_detection_column,
+        require_vis_detection=args.require_vis_detection,
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     pair_index = datamodule.pair_index
-    np.savez_compressed(
-        args.output_dir / 'pair_split.npz',
+    split_data = dict(
         train_rows=pair_index.train_rows,
         train_ids=pair_index.train_ids,
         val_rows=pair_index.val_rows,
         val_ids=pair_index.val_ids,
     )
+    if args.max_vis_mag is not None:
+        split_data.update(
+            max_vis_mag=np.float32(args.max_vis_mag),
+            vis_flux_column=np.asarray(args.vis_flux_column),
+            vis_detection_column=np.asarray(args.vis_detection_column),
+            require_vis_detection=np.asarray(args.require_vis_detection),
+        )
+    np.savez_compressed(args.output_dir / 'pair_split.npz', **split_data)
     model = CosmosWebZooBotCLIP(
         zoobot_ckpt=str(args.zoobot_ckpt) if args.zoobot_ckpt else None,
         zoobot_model_name=args.zoobot_model_name,
