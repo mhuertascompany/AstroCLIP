@@ -1043,6 +1043,44 @@ quality or angular scale rather than galaxy structure.
 
 ### Interactive Euclid embedding explorer
 
+#### Bright frozen-MLP best checkpoint
+
+Export the completed bright run on Candide with:
+
+```bash
+sbatch euclid/slurm_export_bright_clip_explorer.sh
+```
+
+This n36 job evaluates the epoch-20 checkpoint
+`euclid_bright_frozen_mlp_150k-epoch=020-val_loss=4.2759.ckpt` on its saved
+validation split, creates UMAP diagnostics with morphology metadata, and
+packages the validation JPEGs and compact SFHs. It uses the bright 150k HDF5
+and stamps, not the older 100k products. The output is:
+
+```text
+/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/training_bright_frozen_mlp/evaluation_best/explorer_bundle
+```
+
+Download that complete directory to
+`/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bright_frozen_mlp_best`.
+No checkpoint or full SFH HDF5 is needed locally. In the local explorer
+environment, from the repository root:
+
+```bash
+LOCAL_BUNDLE=/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bright_frozen_mlp_best
+tar -xf "${LOCAL_BUNDLE}/VIS_stamps.tar" -C "${LOCAL_BUNDLE}"
+python -m euclid.explore_embeddings \
+  --h5 "${LOCAL_BUNDLE}/euclid_explorer.h5" \
+  --stamps "${LOCAL_BUNDLE}/VIS" \
+  --umap "${LOCAL_BUNDLE}/00_training_bright_frozen_mlp_euclid_clip_umap_diagnostics.npz" \
+  --label 'Bright frozen encoders + MLP, best epoch 20'
+```
+
+The export includes the pre-adapter SFH embedding but not the raw ZooBot
+backbone embedding. Image encoder in this bundle means the trained image
+adapter output. Comparing with the earlier raw-ZooBot 30k archive in the same
+app restricts the display to the intersection of galaxy IDs.
+
 For the bright catalog, `smooth_or_featured_artifact_star_zoom` is entirely
 missing. Diagnostics therefore also expose explicitly conditional smooth and
 featured fractions, each divided by `smooth + featured`. Missing, negative,

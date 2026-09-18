@@ -590,6 +590,13 @@ def main():
     xy_shared_sfh = xy_shared[len(image):]
 
     morphology_keys = [
+        'vis_magnitude', 'concentration', 'asymmetry', 'smoothness',
+        'gini', 'moment_20', 't_type', 'etg_or_ltg',
+        'zoobot_smooth_conditional_fraction', 'zoobot_featured_conditional_fraction',
+        'zoobot_smooth_probability', 'zoobot_featured_probability',
+        'zoobot_edge_on_probability', 'zoobot_spiral_probability',
+        'zoobot_bar_probability', 'zoobot_merger_probability',
+        'major_merger_probability',
         'redshift', 'sersic_index', 'sersic_radius', 'axis_ratio', 'fwhm',
         'kron_radius', 'semimajor_axis', 'point_like_probability',
         'ellipticity', 'segmentation_area',
