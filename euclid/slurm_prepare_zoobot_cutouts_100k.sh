@@ -4,7 +4,7 @@
 #SBATCH --error=/n03data/huertas/euclid/sfh_clip/edfn_100k/zoobot_stamps_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --nodelist=n03
+#SBATCH --partition=comp
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=06:00:00
