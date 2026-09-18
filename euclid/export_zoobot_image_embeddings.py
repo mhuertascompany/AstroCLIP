@@ -37,6 +37,27 @@ from .umap_zoobot_clip import (
 log = logging.getLogger(__name__)
 
 
+MORPHOLOGY_KEYS = [
+    'concentration', 'asymmetry', 'smoothness', 'gini', 'moment_20',
+    't_type', 'etg_or_ltg', 'major_merger_probability',
+    'zoobot_smooth_probability', 'zoobot_featured_probability',
+    'zoobot_edge_on_probability', 'zoobot_spiral_probability',
+    'zoobot_bar_probability', 'zoobot_merger_probability',
+    'sersic_index', 'sersic_radius', 'axis_ratio', 'ellipticity',
+]
+CONFOUNDER_KEYS = [
+    'vis_magnitude', 'redshift', 'log_stellar_mass', 'fwhm',
+    'kron_radius', 'semimajor_axis', 'segmentation_area',
+    'point_like_probability',
+]
+SFH_KEYS = [
+    'sfh_recent_10', 'sfh_recent_20', 'sfh_old_20',
+    'sfh_mean_lookback', 'sfh_peak_lookback', 'sfh_t50_lookback',
+    'sfh_entropy', 'sfh_log_old_recent',
+]
+ZOOBOT_KEYS = [key for key in MORPHOLOGY_KEYS if key.startswith('zoobot_')]
+
+
 class StampDataset(Dataset):
     def __init__(self, stamp_dir, band, galaxy_ids, rows, image_size=224):
         self.stamp_dir = Path(stamp_dir)
@@ -131,6 +152,69 @@ def encode_stamps(model, loader, device):
     )
 
 
+def write_diagnostic_products(dataset_path, output_dir, galaxy_ids, rows,
+                              embedding, coordinates):
+    """Attach current HDF5 metadata and write image-only NPZ/PDF/CSV products."""
+    output_dir = Path(output_dir)
+    properties, sources = load_catalog_properties(
+        dataset_path, rows, galaxy_ids,
+    )
+    specs = property_specs(properties)
+    available_zoobot = [key for key in ZOOBOT_KEYS if key in specs]
+    if not available_zoobot:
+        log.warning(
+            'No MER ZooBot question columns are present in %s. The PDF will '
+            'contain structural measurements only. Add the detailed MER '
+            'catalog with euclid.restore_morphology_metadata, then run '
+            'euclid.refresh_zoobot_image_diagnostics.',
+            dataset_path,
+        )
+    else:
+        log.info('Loaded MER ZooBot properties: %s', ', '.join(available_zoobot))
+
+    pdf_path = output_dir / 'zoobot_image_umap.pdf'
+    with PdfPages(pdf_path) as pdf:
+        property_pages(
+            pdf, coordinates,
+            [specs[key] for key in MORPHOLOGY_KEYS if key in specs],
+            'Pretrained Euclid ZooBot backbone: morphology',
+        )
+        property_pages(
+            pdf, coordinates,
+            [specs[key] for key in CONFOUNDER_KEYS if key in specs],
+            'Pretrained Euclid ZooBot backbone: sample and image properties',
+        )
+        property_pages(
+            pdf, coordinates,
+            [specs[key] for key in SFH_KEYS if key in specs],
+            'Pretrained Euclid ZooBot backbone: SFH properties',
+        )
+
+    npz_path = output_dir / 'zoobot_image_umap.npz'
+    npz_data = {
+        'galaxy_id': galaxy_ids,
+        'h5_row': rows,
+        'image_embedding': embedding,
+        'xy_image': coordinates,
+    }
+    npz_data.update({
+        key: np.asarray(values, dtype=np.float32)
+        for key, values in properties.items()
+    })
+    np.savez_compressed(npz_path, **npz_data)
+    save_property_table(
+        output_dir / 'zoobot_image_properties.csv',
+        galaxy_ids, rows, properties,
+    )
+    return {
+        'property_sources': sources,
+        'properties': sorted(properties),
+        'zoobot_properties': available_zoobot,
+        'archive': npz_path.name,
+        'diagnostic_pdf': pdf_path.name,
+    }
+
+
 def export_embeddings(dataset_path, stamp_root, output_dir, model_name,
                       band='VIS', image_size=224, batch_size=256,
                       num_workers=8, max_objects=30000, seed=42,
@@ -165,64 +249,10 @@ def export_embeddings(dataset_path, stamp_root, output_dir, model_name,
     ):
         raise RuntimeError('DataLoader changed the requested object order.')
 
-    properties, sources = load_catalog_properties(
-        dataset_path, rows, galaxy_ids,
-    )
-    specs = property_specs(properties)
     log.info('Fitting image-only UMAP for %,d raw ZooBot features', len(rows))
     coordinates = fit_umap(embedding, n_neighbors, min_dist, seed)
-
-    morphology_keys = [
-        'concentration', 'asymmetry', 'smoothness', 'gini', 'moment_20',
-        't_type', 'etg_or_ltg', 'major_merger_probability',
-        'zoobot_smooth_probability', 'zoobot_featured_probability',
-        'zoobot_edge_on_probability', 'zoobot_spiral_probability',
-        'zoobot_bar_probability', 'zoobot_merger_probability',
-        'sersic_index', 'sersic_radius', 'axis_ratio', 'ellipticity',
-    ]
-    confounder_keys = [
-        'vis_magnitude', 'redshift', 'log_stellar_mass', 'fwhm',
-        'kron_radius', 'semimajor_axis', 'segmentation_area',
-        'point_like_probability',
-    ]
-    sfh_keys = [
-        'sfh_recent_10', 'sfh_recent_20', 'sfh_old_20',
-        'sfh_mean_lookback', 'sfh_peak_lookback', 'sfh_t50_lookback',
-        'sfh_entropy', 'sfh_log_old_recent',
-    ]
-    pdf_path = output_dir / 'zoobot_image_umap.pdf'
-    with PdfPages(pdf_path) as pdf:
-        property_pages(
-            pdf, coordinates,
-            [specs[key] for key in morphology_keys if key in specs],
-            'Pretrained Euclid ZooBot backbone: morphology',
-        )
-        property_pages(
-            pdf, coordinates,
-            [specs[key] for key in confounder_keys if key in specs],
-            'Pretrained Euclid ZooBot backbone: sample and image properties',
-        )
-        property_pages(
-            pdf, coordinates,
-            [specs[key] for key in sfh_keys if key in specs],
-            'Pretrained Euclid ZooBot backbone: SFH properties',
-        )
-
-    npz_path = output_dir / 'zoobot_image_umap.npz'
-    npz_data = {
-        'galaxy_id': galaxy_ids,
-        'h5_row': rows,
-        'image_embedding': embedding,
-        'xy_image': coordinates,
-    }
-    npz_data.update({
-        key: np.asarray(values, dtype=np.float32)
-        for key, values in properties.items()
-    })
-    np.savez_compressed(npz_path, **npz_data)
-    save_property_table(
-        output_dir / 'zoobot_image_properties.csv',
-        galaxy_ids, rows, properties,
+    diagnostic_manifest = write_diagnostic_products(
+        dataset_path, output_dir, galaxy_ids, rows, embedding, coordinates,
     )
     manifest = {
         'model_name': model_name,
@@ -238,13 +268,11 @@ def export_embeddings(dataset_path, stamp_root, output_dir, model_name,
         'seed': seed,
         'umap_n_neighbors': n_neighbors,
         'umap_min_dist': min_dist,
-        'property_sources': sources,
-        'archive': npz_path.name,
-        'diagnostic_pdf': pdf_path.name,
+        **diagnostic_manifest,
     }
     (output_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    log.info('Saved image embedding archive: %s', npz_path)
-    log.info('Saved diagnostic PDF: %s', pdf_path)
+    log.info('Saved image embedding archive: %s', output_dir / manifest['archive'])
+    log.info('Saved diagnostic PDF: %s', output_dir / manifest['diagnostic_pdf'])
     return manifest
 
 

@@ -910,30 +910,23 @@ sbatch euclid/slurm_prepare_zoobot_cutouts_100k.sh \
   "${BASE}/zoobot_stamps_rmax"
 ```
 
-The detailed MER ZooBot fields must first be present in the preprocessed HDF5.
-The cutout run's `morphology_catalog.fits` supplies the size metadata used to
-make the JPEGs; fetch the richer morphology table in Datalabs with:
+The detailed MER ZooBot catalog queried earlier from
+`catalogue.mer_morphology_deep_survey` must also be visible to the diagnostic.
+Do not query it again. Transfer its existing FITS output to Candide if needed.
+The similarly named `cutouts_run/morphology_catalog.fits` comes from
+`catalogue.mer_catalogue_deep_survey` and contains only the size metadata used
+to make the JPEGs. Restore the existing detailed catalog after no other job is
+writing the HDF5:
 
 ```bash
-/opt/miniforge/envs/euclid-tools/bin/python -m euclid.fetch_mer_zoobot_morphology \
-  --sample /home/mhuertas/my_workspace/<bright-run>/catalog_bright.fits \
-  --output /home/mhuertas/my_workspace/<bright-run>/mer_zoobot_morphology_deep.fits \
-  --resume
+sbatch euclid/slurm_restore_morphology_metadata_bright.sh
 ```
 
-Transfer that FITS file with the cutouts. Restore all metadata after no other
-job is writing the HDF5:
-
-```bash
-BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
-
-python -m euclid.restore_morphology_metadata \
-  --dataset "${BASE}/sfh_clip_150k.h5" \
-  --catalog "${BASE}/catalog_bright.fits" \
-  --catalog "${BASE}/cutouts_run/morphology_catalog.fits" \
-  --catalog "${BASE}/mer_zoobot_morphology_deep.fits" \
-  --allow-missing
-```
+The job defaults to
+`/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/sfh_clip_150k.h5`
+and the existing
+`/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/mer_zoobot_morphology_deep.fits`.
+It only adds scalar metadata and does not alter the SFHs or row order.
 
 Then export a reproducible 30,000-object subset on the n36 GPU node:
 
@@ -952,11 +945,36 @@ stamp bundle manageable. Pass `0` as the last argument to encode every matched
 stamp. The output contains `zoobot_image_umap.npz`, a static diagnostic PDF,
 the scalar-property table, and a provenance manifest.
 
+If the embeddings were exported before the detailed MER catalog was restored,
+do not encode the JPEGs or refit UMAP again. After patching the HDF5 as shown
+above, refresh only the metadata products on a CPU node:
+
+```bash
+sbatch euclid/slurm_refresh_zoobot_image_diagnostics.sh
+```
+
+This reuses the existing embedding vectors and UMAP coordinates and writes
+`zoobot_image_embedding_30k_with_morphology`. Its manifest lists the exact
+`zoobot_properties` found in the HDF5. New embedding runs also emit a prominent
+warning when no MER ZooBot question columns are available.
+
 After that job finishes, package the same objects and their SFHs and JPEGs on a
 regular CPU node:
 
 ```bash
 sbatch euclid/slurm_export_zoobot_image_explorer.sh
+```
+
+For a refreshed archive, point the bundle job at that product explicitly:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+
+sbatch euclid/slurm_export_zoobot_image_explorer.sh \
+  "${BASE}/sfh_clip_150k.h5" \
+  "${BASE}/zoobot_stamps_rmax" \
+  "${BASE}/zoobot_image_embedding_30k_with_morphology/zoobot_image_umap.npz" \
+  "${BASE}/explorer_zoobot_image_30k_with_morphology"
 ```
 
 Download
