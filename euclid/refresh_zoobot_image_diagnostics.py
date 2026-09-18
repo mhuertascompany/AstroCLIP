@@ -45,6 +45,7 @@ def refresh_diagnostics(archive_path, dataset_path, output_dir):
 
     diagnostics = write_diagnostic_products(
         dataset_path, output_dir, galaxy_ids, rows, embedding, coordinates,
+        require_zoobot=True,
     )
     manifest = {
         'source_archive': str(archive_path),

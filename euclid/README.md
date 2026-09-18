@@ -890,6 +890,44 @@ directory.
 
 ### Inspect the pretrained ZooBot image space before alignment
 
+#### Bright 150k CLIP with frozen encoders and MLP adapters
+
+This experiment uses the pretrained Euclid ZooBot backbone and the existing
+SFH autoencoder encoder, both frozen and kept in evaluation mode. The image
+MLP projection, residual SFH MLP projection (hidden width 512, residual scale
+0.1), and contrastive temperature are trainable. It uses median SFHs, exact
+pairs, batch size 128, no queue, and no reconstruction loss. Reconstruction
+through a frozen SFH encoder cannot optimize the projection adapters.
+
+Run from the repository root on Candide after syncing the new scripts:
+
+```bash
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+sbatch euclid/slurm_train_zoobot_clip_bright_frozen_mlp_test.sh "${AE}"
+```
+
+The smoke test uses 1,024 pairs for three epochs. After it succeeds:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_bright_frozen_mlp.sh "${AE}"
+```
+
+Both jobs use `pscomp` on n36 with one GPU. Defaults are
+`edfn_vislt22p0_150000/sfh_clip_150k.h5` and
+`edfn_vislt22p0_150000/zoobot_stamps_rmax` under
+`/n03data/huertas/euclid/sfh_clip`. The full run uses all available paired
+bright objects, a saved 90/10 split, up to 50 epochs, and patience 10.
+Outputs are `training_bright_frozen_mlp_test` and `training_bright_frozen_mlp`
+within the bright sample directory. It does not restrict training to the
+30k visualization subset. The full script also accepts dataset, stamp root,
+output directory, and resume checkpoint after the autoencoder checkpoint.
+
+This reuses the earlier 100k SFH autoencoder; its pretraining may overlap the
+new bright validation sample. Treat this as exploratory validation rather
+than an independent test set. Compare alignment and SFH-neighborhood metrics
+on the saved bright split when assessing whether morphology information is
+preserved in the adapted spaces.
+
 For the VIS<22 bright sample, first check whether the pretrained Euclid ZooBot
 backbone itself organizes the galaxies by morphology. The image-only exporter
 uses the raw frozen backbone output from
@@ -954,9 +992,11 @@ sbatch euclid/slurm_refresh_zoobot_image_diagnostics.sh
 ```
 
 This reuses the existing embedding vectors and UMAP coordinates and writes
-`zoobot_image_embedding_30k_with_morphology`. Its manifest lists the exact
-`zoobot_properties` found in the HDF5. New embedding runs also emit a prominent
-warning when no MER ZooBot question columns are available.
+`zoobot_image_embedding_30k_with_morphology_verified`. The job fails instead of
+writing another incomplete PDF unless it finds finite ZooBot probabilities.
+Its manifest lists the exact `zoobot_properties` found in the HDF5. New
+embedding runs also emit a prominent warning when no MER ZooBot question
+columns are available.
 
 After that job finishes, package the same objects and their SFHs and JPEGs on a
 regular CPU node:
@@ -973,8 +1013,8 @@ BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
 sbatch euclid/slurm_export_zoobot_image_explorer.sh \
   "${BASE}/sfh_clip_150k.h5" \
   "${BASE}/zoobot_stamps_rmax" \
-  "${BASE}/zoobot_image_embedding_30k_with_morphology/zoobot_image_umap.npz" \
-  "${BASE}/explorer_zoobot_image_30k_with_morphology"
+  "${BASE}/zoobot_image_embedding_30k_with_morphology_verified/zoobot_image_umap.npz" \
+  "${BASE}/explorer_zoobot_image_30k_with_morphology_verified"
 ```
 
 Download
@@ -1002,6 +1042,27 @@ the map while morphology is mixed, the encoder is mostly organizing image
 quality or angular scale rather than galaxy structure.
 
 ### Interactive Euclid embedding explorer
+
+For the bright catalog, `smooth_or_featured_artifact_star_zoom` is entirely
+missing. Diagnostics therefore also expose explicitly conditional smooth and
+featured fractions, each divided by `smooth + featured`. Missing, negative,
+or zero-total inputs remain NaN. These are separate archive fields from the
+three-answer probabilities; unavailable three-answer smooth/featured panels
+are omitted. The local explorer uses the same explicit conditional labels.
+
+After updating the code on Candide, regenerate the existing 30k diagnostic
+with a fresh output directory (no metadata restoration or GPU inference needed):
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+sbatch euclid/slurm_refresh_zoobot_image_diagnostics.sh \
+  "${BASE}/zoobot_image_embedding_30k/zoobot_image_umap.npz" \
+  "${BASE}/sfh_clip_150k.h5" \
+  "${BASE}/zoobot_image_embedding_30k_conditional"
+```
+
+Download `zoobot_image_embedding_30k_conditional/zoobot_image_umap.pdf`.
+Use the NPZ from that same directory when rebuilding the local explorer bundle.
 
 `euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the
 Euclid data layout. The two linked UMAP panels can display different runs and

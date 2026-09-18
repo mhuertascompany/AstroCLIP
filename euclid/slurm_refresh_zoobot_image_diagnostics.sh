@@ -22,7 +22,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
 ARCHIVE=${1:-${BASE}/zoobot_image_embedding_30k/zoobot_image_umap.npz}
 DATASET=${2:-${BASE}/sfh_clip_150k.h5}
-OUTPUT=${3:-${BASE}/zoobot_image_embedding_30k_with_morphology}
+OUTPUT=${3:-${BASE}/zoobot_image_embedding_30k_with_morphology_verified}
 
 cd /n03data/huertas/python/AstroCLIP
 python -u -m euclid.refresh_zoobot_image_diagnostics \

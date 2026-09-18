@@ -110,6 +110,8 @@ def _dirichlet_fraction(source, rows, numerator, answers):
         np.isfinite(denominator) & (denominator > 0)
         & np.isfinite(selected)
     )
+    for value in values.values():
+        valid &= np.isfinite(value) & (value >= 0)
     output[valid] = (selected[valid] / denominator[valid]).astype(np.float32)
     return output
 
@@ -236,6 +238,16 @@ def load_catalog_properties(h5_path, rows, galaxy_ids, archive_redshift=None):
             sources['vis_magnitude'] = f'derived from {flux_name} (microJy)'
 
         zoo_questions = {
+            'zoobot_smooth_conditional_fraction': (
+                ('smooth_or_featured_smooth',),
+                ('smooth_or_featured_smooth',
+                 'smooth_or_featured_featured_or_disk'),
+            ),
+            'zoobot_featured_conditional_fraction': (
+                ('smooth_or_featured_featured_or_disk',),
+                ('smooth_or_featured_smooth',
+                 'smooth_or_featured_featured_or_disk'),
+            ),
             'zoobot_smooth_probability': (
                 ('smooth_or_featured_smooth',),
                 ('smooth_or_featured_smooth',
@@ -270,8 +282,13 @@ def load_catalog_properties(h5_path, rows, galaxy_ids, archive_redshift=None):
         for key, (numerator, answers) in zoo_questions.items():
             values = _dirichlet_fraction(source, rows, numerator, answers)
             if values is not None:
+                if key in ('zoobot_smooth_probability', 'zoobot_featured_probability') and not np.any(np.isfinite(values)):
+                    continue
                 properties[key] = values
-                sources[key] = 'derived from MER ZooBot Dirichlet concentrations'
+                sources[key] = (
+                    'derived from MER ZooBot Dirichlet concentrations; '
+                    + 'denominator=' + '+'.join(answers)
+                )
         properties.update(_sfh_properties(source, rows))
         sources.update({key: 'derived from sfh' for key in properties if key.startswith('sfh_')})
 
@@ -322,6 +339,8 @@ def property_specs(properties):
         'etg_or_ltg': ('MER ETG/LTG score', 'coolwarm'),
         'major_merger_probability': ('Major-merger probability', 'magma'),
         'zoobot_smooth_probability': ('ZooBot P(smooth)', 'viridis'),
+        'zoobot_smooth_conditional_fraction': ('Smooth fraction (smooth + featured)', 'viridis'),
+        'zoobot_featured_conditional_fraction': ('Featured fraction (smooth + featured)', 'viridis'),
         'zoobot_featured_probability': ('ZooBot P(featured/disk)', 'viridis'),
         'zoobot_edge_on_probability': ('ZooBot P(edge-on)', 'magma'),
         'zoobot_spiral_probability': ('ZooBot P(spiral arms)', 'magma'),

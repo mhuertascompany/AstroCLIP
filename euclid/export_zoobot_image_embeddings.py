@@ -41,6 +41,7 @@ MORPHOLOGY_KEYS = [
     'concentration', 'asymmetry', 'smoothness', 'gini', 'moment_20',
     't_type', 'etg_or_ltg', 'major_merger_probability',
     'zoobot_smooth_probability', 'zoobot_featured_probability',
+    'zoobot_smooth_conditional_fraction', 'zoobot_featured_conditional_fraction',
     'zoobot_edge_on_probability', 'zoobot_spiral_probability',
     'zoobot_bar_probability', 'zoobot_merger_probability',
     'sersic_index', 'sersic_radius', 'axis_ratio', 'ellipticity',
@@ -153,22 +154,27 @@ def encode_stamps(model, loader, device):
 
 
 def write_diagnostic_products(dataset_path, output_dir, galaxy_ids, rows,
-                              embedding, coordinates):
+                              embedding, coordinates, require_zoobot=False):
     """Attach current HDF5 metadata and write image-only NPZ/PDF/CSV products."""
     output_dir = Path(output_dir)
     properties, sources = load_catalog_properties(
         dataset_path, rows, galaxy_ids,
     )
     specs = property_specs(properties)
-    available_zoobot = [key for key in ZOOBOT_KEYS if key in specs]
+    available_zoobot = [
+        key for key in ZOOBOT_KEYS
+        if key in specs and np.any(np.isfinite(properties[key]))
+    ]
     if not available_zoobot:
-        log.warning(
+        message = (
             'No MER ZooBot question columns are present in %s. The PDF will '
             'contain structural measurements only. Add the detailed MER '
             'catalog with euclid.restore_morphology_metadata, then run '
-            'euclid.refresh_zoobot_image_diagnostics.',
-            dataset_path,
+            'euclid.refresh_zoobot_image_diagnostics.'
         )
+        if require_zoobot:
+            raise ValueError(message % dataset_path)
+        log.warning(message, dataset_path)
     else:
         log.info('Loaded MER ZooBot properties: %s', ', '.join(available_zoobot))
 

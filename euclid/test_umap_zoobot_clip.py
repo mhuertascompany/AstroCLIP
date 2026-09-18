@@ -10,10 +10,31 @@ from euclid.umap_zoobot_clip import (
     _normalize_rows,
     _sfh_properties,
     load_embeddings,
+    load_catalog_properties,
 )
 
 
 class EuclidUmapDiagnosticsTests(unittest.TestCase):
+    def test_conditional_fractions_with_missing_artifact_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'metadata.h5'
+            with h5py.File(path, 'w') as target:
+                target['galaxy_id'] = np.arange(5)
+                target['sfh'] = np.full((5, 4), np.log10(0.25))
+                target['sfh_time_grid'] = np.linspace(0, 1, 4)
+                target['smooth_or_featured_smooth'] = [3, 0, np.nan, 0, -1]
+                target['smooth_or_featured_featured_or_disk'] = [1, 2, 1, 0, 2]
+                target['smooth_or_featured_artifact_star_zoom'] = [np.nan] * 5
+            props, sources = load_catalog_properties(path, np.arange(5), np.arange(5))
+            smooth = props['zoobot_smooth_conditional_fraction']
+            featured = props['zoobot_featured_conditional_fraction']
+            np.testing.assert_allclose(smooth[:2], [0.75, 0])
+            np.testing.assert_allclose(featured[:2], [0.25, 1])
+            self.assertTrue(np.all(np.isnan(smooth[2:])))
+            self.assertTrue(np.all(np.isnan(featured[2:])))
+            self.assertNotIn('zoobot_smooth_probability', props)
+            self.assertNotIn('artifact', sources['zoobot_smooth_conditional_fraction'])
+
     def test_normalize_rows(self):
         values = _normalize_rows([[3.0, 4.0], [0.0, 2.0]])
         np.testing.assert_allclose(np.linalg.norm(values, axis=1), 1.0)

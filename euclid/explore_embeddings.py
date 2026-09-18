@@ -81,6 +81,8 @@ _PROPERTY_LABELS = {
     'etg_or_ltg': 'MER ETG/LTG score',
     'major_merger_probability': 'Major-merger probability',
     'zoobot_smooth_probability': 'ZooBot P(smooth)',
+    'zoobot_smooth_conditional_fraction': 'Smooth fraction (smooth + featured)',
+    'zoobot_featured_conditional_fraction': 'Featured fraction (smooth + featured)',
     'zoobot_featured_probability': 'ZooBot P(featured/disk)',
     'zoobot_edge_on_probability': 'ZooBot P(edge-on)',
     'zoobot_spiral_probability': 'ZooBot P(spiral arms)',
