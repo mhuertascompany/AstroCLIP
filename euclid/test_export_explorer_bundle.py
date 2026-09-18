@@ -11,6 +11,42 @@ from euclid.export_explorer_bundle import export_bundle
 
 
 class ExportExplorerBundleTest(unittest.TestCase):
+    def test_accepts_image_only_umap_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / 'sfh_clip.h5'
+            stamp_dir = root / 'stamps' / 'VIS'
+            stamp_dir.mkdir(parents=True)
+            with h5py.File(dataset, 'w') as target:
+                target['galaxy_id'] = [201, 202]
+                target['sfh'] = np.zeros((2, 4), dtype=np.float32)
+                target['sfh_p16'] = np.zeros((2, 4), dtype=np.float32)
+                target['sfh_p84'] = np.zeros((2, 4), dtype=np.float32)
+                target['redshift'] = [0.4, 0.8]
+                target['sfh_time_grid'] = np.linspace(0, 1, 4)
+            for galaxy_id in (201, 202):
+                (stamp_dir / f'VIS_{galaxy_id}.jpg').write_bytes(b'jpeg')
+            image_umap = root / 'zoobot_image_umap.npz'
+            np.savez_compressed(
+                image_umap,
+                galaxy_id=np.array([201, 202]),
+                h5_row=np.array([0, 1]),
+                xy_image=np.zeros((2, 2), dtype=np.float32),
+                image_embedding=np.eye(2, dtype=np.float32),
+                vis_magnitude=np.array([20.5, 21.0], dtype=np.float32),
+            )
+
+            output = root / 'bundle'
+            manifest = export_bundle(
+                dataset, stamp_dir.parent, [image_umap], output,
+            )
+
+            self.assertEqual(manifest['n_galaxies'], 2)
+            with np.load(output / manifest['umap_archives'][0]) as archive:
+                self.assertIn('xy_image', archive.files)
+                self.assertIn('image_embedding', archive.files)
+                self.assertNotIn('sfh_embedding', archive.files)
+
     def test_aligns_runs_and_adds_full_embeddings(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

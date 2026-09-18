@@ -888,6 +888,101 @@ SFH preprocessing, Datalabs cutout extraction, ZooBot JPEG conversion, and
 train/validation split; do not mix its products with the original random 100k
 directory.
 
+### Inspect the pretrained ZooBot image space before alignment
+
+For the VIS<22 bright sample, first check whether the pretrained Euclid ZooBot
+backbone itself organizes the galaxies by morphology. The image-only exporter
+uses the raw frozen backbone output from
+`hf_hub:mwalmsley/zoobot-encoder-euclid`, before AstroCLIP's randomly
+initialized projection head. It L2-normalizes those features, fits a cosine
+UMAP, and carries the morphology, photometry, redshift, stellar mass, and SFH
+summary fields into the output archive.
+
+After transferring the completed Datalabs cutout run to Candide, make the
+size-rescaled 224-pixel JPEGs on a regular CPU node:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+
+sbatch euclid/slurm_prepare_zoobot_cutouts_100k.sh \
+  "${BASE}/cutouts_run" \
+  "${BASE}/cutouts_run/morphology_catalog.fits" \
+  "${BASE}/zoobot_stamps_rmax"
+```
+
+The detailed MER ZooBot fields must first be present in the preprocessed HDF5.
+The cutout run's `morphology_catalog.fits` supplies the size metadata used to
+make the JPEGs; fetch the richer morphology table in Datalabs with:
+
+```bash
+/opt/miniforge/envs/euclid-tools/bin/python -m euclid.fetch_mer_zoobot_morphology \
+  --sample /home/mhuertas/my_workspace/<bright-run>/catalog_bright.fits \
+  --output /home/mhuertas/my_workspace/<bright-run>/mer_zoobot_morphology_deep.fits \
+  --resume
+```
+
+Transfer that FITS file with the cutouts. Restore all metadata after no other
+job is writing the HDF5:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+
+python -m euclid.restore_morphology_metadata \
+  --dataset "${BASE}/sfh_clip_150k.h5" \
+  --catalog "${BASE}/catalog_bright.fits" \
+  --catalog "${BASE}/cutouts_run/morphology_catalog.fits" \
+  --catalog "${BASE}/mer_zoobot_morphology_deep.fits" \
+  --allow-missing
+```
+
+Then export a reproducible 30,000-object subset on the n36 GPU node:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+
+sbatch euclid/slurm_export_zoobot_image_embeddings.sh \
+  "${BASE}/sfh_clip_150k.h5" \
+  "${BASE}/zoobot_stamps_rmax" \
+  "${BASE}/zoobot_image_embedding_30k" \
+  30000
+```
+
+Thirty thousand objects give a dense morphology map while keeping the local
+stamp bundle manageable. Pass `0` as the last argument to encode every matched
+stamp. The output contains `zoobot_image_umap.npz`, a static diagnostic PDF,
+the scalar-property table, and a provenance manifest.
+
+After that job finishes, package the same objects and their SFHs and JPEGs on a
+regular CPU node:
+
+```bash
+sbatch euclid/slurm_export_zoobot_image_explorer.sh
+```
+
+Download
+`/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/explorer_zoobot_image_30k`,
+extract its stamps, and launch the local explorer from the repository root:
+
+```bash
+cd /Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_zoobot_image_30k
+tar -xf VIS_stamps.tar
+
+cd /Users/marchuertascompany/Documents/teaching/2025_astroinfo/AstroCLIP
+python -m euclid.explore_embeddings \
+  --h5 /Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_zoobot_image_30k/euclid_explorer.h5 \
+  --stamps /Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_zoobot_image_30k/VIS \
+  --umap /Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_zoobot_image_30k/00_zoobot_image_embedding_30k_zoobot_image_umap.npz \
+  --label 'pretrained Euclid ZooBot backbone'
+```
+
+The strongest evidence for a useful image representation is coherent variation
+in independent morphology quantities such as concentration, asymmetry, Gini,
+M20, Sérsic index, and axis ratio. The MER ZooBot class probabilities are a
+useful consistency check but are less independent of the encoder. Also inspect
+VIS magnitude, redshift, size, and point-like probability: if those dominate
+the map while morphology is mixed, the encoder is mostly organizing image
+quality or angular scale rather than galaxy structure.
+
 ### Interactive Euclid embedding explorer
 
 `euclid.explore_embeddings` adapts the COSMOS-Web Panel application to the

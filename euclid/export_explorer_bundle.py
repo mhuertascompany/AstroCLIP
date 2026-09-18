@@ -29,10 +29,18 @@ def _read_rows(dataset, rows):
 
 def _load_archive(path):
     with np.load(path) as archive:
-        required = {'galaxy_id', 'h5_row', 'xy_image', 'xy_sfh', 'xy_joint'}
+        required = {'galaxy_id', 'h5_row'}
         missing = sorted(required.difference(archive.files))
         if missing:
             raise ValueError(f'Missing arrays in {path}: {missing}')
+        coordinate_keys = {
+            'xy_image', 'xy_sfh', 'xy_joint', 'xy_sfh_preprojection',
+            'xy_shared_image', 'xy_shared_sfh',
+        }
+        if coordinate_keys.isdisjoint(archive.files):
+            raise ValueError(
+                f'{path} contains none of the supported UMAP coordinate arrays.'
+            )
         ids = np.asarray(archive['galaxy_id'], dtype=np.int64)
         rows = np.asarray(archive['h5_row'], dtype=np.int64)
     if ids.ndim != 1 or rows.shape != ids.shape:
@@ -57,7 +65,11 @@ def _common_ids(archives):
 
 
 def _unique_archive_name(path, index):
-    run = path.parent.parent.name if path.parent.parent.name else path.parent.name
+    run = (
+        path.parent.parent.name
+        if path.parent.name.startswith('evaluation_')
+        else path.parent.name
+    )
     return f'{index:02d}_{run}_{path.name}'
 
 
@@ -67,9 +79,11 @@ def _copy_umap_with_embeddings(source_path, destination):
         output = {key: np.asarray(archive[key]) for key in archive.files}
     added = []
     embeddings_path = source_path.parent / 'validation_embeddings.npz'
-    if embeddings_path.is_file() and not {
-        'image_embedding', 'sfh_embedding',
-    }.issubset(output):
+    if (
+        embeddings_path.is_file()
+        and 'image_embedding' not in output
+        and 'sfh_embedding' not in output
+    ):
         with np.load(embeddings_path) as embeddings:
             required = {'galaxy_id', 'image_embedding', 'sfh_embedding'}
             missing = sorted(required.difference(embeddings.files))

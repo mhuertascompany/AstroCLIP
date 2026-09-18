@@ -169,14 +169,22 @@ def load_rank_properties(path, galaxy_ids):
     }
 
 
-def load_properties(h5_path, rows, galaxy_ids, archive_redshift,
-                    image_embedding, sfh_embedding, ranks_path=None):
-    properties = {'redshift': archive_redshift.astype(np.float32)}
-    sources = {'redshift': 'validation_embeddings.npz'}
+def load_catalog_properties(h5_path, rows, galaxy_ids, archive_redshift=None):
+    """Load physical, morphology, and SFH-shape properties for HDF5 rows."""
+    properties = {}
+    sources = {}
+    if archive_redshift is not None:
+        properties['redshift'] = np.asarray(archive_redshift, dtype=np.float32)
+        sources['redshift'] = 'embedding archive'
     with h5py.File(h5_path, 'r') as source:
         h5_ids = _read_rows(source['galaxy_id'], rows).astype(np.int64)
         if not np.array_equal(h5_ids, galaxy_ids):
             raise ValueError('Embedding IDs do not match the requested HDF5 rows.')
+        if 'redshift' not in properties and 'redshift' in source:
+            properties['redshift'] = _read_rows(
+                source['redshift'], rows,
+            ).astype(np.float32)
+            sources['redshift'] = 'redshift'
         catalog_specs = {
             'log_stellar_mass': (
                 ['phz_pp_median_stellarmass'], lambda x: (x > 0) & (x < 20),
@@ -266,6 +274,15 @@ def load_properties(h5_path, rows, galaxy_ids, archive_redshift,
                 sources[key] = 'derived from MER ZooBot Dirichlet concentrations'
         properties.update(_sfh_properties(source, rows))
         sources.update({key: 'derived from sfh' for key in properties if key.startswith('sfh_')})
+
+    return properties, sources
+
+
+def load_properties(h5_path, rows, galaxy_ids, archive_redshift,
+                    image_embedding, sfh_embedding, ranks_path=None):
+    properties, sources = load_catalog_properties(
+        h5_path, rows, galaxy_ids, archive_redshift,
+    )
 
     properties['paired_cosine'] = np.sum(
         image_embedding * sfh_embedding, axis=1,
