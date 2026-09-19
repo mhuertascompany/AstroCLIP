@@ -1043,6 +1043,35 @@ quality or angular scale rather than galaxy structure.
 
 ### Interactive Euclid embedding explorer
 
+Recent SFH activity is computed locally for existing bundles at startup:
+
+- **Recent SFR / lifetime mean (latest 10%)**: mass fraction in fractional
+  lookback [0, 0.1], divided by 0.1. A constant SFR over the full available
+  cosmic time has value 1.
+- **log10 recent SFR / formed mass (yr⁻¹; floor −15)**: the same fraction divided by
+  `0.1 * sfh_time_norm * 1e6`, using the stored age of the Universe in Myr.
+  Displayed as log10, with rates at or below 1e-15/yr shown at −15 so
+  zero-rate galaxies remain selectable. Missing values remain NaN.
+  This is not SFR per surviving stellar mass, and is only available when the
+  bundle contains `sfh_time_norm`. The physical averaging window varies with z.
+- **Recent SFH trend (+ rising, - declining)**: `(R-P)/(R+P)`, where R and P
+  are average SFRs over fractional lookback [0, 0.1] and [0.1, 0.2]. Positive
+  values indicate rising activity toward observation; negative values indicate
+  declining activity. Both zero gives NaN. This bounded contrast is a trend
+  indicator, not a derivative or a claim of monotonic evolution.
+
+These summaries integrate fractional bin overlaps using the preprocessing
+bin edges. They describe the median SFH; posterior uncertainties are not
+propagated into these scalar colors. Restart the explorer to load them.
+
+The color/filter property **SFH duration: central 80% (fractional time)**
+measures Q90 minus Q10 of cumulative normalized SFH mass in increasing
+fractional lookback time. Small values indicate concentrated histories;
+large values indicate mass formed across a longer interval, including separated
+episodes. It is not a measure of continuous activity. Quantiles use bin centers
+and therefore have grid-limited precision. The explorer computes this from
+the median SFHs in existing local bundles at startup; no new export is needed.
+
 #### Bright frozen-MLP best checkpoint
 
 Export the completed bright run on Candide with:
@@ -1194,3 +1223,90 @@ python -m euclid.explore_embeddings \
   --label 'exact-pair 100k' \
   --label 'soft-W1 100k'
 ```
+
+### 224×224 pixel diffusion conditioned on aligned SFHs
+
+This separate experiment trains a grayscale pixel-space diffusion model on
+`zoobot_stamps_rmax/VIS`, conditioned on the **normalized SFH embedding after
+its learned CLIP adapter** from the best bright frozen-MLP checkpoint (epoch
+20, validation loss 4.2759). The condition encoder is frozen and evaluated once;
+no CLIP or SFH autoencoder weights are changed by diffusion training.
+
+The cache preserves the exact CLIP `pair_split.npz` train/validation membership
+and records checkpoint and split SHA256 hashes. Training uses the complete
+paired bright sample, not the 30k visualization selection. As with the CLIP
+experiment, this is an exploratory validation split; the SFH autoencoder was
+pretrained on the older sample, which may overlap it.
+
+The U-Net has widths 32/64/96/128/128 across resolutions
+224/112/56/28/14. Timestep and SFH embeddings modulate residual blocks; spatial
+attention runs only at 14×14. Inputs are the existing grayscale JPEG intensities
+scaled to [-1,1], with only right-angle rotations and reflections for training.
+There is no resizing, image autoencoder, flux calibration, or size restoration.
+The output describes the processed stamps, not physical flux or angular size.
+
+Training uses a 1,000-step cosine schedule with zero terminal signal, velocity
+prediction, 15% condition dropout, AdamW at 1e-4, and EMA decay 0.999. Sampling
+uses deterministic DDIM with guidance. See the
+[DDIM scheduler reference](https://huggingface.co/docs/diffusers/api/schedulers/ddim)
+for velocity prediction and the sampling conventions. This implementation
+uses PyTorch directly and needs no new diffusion library in `cosmos_visual`.
+
+From the repository root on Candide, after syncing the new code, first create
+the condition cache and queue a dependent GPU smoke test:
+
+```bash
+CONDITION_JOB=$(sbatch --parsable euclid/slurm_prepare_diffusion_conditions.sh)
+sbatch --dependency=afterok:${CONDITION_JOB} --time=01:00:00 \
+  euclid/slurm_train_pixel_diffusion.sh smoke 8
+```
+
+Both jobs use one GPU on n36/pscomp. The cache is
+`edfn_vislt22p0_150000/diffusion_conditions_aligned_best.npz`; create it only
+once. The smoke run uses 256 training and 64 validation objects for two epochs,
+**at full 224×224 resolution**, batch size 8 and gradient accumulation 4.
+Its output is `edfn_vislt22p0_150000/pixel_diffusion_aligned_smoke` under
+`/n03data/huertas/euclid/sfh_clip`. Inspect:
+
+- `runtime.json`: elapsed training/validation time, optimizer steps, peak CUDA
+  allocated memory, and best checkpoint. Use this to budget the full run.
+- `logs/version_0/metrics.csv`: training velocity MSE and EMA validation MSE
+  with correct, shuffled, and absent conditions. Validation uses fixed noise
+  and timesteps each epoch. These losses are not CLIP losses or image-quality
+  scores; small condition-dependent differences are possible early on.
+- `samples_best/conditioning_comparison.png`: each column uses the same initial
+  noise across generated rows. Rows are real stamp, conditional guidance=1,
+  conditional guidance=2, shuffled guidance=2, and unconditional. The accompanying
+  `samples.json` records IDs, shuffled IDs and seeds. Two-epoch smoke images
+  are a pipeline check, not a useful trained generator.
+
+After confirming memory and throughput, launch the full run from scratch:
+
+```bash
+sbatch euclid/slurm_train_pixel_diffusion.sh full 8
+```
+
+This runs up to 100 epochs in `pixel_diffusion_aligned_full`, with previews
+for fixed validation objects every five epochs, best/last checkpoints, and
+final best-checkpoint samples. The 24-hour allocation may not finish 100
+full-resolution epochs; it is an initial resource budget. To resume from the
+last completed validation checkpoint (optimizer and EMA included):
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+sbatch euclid/slurm_train_pixel_diffusion.sh full 8 \
+  "${BASE}/pixel_diffusion_aligned_full/checkpoints/last.ckpt"
+```
+
+Resuming verifies the condition-cache hash. New runs refuse nonempty output
+directories. For a failed smoke retry with a different batch size, use the
+module's `--output` option with a fresh directory, or preserve/rename the prior
+smoke output before resubmitting. If memory is tight, reduce batch size to 4;
+the default effective batch then becomes 16 instead of 32.
+
+For additional samples, run `python -m euclid.train_pixel_diffusion` in a GPU
+allocation with `--conditions`, `--stamps`, a fresh `--output`, and
+`--sample-checkpoint /path/to/best.ckpt --sample-steps 100`. This loads EMA
+weights and generates the same comparison grid without training. Check
+condition sensitivity across many seeds and SFH groups before interpreting
+morphology trends; the same-noise grid is only an initial diagnostic.

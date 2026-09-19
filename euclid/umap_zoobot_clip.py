@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 from .vis_selection import flux_ujy_to_ab_magnitude
+from .sfh_shape import sfh_duration_80, sfh_recent_activity
 
 
 log = logging.getLogger(__name__)
@@ -137,11 +138,14 @@ def _sfh_properties(source, rows):
     ) / np.log(weights.shape[1])
     log_old_recent = np.log10((old_20 + epsilon) / (recent_20 + epsilon))
     return {
+        **sfh_recent_activity(log_sfh, time, epsilon,
+            _read_rows(source['sfh_time_norm'], rows) if 'sfh_time_norm' in source else None),
         'sfh_recent_10': recent_10.astype(np.float32),
         'sfh_recent_20': recent_20.astype(np.float32),
         'sfh_old_20': old_20.astype(np.float32),
         'sfh_mean_lookback': mean_lookback.astype(np.float32),
         'sfh_peak_lookback': peak_lookback.astype(np.float32),
+        'sfh_duration_80': sfh_duration_80(log_sfh, time, epsilon),
         'sfh_t50_lookback': t50_lookback.astype(np.float32),
         'sfh_entropy': entropy.astype(np.float32),
         'sfh_log_old_recent': log_old_recent.astype(np.float32),
@@ -351,6 +355,10 @@ def property_specs(properties):
         'sfh_old_20': ('SFH fraction: oldest 20%', 'cividis'),
         'sfh_mean_lookback': ('Mean fractional lookback time', 'plasma'),
         'sfh_peak_lookback': ('Peak fractional lookback time', 'plasma'),
+        'sfh_recent_birthrate': ('Recent SFR / lifetime mean (latest 10%)', 'viridis'),
+        'sfh_recent_trend': ('Recent SFH trend (+ rising, - declining)', 'coolwarm'),
+        'sfh_log_recent_sfr_per_formed_mass': ('log10 recent SFR / formed mass (yr⁻¹; floor −15)', 'viridis'),
+        'sfh_duration_80': ('SFH duration: central 80% (fractional time)', 'viridis'),
         'sfh_t50_lookback': ('SFH t50 fractional lookback', 'plasma'),
         'sfh_entropy': ('Normalized SFH entropy', 'viridis'),
         'sfh_log_old_recent': ('log(old 20% / recent 20%)', 'coolwarm'),
@@ -602,8 +610,9 @@ def main():
         'ellipticity', 'segmentation_area',
     ]
     physical_keys = [
+        'sfh_recent_birthrate', 'sfh_recent_trend', 'sfh_log_recent_sfr_per_formed_mass',
         'redshift', 'log_stellar_mass', 'sfh_recent_10', 'sfh_recent_20',
-        'sfh_old_20', 'sfh_mean_lookback', 'sfh_peak_lookback',
+        'sfh_old_20', 'sfh_mean_lookback', 'sfh_peak_lookback', 'sfh_duration_80',
         'sfh_t50_lookback', 'sfh_entropy', 'sfh_log_old_recent',
     ]
     alignment_keys = [

@@ -52,6 +52,8 @@ CONFOUNDER_KEYS = [
     'point_like_probability',
 ]
 SFH_KEYS = [
+    'sfh_recent_birthrate', 'sfh_recent_trend', 'sfh_log_recent_sfr_per_formed_mass',
+    'sfh_duration_80',
     'sfh_recent_10', 'sfh_recent_20', 'sfh_old_20',
     'sfh_mean_lookback', 'sfh_peak_lookback', 'sfh_t50_lookback',
     'sfh_entropy', 'sfh_log_old_recent',

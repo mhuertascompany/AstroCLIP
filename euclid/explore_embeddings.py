@@ -34,6 +34,7 @@ from PIL import Image
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import panel as pn
+from euclid.sfh_shape import sfh_duration_80, sfh_recent_activity
 from bokeh.models import (
     BasicTicker,
     BooleanFilter,
@@ -93,6 +94,10 @@ _PROPERTY_LABELS = {
     'sfh_old_20': 'SFH fraction: oldest 20%',
     'sfh_mean_lookback': 'Mean fractional lookback time',
     'sfh_peak_lookback': 'Peak fractional lookback time',
+    'sfh_recent_birthrate': 'Recent SFR / lifetime mean (latest 10%)',
+    'sfh_recent_trend': 'Recent SFH trend (+ rising, - declining)',
+    'sfh_log_recent_sfr_per_formed_mass': 'log10 recent SFR / formed mass (yr⁻¹; floor −15)',
+    'sfh_duration_80': 'SFH duration: central 80% (fractional time)',
     'sfh_t50_lookback': 'SFH t50 fractional lookback',
     'sfh_entropy': 'Normalized SFH entropy',
     'sfh_log_old_recent': 'log(old 20% / recent 20%)',
@@ -211,6 +216,8 @@ def _load_archive(path):
 
         properties = {}
         for key in archive.files:
+            if key == 'sfh_recent_sfr_per_formed_mass':
+                continue  # Recomputed below as a logarithmic display property.
             if key in _ARCHIVE_RESERVED:
                 continue
             values = np.asarray(archive[key])
@@ -248,6 +255,15 @@ def load_data(h5_path, archive_paths, labels=None):
             _read_rows(source['source_h5_row'], h5_rows).astype(np.int64)
             if 'source_h5_row' in source else h5_rows.copy()
         )
+        duration = sfh_duration_80(
+            _read_rows(source['sfh'], h5_rows), source['sfh_time_grid'][:],
+            float(source.attrs.get('sfh_log_epsilon', 1e-10)),
+        )
+        activity = sfh_recent_activity(
+            _read_rows(source['sfh'], h5_rows), source['sfh_time_grid'][:],
+            float(source.attrs.get('sfh_log_epsilon', 1e-10)),
+            _read_rows(source['sfh_time_norm'], h5_rows) if 'sfh_time_norm' in source else None,
+        )
     runs = {}
     used_labels = set()
     for index, (path, (ids, coordinates, embeddings, properties)) in enumerate(
@@ -274,6 +290,8 @@ def load_data(h5_path, archive_paths, labels=None):
             },
             'path': path,
         }
+        runs[label]['properties'][_PROPERTY_LABELS['sfh_duration_80']] = duration
+        runs[label]['properties'].update({_PROPERTY_LABELS[k]: v for k, v in activity.items() if k in _PROPERTY_LABELS})
 
     first_properties = next(iter(runs.values()))['properties']
     redshift = first_properties.get('Redshift z')
@@ -321,7 +339,8 @@ def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
             time, reconstruction, color='darkorange', linewidth=1.0,
             linestyle='--', label='decoder reconstruction',
         )
-    ax.set_yscale('log')
+    ax.set_yscale('linear')
+    ax.set_ylim(bottom=0)
     ax.set_xlim(float(time.min()), float(time.max()))
     ax.set_xlabel('Fractional lookback time', fontsize=5)
     ax.set_ylabel('Normalized SFH weight', fontsize=5)
@@ -426,7 +445,8 @@ def _population_sfh(h5_path, rows):
             time, np.median(reconstruction, axis=0), color='darkorange',
             linewidth=1.2, linestyle='--', label='median reconstruction',
         )
-    axis.set_yscale('log')
+    axis.set_yscale('linear')
+    axis.set_ylim(bottom=0)
     axis.set_xlim(float(time.min()), float(time.max()))
     axis.set_xlabel('Fractional lookback time', fontsize=8)
     axis.set_ylabel('Normalized SFH weight', fontsize=8)
@@ -543,15 +563,21 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             x_field, y_field, source=source, view=view,
             color={'field': color_field, 'transform': mapper},
             size=3, alpha=0.72, line_width=0,
-            selection_color='white', selection_alpha=1,
-            nonselection_alpha=0.1,
+            selection_fill_color={'field': color_field, 'transform': mapper},
+            selection_alpha=1,
+            selection_line_color='#222222', selection_line_width=0.6,
+            nonselection_alpha=0.72,
         )
         dynamic = plot.scatter(
             x_field, y_field, source=source, view=view,
             fill_color='dynamic_color', size=3, alpha=0.8, line_width=0,
-            selection_fill_color='white', selection_alpha=1,
-            nonselection_alpha=0.12, visible=False,
+            selection_fill_color='dynamic_color', selection_alpha=1,
+            selection_line_color='#222222',
+            selection_line_width=0.6,
+            nonselection_alpha=0.8, visible=False,
         )
+        continuous.selection_glyph.size = 4
+        dynamic.selection_glyph.size = 4
         plot.add_layout(ColorBar(
             color_mapper=mapper, ticker=BasicTicker(), label_standoff=8,
             width=12, location=(0, 0),
