@@ -1310,3 +1310,31 @@ allocation with `--conditions`, `--stamps`, a fresh `--output`, and
 weights and generates the same comparison grid without training. Check
 condition sensitivity across many seeds and SFH groups before interpreting
 morphology trends; the same-noise grid is only an initial diagnostic.
+
+### Diffusion comparison with contrasting SFHs
+
+From the Candide repository root, submit:
+
+```bash
+sbatch euclid/slurm_sample_diffusion_sfh_extremes.sh
+```
+
+This uses a snapshot of `pixel_diffusion_aligned_full/checkpoints/last.ckpt`
+on n36/pscomp. An optional first argument selects another checkpoint; an
+optional second argument sets a new output directory. Defaults save to
+`pixel_diffusion_aligned_full/sfh_extremes_<jobid>/`.
+
+Two validation galaxies are selected reproducibly (seed 42): one with log
+recent SFR per formed mass < -11.5, and one with recent SFH trend > 0.15 and
+log recent rate >= -11.5. The additional rate cut prevents selecting two
+nearly inactive galaxies. These are the explorer's definitions: recent means
+fractional lookback time 0–0.1, and the rate denominator is total formed mass,
+not surviving stellar mass. This is not an instantaneous physical sSFR cut.
+
+`selected_sfhs.png` shows linear SFHs and observed stamps. The generated
+`sfh_extremes_comparison.png` compares eight fixed noise seeds across five
+labeled rows: low-rate and rising SFHs at guidance 1, the same pair at
+guidance 2, then unconditional generation. All generations use EMA weights
+and 100 DDIM steps. `selection.json` records IDs, selection values, candidate
+counts, seeds, and checkpoint/cache hashes. A pair illustrates sensitivity;
+it is not a population-level test of the morphology–SFH relation.
