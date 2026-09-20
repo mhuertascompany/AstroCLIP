@@ -30,10 +30,18 @@ import h5py
 import matplotlib
 import numpy as np
 from PIL import Image
+from euclid.cosmic_sfh import COSMOLOGY as _SFH_COSMOLOGY, cosmic_sfh_weights
+from matplotlib.ticker import MaxNLocator
+
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import panel as pn
+from bokeh.events import Tap
+from bokeh.models import LabelSet
+from euclid.umap_path import sample_segment
+from euclid.rejuvenation import catalog_diagnostics, LABELS as REJ_LABELS
+from euclid.main_sequence_sfh import main_sequence_along_sfh
 from euclid.sfh_shape import sfh_duration_80, sfh_recent_activity
 from bokeh.models import (
     BasicTicker,
@@ -326,7 +334,8 @@ def _linear_sfh(log_sfh, epsilon):
 
 
 def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
-                reconstruction=None):
+                reconstruction=None, redshift=None, time_norm_myr=None, cosmic_reference=False,
+                ms_reference=False, log_mass=np.nan, return_fraction=.4, mass_offset=0., rejuvenation=None):
     median = _linear_sfh(median_log, epsilon)
     if p16_log is not None and p84_log is not None:
         lower = np.maximum(10.0 ** p16_log - epsilon, epsilon)
@@ -339,12 +348,48 @@ def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
             time, reconstruction, color='darkorange', linewidth=1.0,
             linestyle='--', label='decoder reconstruction',
         )
+    if cosmic_reference and redshift is not None:
+        reference = cosmic_sfh_weights(time, redshift, time_norm_myr)
+        if np.isfinite(reference).all():
+            ax.plot(time, reference, color='#7b3294', linestyle='--',
+                    linewidth=1.0, label='Cosmic SFH (MD14), normalized')
+    if ms_reference and redshift is not None:
+        track = main_sequence_along_sfh(time, median_log, redshift, log_mass,
+                                        time_norm_myr, return_fraction, mass_offset, epsilon)
+        reference = track['weights']
+        if np.isfinite(reference).any():
+            ax.plot(time, reference, color='#238b45', linestyle=':', linewidth=1,
+                    label='MS at inferred mass: extrapolated')
+            ax.plot(time, np.where(track['supported'], reference, np.nan),
+                    color='#238b45', linestyle='--', linewidth=1.2,
+                    label='MS at inferred mass: conservative domain')
+            ax.text(.02, .96, f'MS log M★={log_mass + mass_offset:.2f}',
+                    transform=ax.transAxes, va='top', fontsize=4, color='#238b45')
+        else:
+            ax.text(.02, .96, 'MS reference unavailable (mass/z)',
+                    transform=ax.transAxes, va='top', fontsize=4, color='#238b45')
+    if rejuvenation is not None:
+        start, width, recent_width = rejuvenation
+        ax.axvspan(0, recent_width, color='#e6ab02', alpha=.15)
+        ax.axvspan(start, start+width, color='gray', alpha=.2)
+        ax.text(.98, .02, 'Rejuvenation candidate', transform=ax.transAxes,
+                ha='right', fontsize=4, color='#996600')
     ax.set_yscale('linear')
     ax.set_ylim(bottom=0)
     ax.set_xlim(float(time.min()), float(time.max()))
     ax.set_xlabel('Fractional lookback time', fontsize=5)
     ax.set_ylabel('Normalized SFH weight', fontsize=5)
     ax.tick_params(labelsize=5)
+    if redshift is not None and np.isfinite(redshift) and redshift >= 0:
+        age = (float(time_norm_myr) / 1000 if time_norm_myr is not None
+               else float(_SFH_COSMOLOGY.age(redshift).value))
+        if np.isfinite(age) and age > 0:
+            top = ax.secondary_xaxis(
+                'top', functions=(lambda fraction: age * fraction,
+                                  lambda lookback: lookback / age))
+            top.set_xlabel('Time before observation [Gyr]', fontsize=5, labelpad=2)
+            top.xaxis.set_major_locator(MaxNLocator(nbins=3))
+            top.tick_params(labelsize=5, pad=1)
 
 
 def _fig_to_html(fig):
@@ -358,13 +403,19 @@ def _fig_to_html(fig):
     )
 
 
-def _gallery(h5_path, stamp_dir, selected, data, rng, band):
+def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmic_reference=False,
+             ms_reference=False, return_fraction=.4, mass_offset=0.):
     n = min(N_DISPLAY, len(selected))
-    shown = np.sort(rng.choice(np.asarray(selected, dtype=int), n, replace=False))
+    shown = (np.asarray(selected, dtype=int)[:n] if ordered else
+             np.sort(rng.choice(np.asarray(selected, dtype=int), n, replace=False)))
     rows = data['h5_rows'][shown]
     ids = data['galaxy_ids'][shown]
     redshift = data['redshift'][shown]
     with h5py.File(h5_path, 'r') as source:
+        masses = (_read_rows(source['phz_pp_median_stellarmass'], rows)
+                  if 'phz_pp_median_stellarmass' in source else
+                  next((run['properties']['log M★'][shown] for run in data['runs'].values()
+                        if 'log M★' in run['properties']), np.full(n, np.nan)))
         median = _read_rows(source['sfh'], rows)
         p16 = _read_rows(source['sfh_p16'], rows) if 'sfh_p16' in source else None
         p84 = _read_rows(source['sfh_p84'], rows) if 'sfh_p84' in source else None
@@ -372,6 +423,8 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band):
             _read_rows(source['sfh_reconstruction'], rows)
             if 'sfh_reconstruction' in source else None
         )
+        time_norm = (_read_rows(source['sfh_time_norm'], rows)
+                     if 'sfh_time_norm' in source else None)
         time = np.asarray(source['sfh_time_grid'][:], dtype=float)
         epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
 
@@ -383,7 +436,7 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band):
     else:
         fig_images, image_axes = None, None
     fig_sfhs, sfh_axes = plt.subplots(
-        nrows, NCOLS, figsize=(NCOLS * 1.9, nrows * 1.7), squeeze=False,
+        nrows, NCOLS, figsize=(NCOLS * 1.9, nrows * 2.15), squeeze=False,
     )
     axes_groups = [sfh_axes.flat]
     if image_axes is not None:
@@ -405,18 +458,28 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band):
                 image_axis.text(0.5, 0.5, 'missing stamp', ha='center', va='center')
             image_axis.set_xticks([])
             image_axis.set_yticks([])
-            image_axis.set_title(f'{int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
+            image_axis.set_title(f'{index + 1}. {int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
 
         sfh_axis = sfh_axes.flat[index]
         sfh_axis.set_visible(True)
+        rejuvenation = None
+        diagnostic = data.get('rejuvenation')
+        if diagnostic is not None and diagnostic['values']['candidate'][shown[index]] == 1:
+            rejuvenation = (diagnostic['values']['lull_start'][shown[index]],
+                            diagnostic['settings']['lull_width'],
+                            diagnostic['settings']['recent_width'])
         _render_sfh(
             sfh_axis, time, median[index],
             p16[index] if p16 is not None else None,
             p84[index] if p84 is not None else None,
             epsilon,
             reconstruction[index] if reconstruction is not None else None,
+            redshift=z, time_norm_myr=time_norm[index] if time_norm is not None else None,
+            cosmic_reference=cosmic_reference, ms_reference=ms_reference,
+            log_mass=masses[index], return_fraction=return_fraction, mass_offset=mass_offset,
+            rejuvenation=rejuvenation,
         )
-        sfh_axis.set_title(f'{int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
+        sfh_axis.set_title(f'{index + 1}. {int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=27)
 
     if fig_images is not None:
         fig_images.tight_layout(pad=0.4)
@@ -701,7 +764,76 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     sfh_pane = pn.pane.HTML(_BLANK_HTML, width=650)
     population_pane = pn.pane.HTML(_BLANK_HTML, width=430)
 
-    def refresh(selected):
+    cosmic_toggle = pn.widgets.Checkbox(name='Cosmic SFH reference (MD14)', value=True)
+    ms_toggle = pn.widgets.Checkbox(name='MS along inferred mass history', value=True)
+    ms_return = pn.widgets.FloatSlider(name='MS returned mass fraction R', start=0., end=.6, step=.05, value=.4)
+    ms_offset = pn.widgets.FloatInput(name='Mass → Kroupa offset (dex)', value=0., step=.01)
+    rej_recent = pn.widgets.FloatInput(name='Recent window Δf', value=.05, step=.01)
+    rej_lull = pn.widgets.FloatInput(name='Lull window Δf', value=.05, step=.01)
+    rej_contrast = pn.widgets.FloatInput(name='Minimum recovery/older contrast', value=5., step=1.)
+    rej_old = pn.widgets.FloatInput(name='Minimum older mass fraction', value=.5, step=.05)
+    rej_mass = pn.widgets.FloatInput(name='Minimum recent mass fraction', value=.01, step=.005)
+    rej_button = pn.widgets.Button(name='Compute rejuvenation', button_type='primary')
+    rej_info = pn.pane.Markdown('Uses fractional time and normalized mass. Compute to add color/filter properties.', width=220)
+    gallery_state = {'rng_before': rng.bit_generator.state}
+    path_mode = pn.widgets.Checkbox(name='Draw line (click start, then end)', value=False)
+    path_count = pn.widgets.IntSlider(name='Samples along line', start=2, end=N_DISPLAY, value=min(12, N_DISPLAY))
+    path_radius = pn.widgets.FloatSlider(name='Max distance (% of UMAP span)', start=0.5, end=20, step=0.5, value=3)
+    path_state = {'start': None, 'side': None, 'indices': ()}
+    path_sources = {}
+    for side, plot in [('left', left_plot), ('right', right_plot)]:
+        line = ColumnDataSource(dict(x=[], y=[]))
+        markers = ColumnDataSource(dict(x=[], y=[], label=[]))
+        plot.line('x', 'y', source=line, line_color='#00a6a6', line_width=3)
+        plot.scatter('x', 'y', source=markers, size=9, fill_alpha=0,
+                     line_color='#00a6a6', line_width=2)
+        plot.add_layout(LabelSet(x='x', y='y', text='label', source=markers,
+                                x_offset=5, y_offset=5, text_color='#008080', text_font_size='10pt'))
+        path_sources[side] = (line, markers)
+
+    def clear_path(event=None):
+        path_state.update(start=None, side=None, indices=())
+        for line, markers in path_sources.values():
+            line.data = dict(x=[], y=[])
+            markers.data = dict(x=[], y=[], label=[])
+
+    def path_tap(side, event):
+        if not path_mode.value:
+            return
+        point = np.array([event.x, event.y], dtype=float)
+        if path_state['start'] is None or path_state['side'] != side:
+            clear_path()
+            path_state.update(start=point, side=side)
+            path_sources[side][0].data = dict(x=[event.x], y=[event.y])
+            info.object = 'Start set. Click the endpoint on the same UMAP.'
+            return
+        start = path_state['start']
+        xy = np.column_stack([source.data[f'x_{side}'], source.data[f'y_{side}']])
+        finite = np.isfinite(xy).all(axis=1)
+        span = np.linalg.norm(np.ptp(xy[finite], axis=0)) if finite.any() else 0
+        try:
+            selected = sample_segment(xy, start, point, path_count.value,
+                                      span * path_radius.value / 100, z_mask & property_mask)
+        except ValueError as error:
+            info.object = str(error)
+            return
+        path_state.update(start=None, indices=tuple(selected))
+        path_sources[side][0].data = dict(x=[start[0], point[0]], y=[start[1], point[1]])
+        path_sources[side][1].data = dict(x=xy[selected, 0].tolist(), y=xy[selected, 1].tolist(),
+                                         label=[str(i + 1) for i in range(len(selected))])
+        source.selected.indices = selected
+        previous_selection[0] = tuple(selected)
+        refresh(selected, ordered=True)
+
+    left_plot.on_event(Tap, lambda event: path_tap('left', event))
+    right_plot.on_event(Tap, lambda event: path_tap('right', event))
+    clear_path_button = pn.widgets.Button(name='Clear line', width=190)
+    clear_path_button.on_click(clear_path)
+    for widget in (left_run, right_run, left_embedding, right_embedding,
+                   redshift_slider, filter_range, path_mode):
+        widget.param.watch(clear_path, 'value')
+
+    def refresh(selected, ordered=False):
         selected = list(selected)
         if not selected:
             info.object = '_No galaxies selected._'
@@ -709,16 +841,58 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             return
         info.object = (
             f'**{len(selected):,}** selected — showing '
-            f'{min(N_DISPLAY, len(selected))} random examples'
+            f'{min(N_DISPLAY, len(selected))} ' + ('examples in line order' if ordered else 'random examples')
         )
+        gallery_state['rng_before'] = rng.bit_generator.state
         image_fig, sfh_fig = _gallery(
-            h5_path, stamp_dir, selected, data, rng, band,
+            h5_path, stamp_dir, selected, data, rng, band, ordered=ordered,
+            cosmic_reference=cosmic_toggle.value, ms_reference=ms_toggle.value,
+            return_fraction=ms_return.value, mass_offset=ms_offset.value,
         )
         if image_fig is not None:
             image_pane.object = _fig_to_html(image_fig)
         sfh_pane.object = _fig_to_html(sfh_fig)
         rows = data['h5_rows'][np.asarray(selected, dtype=int)]
         population_pane.object = _fig_to_html(_population_sfh(h5_path, rows))
+
+    def update_cosmic_reference(event=None):
+        rng.bit_generator.state = gallery_state['rng_before']
+        selected = source.selected.indices
+        refresh(selected, ordered=bool(selected) and tuple(selected) == path_state['indices'])
+
+    for widget in (cosmic_toggle, ms_toggle, ms_return, ms_offset):
+        widget.param.watch(update_cosmic_reference, 'value')
+
+    def compute_rejuvenation(event=None):
+        settings = dict(recent_width=rej_recent.value, lull_width=rej_lull.value,
+                        contrast=rej_contrast.value, min_old_fraction=rej_old.value,
+                        min_recent_fraction=rej_mass.value)
+        rej_button.disabled = True
+        try:
+            with h5py.File(h5_path, 'r') as source_h5:
+                values = catalog_diagnostics(source_h5, data['h5_rows'], settings)
+            data['rejuvenation'] = dict(values=values, settings=settings)
+            for run in data['runs'].values():
+                run['properties'].update({REJ_LABELS[k]: v for k, v in values.items()})
+            properties = sorted({key for run in data['runs'].values() for key in run['properties']})
+            for widget in (left_color, right_color, filter_property):
+                widget.options = properties
+            left_color.value = REJ_LABELS['candidate']
+            update_color(left_run, left_color, left_range, 'color_left', left_mapper,
+                         left_continuous, left_dynamic)
+            update_filter_bounds()
+            count = int(np.nansum(values['candidate']))
+            detail = ('Posterior fraction available (valid draws only).'
+                      if 'posterior_fraction' in values else
+                      'Median-SFH flags only: this bundle has no posterior draws.')
+            rej_info.object = f'**{count:,}/{n_objects:,} median-SFH candidates.** {detail} Gray shading: lull; gold: recent window. Thresholds are exploratory, not a quenching classification.'
+            update_cosmic_reference()
+        except ValueError as error:
+            rej_info.object = f'Cannot compute: {error}'
+        finally:
+            rej_button.disabled = False
+
+    rej_button.on_click(compute_rejuvenation)
 
     def update_filter_bounds(event=None):
         values = property_values(left_run.value, filter_property.value)
@@ -784,6 +958,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         redshift_slider.value = (z_low, z_high)
         update_filter_bounds()
         update_view()
+        clear_path()
         source.selected.indices = []
         refresh([])
         cluster_info.object = ''
@@ -842,16 +1017,23 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     redshift_slider.param.watch(apply_redshift_filter, 'value')
     cluster_button.on_click(cluster_visible)
     reset_button.on_click(reset)
-    sample_button.on_click(lambda event: refresh(source.selected.indices))
+    def random_sample(event=None):
+        clear_path()
+        refresh(source.selected.indices)
+
+    sample_button.on_click(random_sample)
     save_button.on_click(save_selection)
 
     previous_selection = [()]
 
     def poll_selection():
-        current = tuple(sorted(source.selected.indices))
+        current = tuple(source.selected.indices)
         if current != previous_selection[0]:
             previous_selection[0] = current
-            refresh(current)
+            ordered = bool(current) and current == path_state['indices']
+            if not ordered:
+                clear_path()
+            refresh(current, ordered=ordered)
 
     pn.state.add_periodic_callback(poll_selection, period=350)
     update_left_coordinates()
@@ -869,6 +1051,15 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         reset_button,
         cluster_info,
         pn.layout.Divider(),
+        pn.pane.Markdown('**Sample a UMAP line**'),
+        path_mode, path_count, path_radius, clear_path_button,
+        pn.pane.Markdown('Nearest visible galaxies at evenly spaced locations; gaps may yield fewer samples. Line order is not a physical time sequence.', styles={'font-size': '11px'}),
+        pn.pane.Markdown('**Rejuvenation candidates**'),
+        rej_recent, rej_lull, rej_contrast, rej_old, rej_mass, rej_button, rej_info,
+        ms_toggle, ms_return, ms_offset,
+        pn.pane.Markdown("Green: main-sequence SFR along this galaxy’s inferred mass history, on the SAME scale as blue (not independently normalized). Blue above/below green means above/below MS in that time bin. Constant recycling and in-situ growth assumed; dotted portions extrapolate. IMF unverified: offset 0 assumes Kroupa; Chabrier +0.03 dex, Salpeter −0.21 dex.", styles={'font-size': '11px'}),
+        cosmic_toggle,
+        pn.pane.Markdown("Purple dashed: cosmic SFH integrated into the same bins and normalized to unit total mass, up to each galaxy’s redshift. A shape reference, not an individual-galaxy prediction. MD14 extrapolates at high redshift.", styles={'font-size': '11px'}),
         info,
         sample_button,
         save_button,

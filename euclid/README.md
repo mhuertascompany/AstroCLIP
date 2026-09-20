@@ -1338,3 +1338,173 @@ guidance 2, then unconditional generation. All generations use EMA weights
 and 100 DDIM steps. `selection.json` records IDs, selection values, candidate
 counts, seeds, and checkpoint/cache hashes. A pair illustrates sensitivity;
 it is not a population-level test of the morphology–SFH relation.
+
+### Explore galaxies along a UMAP line
+
+Restart the local explorer with the same command and data files. Under
+**Sample a UMAP line**, enable **Draw line (click start, then end)** and click
+two endpoints on either UMAP. The explorer selects distinct real galaxies
+nearest evenly spaced locations, respecting the redshift/property filters.
+Numbered markers, cutouts, and SFHs follow start-to-end order (left to right,
+then the next gallery row). Selections remain linked between the two panels;
+**Save selected IDs** preserves their order in the CSV.
+
+Set **Samples along line** and the maximum distance before drawing. Distance
+is measured in UMAP coordinates as a percentage of the full map's bounding-box
+diagonal. Empty areas may give fewer galaxies than requested; increase the
+radius if needed. Click another pair to replace the line. Disable line mode
+for ordinary lasso/box selections; **New random sample** returns to random
+examples. Changing coordinates or filters clears the line overlay. This
+samples observed galaxies, not interpolated embeddings or generated images;
+a UMAP path is not necessarily a physical evolutionary sequence.
+
+Individual explorer SFH panels also show a top axis labeled **Time before
+observation [Gyr]**. It converts fractional time `f` to
+`f * age_of_universe(z)`, using the preprocessing cosmology
+(FlatLambdaCDM, H0=70 km/s/Mpc, Om0=0.3) and the saved `sfh_time_norm` for the
+fractional-time scale when available. The observation epoch at `f=0` is zero
+Gyr for every galaxy; `f=1` corresponds to the age of the Universe at that
+galaxy's redshift. The bottom axis remains fractional. No common absolute
+time axis is added to the population plot, whose galaxies can have different
+redshifts.
+
+### Cosmic SFH reference
+
+The **Cosmic SFH reference (MD14)** checkbox overlays a purple dashed curve on
+individual SFH plots (enabled by default). It uses
+[Madau & Dickinson 2014, Eq. 15](https://ned.ipac.caltech.edu/level5/March14/Madau/Madau5.html):
+`rho_SFR(z) = 0.015 (1+z)^2.7 / [1 + ((1+z)/2.9)^5.6]`.
+For each galaxy, the curve is evaluated at cosmic age
+`age(z_observed) - fractional_lookback * sfh_time_norm`, integrated within
+exactly the same midpoint-defined bins as preprocessing, and divided by its
+sum over those bins. It therefore shows dimensionless formed-mass bin weights,
+not physical SFR density; no volume or galaxy mass scale is implied. Only
+star formation before the observation epoch enters the normalization. The
+curve is a cosmic population shape reference, not the predicted SFH of an
+individual galaxy. The smooth high-redshift extrapolation is not a measurement
+of the first-star epoch. No reference is added to the mixed-redshift population
+plot. Toggling the overlay keeps the currently displayed random examples.
+
+### Main sequence along the inferred mass history
+
+The **MS along inferred mass history** checkbox (enabled by default) now
+compares the galaxy's SFR against the Speagle main sequence evaluated along
+its own inferred mass growth. This replaces the previous hypothetical
+continuously-main-sequence track in the explorer.
+
+For normalized formed-mass fractions `w_i`, we adopt constant instantaneous
+recycling, no merger/ex-situ growth, and the catalog's surviving mass Mobs:
+
+- Total formed mass: `Mformed = Mobs / (1-R)`.
+- SFR in bin i: `w_i * Mformed / bin_duration_years`.
+- Surviving mass at an epoch: `Mobs * fraction formed before that epoch`.
+
+The model integrates the Speagle SFR along that evolving mass within each bin.
+The plotted green value is `MS_SFR_bin_average * bin_duration / Mformed`.
+It is **not independently normalized**: blue/green is exactly the ratio of
+bin-averaged inferred SFR to main-sequence SFR. Blue above green means above
+MS; blue below green means below MS. A crossing is not necessarily a precise
+quenching time, given temporal resolution and SFH uncertainties. Green inherits
+the median SFH's mass history; it is not an independent prediction or a full
+posterior uncertainty calculation. The helper also computes
+`delta_ms = log10(SFR_bin / MS_SFR_bin)`, with -infinity for a zero SFR and
+undefined values before any mass has formed.
+
+The prescription is [Speagle et al. 2014](https://arxiv.org/html/1405.2041):
+`log SFR = (0.84-0.026*t) log Mstar - (6.51-0.11*t)`, with cosmic time in Gyr.
+It is the central log-SFR relation, not a scatter-corrected arithmetic mean.
+Mass comes from `phz_pp_median_stellarmass` or the archive's `log M★` fallback;
+missing masses are labeled unavailable. **MS returned mass fraction R**
+defaults to 0.4. **Mass → Kroupa offset (dex)** defaults to zero, assuming
+Kroupa; the catalog IMF is unverified. Set +0.03 for Chabrier or -0.21 for
+Salpeter. The conversion applies to both inferred SFR and reference mass,
+not to catalog values stored on disk.
+
+Dashes mark a conservative domain (cosmic ages 2.5–11.5 Gyr and log mass
+9.7–11.1); dots mark extrapolation, not an empirical constraint. These are
+plotting bounds, not a rectangular completeness claim. Constant recycling
+and assigning all present mass to the recovered in-situ SFH are simplifications.
+The cosmic-SFRD shape reference remains independently normalized and separately
+selectable, unlike this MS diagnostic. Restart the explorer; no retraining is
+needed. The original backward-growth helper remains available for experiments.
+
+### Normalized rejuvenation candidates
+
+Restart the explorer and use **Compute rejuvenation** in the sidebar. This
+adds color/filter properties without regenerating embeddings. All windows use
+fractional lookback time and all masses are normalized fractions. Defaults:
+
+- Recent interval `[0, 0.05]`, containing at least 1% of total formed mass.
+- Scan lull intervals of width 0.05, starting after the recent interval.
+- At least 50% of the mass must lie at lookbacks older than the lull.
+- Both the recent interval and the immediately older adjacent interval
+  (also width 0.05) must have average normalized rates >=5 times the lull rate.
+
+Rates are integrated mass fractions divided by interval width, including
+partial-bin overlaps. Lull starts are scanned at bin edges plus the recent
+boundary. Among eligible windows, choose the largest minimum of the recent/lull
+and older/lull contrasts. Lull width is the tested window, not a measured total
+quiescent duration. A normalized rate floor of 1e-6 stabilizes ratios near zero;
+the displayed log recovery is capped at 6. A rising history without an older
+active episode should not qualify. Thresholds are adjustable; click Compute
+again after changing them. These flags indicate shape-based candidates, not
+confirmed quenching or calibrated rejuvenation probabilities.
+
+Choose **Rejuvenation: median-SFH candidate (0/1)** as the filter property
+and select values near 1. Other properties show the recent mass fraction,
+selected lull start, older mass fraction, and log recovery strength. Gold and
+gray shading on candidate SFHs mark the recent interval and selected lull.
+Selections and line galleries retain their normal behavior.
+
+If the opened HDF5 contains `sfh_realizations`, calculations also use all valid
+posterior draws and expose **Rejuvenation: fraction of valid posterior draws**
+and the valid-draw count. Invalid draws are excluded, and zero-valid-draw
+objects have undefined scores. Compact explorer bundles generally omit draws:
+then only the explicitly labeled median-SFH flag is available. Marginal p16/p84
+curves are never treated as realizations. Calculation reads bounded batches;
+posterior processing can take longer. Fractional windows correspond to different
+physical durations at different galaxy redshifts. No MS normalization is used.
+
+### Generate VIS images along an explorer line
+
+Draw a line in the local explorer and click **Save selected IDs** immediately
+afterwards (before making another selection or clicking New random sample).
+The default CSV is `euclid_selected_galaxies.csv` in the explorer's working
+directory; `--selection-output` can change it. CSV row order is line order.
+Copy this CSV to Candide, for example as
+`/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/line01.csv`.
+Then, from the repository root on Candide:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+sbatch euclid/slurm_sample_diffusion_selection.sh "${BASE}/line01.csv"
+```
+
+Optional second and third arguments specify a diffusion checkpoint and a new
+output directory. Default checkpoint: `pixel_diffusion_aligned_full/checkpoints/last.ckpt`.
+The sampler loads a temporary snapshot and records its hash. Default outputs:
+`pixel_diffusion_aligned_full/line_selection_<jobid>/`.
+
+The job uses one GPU on n36/pscomp, the existing aligned-condition cache, EMA
+weights, 100 DDIM steps, four noise seeds (42–45), and guidance 1 and 2. For
+each seed it restarts from exactly the same initial noise at every galaxy,
+so columns follow the selected SFHs rather than changing noise simultaneously.
+The conditions are the real selected galaxies' cached SFH embeddings; no
+interpolation in UMAP or latent space is performed.
+
+Download the output directory. Within `guidance_1/` and `guidance_2/`,
+`line_comparison_01.png`, etc. show up to six galaxies per page in CSV order:
+observed stamps, linear normalized SFHs with available posterior intervals,
+then one generated-image row per seed. Numbered individual 224×224 PNGs are
+also saved, and `selection.json` records IDs, dataset rows, train/validation
+membership, seeds, guidance, and checkpoint/cache hashes. Generated stamps are
+conditional samples, not reconstructions of those observed galaxies.
+
+IDs are read as integers without floating-point conversion. Local bundle row
+numbers are ignored; the cache provides the original rows and those IDs are
+verified against the full HDF5. Missing/duplicate IDs, mismatched condition
+caches, and existing output directories fail explicitly. Both cached training
+and validation IDs are supported and labeled. A selection from another bundle
+can only be used if its IDs exist in this diffusion model's condition cache.
+CLI options in `python -m euclid.sample_diffusion_selection --help` allow
+changing the seed count, guidance, and sampling steps.
