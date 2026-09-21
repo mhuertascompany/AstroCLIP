@@ -40,6 +40,7 @@ import panel as pn
 from bokeh.events import Tap
 from bokeh.models import LabelSet
 from euclid.umap_path import sample_segment
+from euclid.sfh_migration import catalog_migration
 from euclid.rejuvenation import catalog_diagnostics, LABELS as REJ_LABELS
 from euclid.main_sequence_sfh import main_sequence_along_sfh
 from euclid.sfh_shape import sfh_duration_80, sfh_recent_activity
@@ -775,6 +776,15 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     rej_mass = pn.widgets.FloatInput(name='Minimum recent mass fraction', value=.01, step=.005)
     rej_button = pn.widgets.Button(name='Compute rejuvenation', button_type='primary')
     rej_info = pn.pane.Markdown('Uses fractional time and normalized mass. Compute to add color/filter properties.', width=220)
+    migration_mode = pn.widgets.Select(name='Migration time units', options=['Fractional time', 'Gyr'])
+    migration_lag = pn.widgets.FloatInput(name='Migration lag Δ', value=.1, step=.01)
+    migration_window = pn.widgets.FloatInput(name='SFR averaging width', value=.02, step=.01)
+    migration_button = pn.widgets.Button(name='Compute migration', button_type='primary')
+    migration_info = pn.pane.Markdown('Median-SFH diagnostics inspired by Arango-Toro et al. (2025).', width=220)
+    def set_migration_units(event):
+        migration_lag.value = .7 if event.new == 'Gyr' else .1
+        migration_window.value = .1 if event.new == 'Gyr' else .02
+    migration_mode.param.watch(set_migration_units, 'value')
     gallery_state = {'rng_before': rng.bit_generator.state}
     path_mode = pn.widgets.Checkbox(name='Draw line (click start, then end)', value=False)
     path_count = pn.widgets.IntSlider(name='Samples along line', start=2, end=N_DISPLAY, value=min(12, N_DISPLAY))
@@ -893,6 +903,31 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             rej_button.disabled = False
 
     rej_button.on_click(compute_rejuvenation)
+
+    def compute_migration(event=None):
+        migration_button.disabled = True
+        try:
+            with h5py.File(h5_path, 'r') as source_h5:
+                values = catalog_migration(source_h5, data['h5_rows'], migration_mode.value,
+                                           migration_lag.value, migration_window.value)
+            for run in data['runs'].values():
+                run['properties'].update(values)
+            properties = sorted({key for run in data['runs'].values() for key in run['properties']})
+            for widget in (left_color, right_color, filter_property):
+                widget.options = properties
+            angle = next(key for key in values if 'angle Φ' in key)
+            left_color.value = angle
+            update_color(left_run, left_color, left_range, 'color_left', left_mapper,
+                         left_continuous, left_dynamic)
+            update_filter_bounds()
+            valid_key = next(key for key in values if 'measurable endpoints' in key)
+            count = int(np.nansum(values[valid_key]))
+            migration_info.object = f'**{count:,}/{n_objects:,} measurable vectors.** Positive Φ: rising; negative: declining. Zero-SFR or unavailable endpoints are undefined (not floored). Median SFHs only; rising does not establish rejuvenation.'
+        except ValueError as error:
+            migration_info.object = f'Cannot compute: {error}'
+        finally:
+            migration_button.disabled = False
+    migration_button.on_click(compute_migration)
 
     def update_filter_bounds(event=None):
         values = property_values(left_run.value, filter_property.value)
@@ -1054,6 +1089,9 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         pn.pane.Markdown('**Sample a UMAP line**'),
         path_mode, path_count, path_radius, clear_path_button,
         pn.pane.Markdown('Nearest visible galaxies at evenly spaced locations; gaps may yield fewer samples. Line order is not a physical time sequence.', styles={'font-size': '11px'}),
+        pn.pane.Markdown('**SFH migration**'),
+        migration_mode, migration_lag, migration_window, migration_button, migration_info,
+        pn.pane.Markdown('SFR windows: [0, width] and [lag, lag + width]. Ratios use normalized formed mass; no MS calibration. T90 means 90% had already formed, so it is usually more recent than T50.', styles={'font-size': '11px'}),
         pn.pane.Markdown('**Rejuvenation candidates**'),
         rej_recent, rej_lull, rej_contrast, rej_old, rej_mass, rej_button, rej_info,
         ms_toggle, ms_return, ms_offset,

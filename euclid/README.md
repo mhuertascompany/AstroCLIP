@@ -1508,3 +1508,77 @@ and validation IDs are supported and labeled. A selection from another bundle
 can only be used if its IDs exist in this diffusion model's condition cache.
 CLI options in `python -m euclid.sample_diffusion_selection --help` allow
 changing the seed count, guidance, and sampling steps.
+
+### SFH migration angle, speed, and formation times
+
+Under **SFH migration**, choose time units and click **Compute migration**.
+This adds median-SFH color/filter properties inspired by
+[Arango-Toro et al. 2025, Eqs. 1–2](https://arxiv.org/html/2410.05375v2#S3.SS1).
+Our definitions are an adaptation to the normalized Euclid SFHs, not a
+reproduction of the paper's CIGALE measurements or their uncertainty validation.
+
+For lag L and SFR averaging width W, recent SFR is averaged over lookback
+[0,W], and past SFR over [L,L+W], including partial-bin overlaps. Equal
+window widths make their mass ratio equal to their SFR ratio. With F_old
+being the fraction formed at lookbacks >=L:
+
+- `Δlog SFR = log10(recent SFR / past SFR)`.
+- `Δlog formed mass = -log10(F_old)` (now minus past).
+- `Φ = atan2(Δlog SFR, Δlog formed mass)` in degrees.
+- Displacement = Euclidean norm of those two log differences, in dex.
+- Speed = displacement / lag, in dex/Gyr or dex/fractional-time unit.
+
+The total mass scale cancels; mass evolution uses cumulative formed mass,
+with no time-dependent recycling or mergers. Positive Φ indicates rising SFR,
+negative Φ declining SFR. It is a recent trend, not proof of rejuvenation.
+Fractional mode defaults to L=0.1, W=0.02. Gyr mode defaults to L=0.7 Gyr,
+W=0.1 Gyr; lags of 0.3, 0.5, 0.7, and 1 Gyr allow comparisons inspired by the
+paper, but the SFR averaging definitions differ. Changing units resets these
+defaults. Each computation is labeled with its lag/window, so multiple settings
+can coexist. Finer windows do not recover information beyond the SFH resolution.
+
+Nonpositive endpoints (mass fractions <= the numerical SFH epsilon), invalid
+SFHs, or windows extending before the Big Bang produce undefined migration
+values. No log floor is substituted. **Measurable endpoints (0/1)** exposes
+this selection; speed must not be interpreted as zero for unmeasurable cases.
+T50/T90 are computed by in-bin interpolation of cumulative formed mass:
+the lookback times when 50%/90% had already formed. Consequently T90 <= T50;
+these are not the recent-mass CDF's 50th/90th lookback percentiles. Both
+fractional and Gyr versions are supplied (Gyr requires `sfh_time_norm`).
+These initial explorer metrics use median SFHs only, not posterior uncertainties.
+They require neither catalog mass nor the currently uncertain absolute SFR scale.
+
+### Download physical parameters for the SFH normalization check
+
+On Datalabs, from the repository root with the `euclid-tools` environment:
+
+```bash
+python -m euclid.fetch_physical_parameters \
+  --sample /path/to/catalog_bright.fits \
+  --output /path/to/phz_physical_parameters_deep_bright.fits
+```
+
+Replace `/path/to` with the uploaded catalog directory. The script queries
+`catalogue.phz_physical_parameters_deep` in IDR by exact integer `object_id`.
+It retrieves median, mode and 68% intervals for redshift, SFR, stellar mass,
+and formed mass, plus `phys_param_flags`, `quality_flag`, `galaxyclass`,
+`sfhtype`, and `imf`. SFR is already log10(Msun/yr), and both masses are
+log10(Msun); no conversion or quality cut is applied. Interpret coded flags
+and IMF using the release documentation, not assumed code values.
+
+Missing matches remain masked in the output, with a
+`physical_parameters_matched` indicator. Duplicate archive matches are an
+error. Batch results are cached beside the output; rerun the same command
+after an interruption. `--resume` accepts a completed output only when its
+cached sample/settings match. For unattended runs, supply
+`--credentials-file /path/to/credentials`; otherwise login is interactive.
+The shared query helper currently labels its progress/cache files as morphology,
+but the SQL and output for this command contain PHZ physical parameters.
+
+Download `phz_physical_parameters_deep_bright.fits` locally for comparison
+with the explorer SFHs. This does not update the explorer or overwrite its
+existing masses. Compare catalog SFR with recent SFH-derived SFR and the MS
+at observation before interpreting the historical MS overlay. The supplied
+schema does not specify the catalog SFR averaging timescale. Formed mass
+and surviving mass come from the physical-parameter fit; their ratio alone
+does not establish an age-dependent mass-return correction for the SBI SFHs.
