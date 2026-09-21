@@ -1554,12 +1554,12 @@ On Datalabs, from the repository root with the `euclid-tools` environment:
 
 ```bash
 python -m euclid.fetch_physical_parameters \
-  --sample /path/to/catalog_bright.fits \
-  --output /path/to/phz_physical_parameters_deep_bright.fits
+  --sample /media/home/my_workspace/edfn_vislt22p0_150000/catalog_bright.fits \
+  --output /media/home/my_workspace/edfn_vislt22p0_150000/phz_physical_parameters_deep_survey_bright.fits
 ```
 
-Replace `/path/to` with the uploaded catalog directory. The script queries
-`catalogue.phz_physical_parameters_deep` in IDR by exact integer `object_id`.
+The script queries
+`catalogue.phz_physical_parameters_deep_survey` in IDR by exact integer `object_id`.
 It retrieves median, mode and 68% intervals for redshift, SFR, stellar mass,
 and formed mass, plus `phys_param_flags`, `quality_flag`, `galaxyclass`,
 `sfhtype`, and `imf`. SFR is already log10(Msun/yr), and both masses are
@@ -1575,7 +1575,7 @@ cached sample/settings match. For unattended runs, supply
 The shared query helper currently labels its progress/cache files as morphology,
 but the SQL and output for this command contain PHZ physical parameters.
 
-Download `phz_physical_parameters_deep_bright.fits` locally for comparison
+Download `phz_physical_parameters_deep_survey_bright.fits` locally for comparison
 with the explorer SFHs. This does not update the explorer or overwrite its
 existing masses. Compare catalog SFR with recent SFH-derived SFR and the MS
 at observation before interpreting the historical MS overlay. The supplied

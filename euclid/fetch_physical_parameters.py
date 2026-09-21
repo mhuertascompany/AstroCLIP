@@ -9,7 +9,7 @@ from astropy.table import Table, MaskedColumn
 
 from .fetch_mer_morphology import load_ids, query_batches, _column_name
 
-TABLE = 'catalogue.phz_physical_parameters_deep'
+TABLE = 'catalogue.phz_physical_parameters_deep_survey'
 COLUMNS = ('phys_param_flags', 'quality_flag', 'galaxyclass', 'sfhtype', 'imf') + tuple(
     f'phz_pp_{stat}_{quantity}'
     for quantity in ('redshift', 'sfr', 'stellarmass', 'massformed')

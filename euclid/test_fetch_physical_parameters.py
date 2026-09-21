@@ -40,7 +40,7 @@ class PhysicalJoinTests(unittest.TestCase):
         results['object_id'][0] = ids[1]
         with self.assertRaisesRegex(ValueError, 'IDs'):
             align_results(sources, results)
-        self.assertIn('catalogue.phz_physical_parameters_deep', physical_query())
+        self.assertIn('catalogue.phz_physical_parameters_deep_survey', physical_query())
 
 
 if __name__ == '__main__':
