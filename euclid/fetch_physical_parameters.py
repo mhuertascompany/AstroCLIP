@@ -17,8 +17,8 @@ COLUMNS = ('phys_param_flags', 'quality_flag', 'galaxyclass', 'sfhtype', 'imf') 
 )
 
 
-def physical_query():
-    columns = ', '.join(f'phys.{name}' for name in COLUMNS)
+def physical_query(columns=COLUMNS):
+    columns = ', '.join(f'phys.{name}' for name in columns)
     return f'''SELECT src.sample_row, src.object_id, {columns}
 FROM TAP_UPLOAD.sfh_sample AS src
 JOIN {TABLE} AS phys ON phys.object_id = src.object_id
@@ -26,7 +26,7 @@ ORDER BY src.sample_row
 '''
 
 
-def align_results(sources, results):
+def align_results(sources, results, columns=COLUMNS):
     """Preserve sample order, integer flags, vector intervals and missing masks."""
     if not len(results):
         raise ValueError('No physical-parameter matches; check the table and sample IDs.')
@@ -46,7 +46,7 @@ def align_results(sources, results):
     matched = np.zeros(len(sources), dtype=bool)
     matched[rows] = True
     output['physical_parameters_matched'] = matched
-    for name in COLUMNS:
+    for name in columns:
         source = results[_column_name(results, name)]
         shape = (len(sources),) + source.shape[1:]
         column = MaskedColumn(np.zeros(shape, dtype=source.dtype),
@@ -69,6 +69,8 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1000)
     parser.add_argument('--credentials-file', type=Path)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--columns', nargs='+', choices=COLUMNS, default=list(COLUMNS),
+                        help='Physical fields to retrieve; object_id is always included.')
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error('--batch-size must be positive')
@@ -78,7 +80,7 @@ def main():
     if not len(sources):
         parser.error('Empty sample')
     cache = args.output.parent / f'.{args.output.stem}_queries'
-    settings = dict(schema_version=1, table=TABLE, columns=list(COLUMNS),
+    settings = dict(schema_version=1, table=TABLE, columns=list(args.columns),
                     ids_sha256=hashlib.sha256(np.asarray(sources['object_id'],
                         dtype='<i8').tobytes()).hexdigest(), batch_size=args.batch_size)
     manifest = cache / 'run.json'
@@ -104,8 +106,8 @@ def main():
             kwargs = ({'credentials_file': str(args.credentials_file.expanduser())}
                       if args.credentials_file else {})
             client.login(**kwargs)
-        results = query_batches(client, sources, cache, physical_query(), args.batch_size)
-        output = align_results(sources, results)
+        results = query_batches(client, sources, cache, physical_query(args.columns), args.batch_size)
+        output = align_results(sources, results, args.columns)
         temp = args.output.with_suffix(args.output.suffix + '.tmp')
         output.write(temp, format='fits', overwrite=True)
         temp.replace(args.output)
