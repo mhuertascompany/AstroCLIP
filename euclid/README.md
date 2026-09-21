@@ -1582,3 +1582,92 @@ at observation before interpreting the historical MS overlay. The supplied
 schema does not specify the catalog SFR averaging timescale. Formed mass
 and surviving mass come from the physical-parameter fit; their ratio alone
 does not establish an age-dependent mass-return correction for the SBI SFHs.
+
+### Empirically shifted MS overlay
+
+The explorer defaults to `R=0` and an **Empirical MS SFR shift (dex)** of
+`-0.93`. This is the rounded median log(SFH SFR / Speagle MS SFR) at observation
+for the 9,719 positive-rate galaxies in the bright validation sample, using
+the 0–100 Myr median-SFH integral and observed stellar mass. It is not the
+SFH-to-catalog offset of -0.82 dex. The green reference is multiplied by
+`10**shift` at every epoch; the blue histories and inferred masses are unchanged.
+The plot annotation reports both shift and R. Set the shift to zero to restore
+the original MS normalization. The shift is a visual experiment, not evidence
+for a universal correction across mass, redshift, or history; changing R does
+not automatically recalibrate it. Restart the explorer to load the update.
+
+Redshift is read from the explorer HDF5 `redshift` dataset, populated from
+`phz_pp_median_redshift` during SFH preprocessing. The MS uses cosmic age at
+that photometric redshift, minus time before observation for historical bins.
+
+The **Show ΔMS history below SFH** checkbox (enabled by default) adds a lower
+panel to each individual SFH when the MS overlay is enabled, including line
+selections. It plots `log10(SFR / shifted MS SFR)` from the same bin-integrated
+reference and median history as the green/blue comparison. Zero is the shifted
+MS; positive values lie above it. The panels share fractional lookback time,
+with the upper SFH axis giving time before observation in Gyr. Solid segments
+use the existing conservative mass/cosmic-age domain; dotted segments extrapolate.
+The display spans -3 to +3 dex: triangles indicate values outside this range,
+including zero SFR at negative infinity. Undefined ratios before inferred mass
+assembly remain blank. No posterior uncertainty band is inferred from the
+pointwise SFH percentiles: propagating that uncertainty requires full draws.
+This is a diagnostic conditional on the inferred mass history and empirical
+MS shift, not an independent classification of historical MS membership.
+
+Click **Compute D+ / D−** to add integrated excess/deficit properties to both
+UMAP color menus and the property filter. The left/right views switch to D+
+and D− respectively. Each is the integral of the positive/negative part of
+`SFR − MS`, divided by the integral of `SFR + MS`. The code sums bin-integrated
+weights, so physical bin duration is already included (not multiplied twice).
+Both are bounded by [0,1], and D+ + D− ≤ 1. They use the full inferred history,
+including extrapolated MS segments, and exclude undefined pre-formation bins.
+A third property, **MS calibrated time fraction**, reports the fraction of
+included physical duration inside the existing conservative MS display domain.
+Zero SFR with a positive MS contributes to D−. Missing mass/redshift yields NaN.
+
+Property names retain R, MS SFR shift, and IMF mass offset. Changing a control
+does not alter previously computed properties: click Compute again for new
+settings. The default is R=0 and MS shift=-0.93 dex. These are median-history
+summaries without posterior uncertainties; they do not encode temporal order.
+
+### Shared-noise diffusion comparison of explorer clusters
+
+A reproducible selection of six objects per cluster has been prepared in
+`euclid/diagnostics/diffusion_clusters_seed42.csv`, with input hashes and the
+selection seed in the adjacent JSON. The three input lists have 1,474, 1,417,
+and 1,743 unique objects respectively and no overlap. To draw another selection:
+
+```bash
+python -m euclid.select_diffusion_clusters \
+  --selections euclid_selected_galaxies_clusterMS.csv \
+               euclid_selected_galaxies_clusteraMS.csv \
+               euclid_selected_galaxies_clusterbMS.csv \
+  --n-per-cluster 6 --seed 42 \
+  --output euclid/diagnostics/diffusion_clusters_seed42.csv
+```
+
+Use a new output filename when resampling; existing selections are not overwritten.
+Transfer the selected CSV to Candide and update the sampling code there. From
+`/n03data/huertas/python/AstroCLIP`, submit:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+sbatch euclid/slurm_sample_diffusion_clusters.sh \
+  "${BASE}/diffusion_clusters_seed42.csv"
+```
+
+The default checkpoint is `${BASE}/pixel_diffusion_aligned_full/checkpoints/last.ckpt`;
+a second positional argument can specify another checkpoint. One snapshot is
+used for all clusters. Noise seeds 42–45 are reset for every SFH and guidance
+value (1 and 2), using 100 DDIM steps and EMA weights. The random selection seed
+is separate from these generation seeds. The condition cache supplies the
+CLIP-aligned SFH embeddings and verifies train/validation membership.
+
+Outputs: `${BASE}/pixel_diffusion_aligned_full/cluster_selection_JOBID/`.
+Each guidance directory contains `line_comparison_01.png` (clusterMS),
+`line_comparison_02.png` (clusteraMS), and `line_comparison_03.png` (clusterbMS)
+for the default six-per-cluster selection. Each page shows real stamps, SFHs,
+and four generated rows; compare the same seed row across pages. Cluster
+labels appear in the titles and `selection.json`. Individual generated PNGs
+are also saved. Six random objects are illustrative examples, not a statistical
+comparison of the full cluster populations.

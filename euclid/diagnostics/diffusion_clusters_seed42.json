@@ -1,0 +1,48 @@
+{
+  "selection_seed": 42,
+  "n_per_cluster": 6,
+  "clusters": [
+    {
+      "source": "euclid_selected_galaxies_clusterMS.csv",
+      "sha256": "d63344782ae6a072c1c0acd24936da8f944dc45a0d29d9f4c2cca1e01884e0fd",
+      "cluster": "clusterMS",
+      "n_available": 1474,
+      "selected_ids": [
+        2721393147641953475,
+        2739207697672802884,
+        2681295272651308523,
+        2751075367647699931,
+        2683329775647025579,
+        2640106759646082072
+      ]
+    },
+    {
+      "source": "euclid_selected_galaxies_clusteraMS.csv",
+      "sha256": "5a8b9e5e5b0e12e50c15b2a36aaa5b44ed2c7825a19028425b9ced8e1505660a",
+      "cluster": "clusteraMS",
+      "n_available": 1417,
+      "selected_ids": [
+        2739038354682313764,
+        2700012840637496472,
+        2733411857680423066,
+        2736253784641224973,
+        2741972202683013691,
+        2765425778670656921
+      ]
+    },
+    {
+      "source": "euclid_selected_galaxies_clusterbMS.csv",
+      "sha256": "9b2ddbacd0eb44e7c0878ce896cdba75a6ce0019db603de76ba8a701809279ad",
+      "cluster": "clusterbMS",
+      "n_available": 1743,
+      "selected_ids": [
+        2746291039642045295,
+        2674658428650905492,
+        2649613341659837265,
+        2760211795643618792,
+        2741249556671364303,
+        2718784378683829157
+      ]
+    }
+  ]
+}

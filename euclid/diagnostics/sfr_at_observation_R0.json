@@ -1,0 +1,77 @@
+{
+  "n_valid": 13717,
+  "n_positive_sfh": 9719,
+  "n_zero_sfh": 3998,
+  "R": 0,
+  "window_myr": 100,
+  "ms": "Speagle 2014 Eq28, observed mass/redshift, zero IMF mass offset",
+  "catalog_minus_ms_all": {
+    "n": 13717,
+    "p16_p50_p84_dex": [
+      -1.0905031289153142,
+      -0.27586362350689075,
+      0.16955790856271263
+    ]
+  },
+  "catalog_minus_ms_same_positive_sample": {
+    "n": 9719,
+    "p16_p50_p84_dex": [
+      -0.5036075466155356,
+      -0.14152055478480285,
+      0.2634425273782281
+    ]
+  },
+  "sfh_minus_ms_same_positive_sample": {
+    "n": 9719,
+    "p16_p50_p84_dex": [
+      -1.5262280657692506,
+      -0.926528018992947,
+      -0.5134850561431138
+    ]
+  },
+  "sfh_minus_catalog": {
+    "n": 9719,
+    "p16_p50_p84_dex": [
+      -1.5546481606459939,
+      -0.8203211885348374,
+      -0.2933813026450319
+    ]
+  },
+  "catalog_within_03dex_MS": {
+    "n": 5700,
+    "zero_sfh": 531,
+    "sfh_minus_ms_positive": {
+      "n": 5169,
+      "p16_p50_p84_dex": [
+        -1.3974089503465776,
+        -0.8517621880256616,
+        -0.47184646598033064
+      ]
+    }
+  },
+  "conservative_display_domain": {
+    "n": 8396,
+    "n_positive": 5049,
+    "catalog_minus_ms": {
+      "n": 5049,
+      "p16_p50_p84_dex": [
+        -0.43804133114415045,
+        -0.017759397083982442,
+        0.4305732879087283
+      ]
+    },
+    "sfh_minus_ms": {
+      "n": 5049,
+      "p16_p50_p84_dex": [
+        -1.7181306531400902,
+        -1.1394783845225165,
+        -0.7056981553842384
+      ]
+    }
+  },
+  "limitations": [
+    "No PHZ quality flags",
+    "SFH rate from rebinned pointwise median history",
+    "MS is an empirical reference, not ground truth; IMF calibration unverified"
+  ]
+}

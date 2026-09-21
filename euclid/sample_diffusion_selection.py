@@ -55,6 +55,8 @@ def run(args):
     if args.output.exists():
         raise FileExistsError(args.output)
     ids, rows, conditions, splits = selected_conditions(args.selection, args.conditions)
+    with Path(args.selection).open(newline='') as stream:
+        clusters = [row.get('cluster', '') for row in csv.DictReader(stream)]
     order = np.argsort(rows)
     with h5py.File(args.dataset, 'r') as source:
         def read(key):
@@ -93,7 +95,7 @@ def run(args):
                     condition_cache_sha256=fingerprint, noise_seeds=seeds,
                     guidance=args.guidance, steps=args.steps, weights='EMA',
                     note='CSV order preserved. Same initial noise per seed for every galaxy and guidance; generated samples are not reconstructions.',
-                    objects=[dict(position=i+1, object_id=int(gid), dataset_row=int(rows[i]), split=splits[i])
+                    objects=[dict(position=i+1, object_id=int(gid), dataset_row=int(rows[i]), split=splits[i], cluster=clusters[i])
                              for i, gid in enumerate(ids)])
     (args.output / 'selection.json').write_text(json.dumps(manifest, indent=2))
     for guidance in args.guidance:
@@ -118,7 +120,7 @@ def run(args):
                                       figsize=(2.6*(stop-start), 2.2*(2+len(seeds))), squeeze=False)
             for col, i in enumerate(range(start, stop)):
                 axes[0,col].imshow(real[i], cmap='gray', vmin=0, vmax=255)
-                axes[0,col].set_title(f'{i+1}. {ids[i]}\n{splits[i]}', fontsize=7)
+                axes[0,col].set_title(f'{i+1}. {ids[i]}\n{clusters[i]} {splits[i]}', fontsize=7)
                 axes[1,col].plot(time, weights[i], linewidth=1)
                 if all(p is not None for p in posterior):
                     axes[1,col].fill_between(time, np.maximum(10.**posterior[0][i]-eps,0),
@@ -131,7 +133,7 @@ def run(args):
                     axes[row,col].set_xticks([]); axes[row,col].set_yticks([])
             for row,label in enumerate(['Observed','Normalized SFH']+[f'Generated\nseed {seed}' for seed in seeds]):
                 axes[row,0].set_ylabel(label,fontsize=9)
-            fig.suptitle(f'SFH conditions along selected line — guidance {guidance:g}', fontsize=12)
+            fig.suptitle(f'Selected SFH conditions — guidance {guidance:g}', fontsize=12)
             fig.tight_layout()
             fig.savefig(destination / f'line_comparison_{start//6+1:02d}.png',dpi=150)
             plt.close(fig)

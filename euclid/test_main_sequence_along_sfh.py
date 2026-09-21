@@ -16,6 +16,18 @@ class InferredMassTests(unittest.TestCase):
         np.testing.assert_allclose(r['delta_ms'],np.log10(r['sfr']/r['ms_sfr']))
         self.assertFalse(np.isclose(np.nansum(r['weights']),1.))
 
+    def test_empirical_shift_preserves_observed_history(self):
+        t=(np.arange(100)+.5)/100
+        w=np.ones(100)/100
+        base=main_sequence_along_sfh(t,np.log10(w+1e-10),.4,10.2,return_fraction=0.)
+        shifted=main_sequence_along_sfh(t,np.log10(w+1e-10),.4,10.2,
+                                       return_fraction=0.,ms_sfr_offset=-.93)
+        for key in ('sfr','observed_weights','mass_at_edges','supported'):
+            np.testing.assert_array_equal(base[key],shifted[key])
+        np.testing.assert_allclose(shifted['weights'],base['weights']*10**(-.93))
+        np.testing.assert_allclose(shifted['ms_sfr'],base['ms_sfr']*10**(-.93))
+        np.testing.assert_allclose(shifted['delta_ms'],base['delta_ms']+.93)
+
     def test_no_mass_and_quenched_bins(self):
         t=(np.arange(20)+.5)/20
         w=np.zeros(20); w[10:15]=.2

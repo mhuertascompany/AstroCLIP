@@ -60,9 +60,10 @@ def main_sequence_track(time, redshift, log_mass, time_norm_myr=None,
 
 def main_sequence_along_sfh(time, log_sfh, redshift, log_mass,
                             time_norm_myr=None, return_fraction=.4,
-                            mass_offset=0., epsilon=1e-10):
+                            mass_offset=0., epsilon=1e-10, ms_sfr_offset=0.):
     """MS reference along the observed SFH's own inferred mass history.
 
+    ms_sfr_offset shifts log10 MS SFR at fixed mass/time (empirical only).
     Constant instantaneous recycling and entirely in-situ growth are assumed.
     At lookback l: Mstar(l)=Mstar_obs * fraction formed at lookbacks >= l.
     MS bin integrals are divided by the SAME formed mass as the observed SFH;
@@ -106,7 +107,9 @@ def main_sequence_along_sfh(time, log_sfh, redshift, log_mass,
         lm = np.log10(mass)
         ms_sfr = 10.**((.84-.026*cosmic_age)*lm-(6.51-.11*cosmic_age))
     ms_sfr[mass <= 0] = 0.
-    reference_sfr = ms_sfr @ quadrature_weights / 2
+    if not np.isfinite(ms_sfr_offset):
+        raise ValueError("MS SFR offset must be finite.")
+    reference_sfr = (ms_sfr @ quadrature_weights / 2) * 10.**ms_sfr_offset
     reference = reference_sfr*duration_years/total_formed_mass
     supported = ((age-edges[1:] >= 2.5) & (age-edges[:-1] <= 11.5)
                  & (final_mass*older >= 10**9.7)

@@ -43,6 +43,7 @@ from euclid.umap_path import sample_segment
 from euclid.sfh_migration import catalog_migration
 from euclid.rejuvenation import catalog_diagnostics, LABELS as REJ_LABELS
 from euclid.main_sequence_sfh import main_sequence_along_sfh
+from euclid.ms_deviation import catalog_deviations
 from euclid.sfh_shape import sfh_duration_80, sfh_recent_activity
 from bokeh.models import (
     BasicTicker,
@@ -336,7 +337,8 @@ def _linear_sfh(log_sfh, epsilon):
 
 def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
                 reconstruction=None, redshift=None, time_norm_myr=None, cosmic_reference=False,
-                ms_reference=False, log_mass=np.nan, return_fraction=.4, mass_offset=0., rejuvenation=None):
+                ms_reference=False, log_mass=np.nan, return_fraction=0., mass_offset=0., rejuvenation=None, ms_sfr_offset=-.93):
+    track = None
     median = _linear_sfh(median_log, epsilon)
     if p16_log is not None and p84_log is not None:
         lower = np.maximum(10.0 ** p16_log - epsilon, epsilon)
@@ -356,15 +358,16 @@ def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
                     linewidth=1.0, label='Cosmic SFH (MD14), normalized')
     if ms_reference and redshift is not None:
         track = main_sequence_along_sfh(time, median_log, redshift, log_mass,
-                                        time_norm_myr, return_fraction, mass_offset, epsilon)
+                                        time_norm_myr, return_fraction, mass_offset, epsilon,
+                                        ms_sfr_offset=ms_sfr_offset)
         reference = track['weights']
         if np.isfinite(reference).any():
             ax.plot(time, reference, color='#238b45', linestyle=':', linewidth=1,
-                    label='MS at inferred mass: extrapolated')
+                    label=f'MS shifted {ms_sfr_offset:+.2f} dex: extrapolated')
             ax.plot(time, np.where(track['supported'], reference, np.nan),
                     color='#238b45', linestyle='--', linewidth=1.2,
-                    label='MS at inferred mass: conservative domain')
-            ax.text(.02, .96, f'MS log M★={log_mass + mass_offset:.2f}',
+                    label=f'MS shifted {ms_sfr_offset:+.2f} dex: conservative domain')
+            ax.text(.02, .96, f'MS {ms_sfr_offset:+.2f} dex; R={return_fraction:.2f}; log M★={log_mass + mass_offset:.2f}',
                     transform=ax.transAxes, va='top', fontsize=4, color='#238b45')
         else:
             ax.text(.02, .96, 'MS reference unavailable (mass/z)',
@@ -392,6 +395,37 @@ def _render_sfh(ax, time, median_log, p16_log, p84_log, epsilon,
             top.xaxis.set_major_locator(MaxNLocator(nbins=3))
             top.tick_params(labelsize=5, pad=1)
 
+    return track
+
+
+def _render_delta_ms(ax, time, track):
+    """Display model log ratios; arrows denote clipped or zero-SFR bins."""
+    ax.axhline(0, color='#238b45', linewidth=.8)
+    ax.set(xlim=(float(time.min()), float(time.max())), ylim=(-3, 3))
+    ax.set_xlabel('Fractional lookback time', fontsize=5)
+    ax.set_ylabel('ΔMS [dex]', fontsize=5)
+    ax.tick_params(labelsize=5)
+    ax.set_yticks([-3, 0, 3])
+    if track is None or 'delta_ms' not in track:
+        ax.text(.5, .5, 'ΔMS unavailable (mass/z)', transform=ax.transAxes,
+                ha='center', fontsize=5)
+        return
+    delta = track['delta_ms']
+    finite = np.isfinite(delta)
+    values = np.where(finite, np.clip(delta, -3, 3), np.nan)
+    ax.plot(time, values, color='steelblue', linestyle=':', linewidth=.8)
+    ax.plot(time, np.where(track['supported'], values, np.nan),
+            color='steelblue', linewidth=1.)
+    low = (delta < -3) | np.isneginf(delta)
+    high = delta > 3
+    ax.scatter(np.asarray(time)[low], np.full(low.sum(), -2.9), marker='v',
+               s=5, color='steelblue')
+    ax.scatter(np.asarray(time)[high], np.full(high.sum(), 2.9), marker='^',
+               s=5, color='steelblue')
+    if np.any(low | high):
+        ax.text(.98, .03, 'Triangles: beyond ±3 or zero SFR',
+                transform=ax.transAxes, ha='right', fontsize=3.5)
+
 
 def _fig_to_html(fig):
     buffer = io.BytesIO()
@@ -405,7 +439,7 @@ def _fig_to_html(fig):
 
 
 def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmic_reference=False,
-             ms_reference=False, return_fraction=.4, mass_offset=0.):
+             ms_reference=False, return_fraction=0., mass_offset=0., ms_sfr_offset=-.93, show_delta_ms=True):
     n = min(N_DISPLAY, len(selected))
     shown = (np.asarray(selected, dtype=int)[:n] if ordered else
              np.sort(rng.choice(np.asarray(selected, dtype=int), n, replace=False)))
@@ -436,10 +470,24 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmi
         )
     else:
         fig_images, image_axes = None, None
-    fig_sfhs, sfh_axes = plt.subplots(
-        nrows, NCOLS, figsize=(NCOLS * 1.9, nrows * 2.15), squeeze=False,
-    )
+    with_delta = show_delta_ms and ms_reference
+    if with_delta:
+        fig_sfhs = plt.figure(figsize=(NCOLS * 1.9, nrows * 3.0))
+        outer = fig_sfhs.add_gridspec(nrows, NCOLS)
+        sfh_axes = np.empty((nrows, NCOLS), dtype=object)
+        delta_axes = np.empty_like(sfh_axes)
+        for row in range(nrows):
+            for col in range(NCOLS):
+                inner = outer[row, col].subgridspec(2, 1, height_ratios=[2, 1], hspace=.08)
+                sfh_axes[row, col] = fig_sfhs.add_subplot(inner[0])
+                delta_axes[row, col] = fig_sfhs.add_subplot(inner[1], sharex=sfh_axes[row, col])
+    else:
+        fig_sfhs, sfh_axes = plt.subplots(
+            nrows, NCOLS, figsize=(NCOLS * 1.9, nrows * 2.15), squeeze=False,
+        )
     axes_groups = [sfh_axes.flat]
+    if with_delta:
+        axes_groups.append(delta_axes.flat)
     if image_axes is not None:
         axes_groups.append(image_axes.flat)
     for axes in axes_groups:
@@ -469,7 +517,7 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmi
             rejuvenation = (diagnostic['values']['lull_start'][shown[index]],
                             diagnostic['settings']['lull_width'],
                             diagnostic['settings']['recent_width'])
-        _render_sfh(
+        track = _render_sfh(
             sfh_axis, time, median[index],
             p16[index] if p16 is not None else None,
             p84[index] if p84 is not None else None,
@@ -478,8 +526,15 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmi
             redshift=z, time_norm_myr=time_norm[index] if time_norm is not None else None,
             cosmic_reference=cosmic_reference, ms_reference=ms_reference,
             log_mass=masses[index], return_fraction=return_fraction, mass_offset=mass_offset,
+            ms_sfr_offset=ms_sfr_offset,
             rejuvenation=rejuvenation,
         )
+        if with_delta:
+            delta_axis = delta_axes.flat[index]
+            delta_axis.set_visible(True)
+            _render_delta_ms(delta_axis, time, track)
+            sfh_axis.set_xlabel('')
+            sfh_axis.tick_params(labelbottom=False)
         sfh_axis.set_title(f'{index + 1}. {int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=27)
 
     if fig_images is not None:
@@ -767,7 +822,11 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
 
     cosmic_toggle = pn.widgets.Checkbox(name='Cosmic SFH reference (MD14)', value=True)
     ms_toggle = pn.widgets.Checkbox(name='MS along inferred mass history', value=True)
-    ms_return = pn.widgets.FloatSlider(name='MS returned mass fraction R', start=0., end=.6, step=.05, value=.4)
+    delta_ms_toggle = pn.widgets.Checkbox(name='Show ΔMS history below SFH', value=True)
+    ms_return = pn.widgets.FloatSlider(name='MS returned mass fraction R', start=0., end=.6, step=.05, value=0.)
+    ms_deviation_button = pn.widgets.Button(name='Compute D+ / D−', button_type='primary')
+    ms_deviation_info = pn.pane.Markdown('Uses the median SFH and current MS settings.')
+    ms_sfr_shift = pn.widgets.FloatInput(name='Empirical MS SFR shift (dex)', value=-.93, step=.05)
     ms_offset = pn.widgets.FloatInput(name='Mass → Kroupa offset (dex)', value=0., step=.01)
     rej_recent = pn.widgets.FloatInput(name='Recent window Δf', value=.05, step=.01)
     rej_lull = pn.widgets.FloatInput(name='Lull window Δf', value=.05, step=.01)
@@ -858,6 +917,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             h5_path, stamp_dir, selected, data, rng, band, ordered=ordered,
             cosmic_reference=cosmic_toggle.value, ms_reference=ms_toggle.value,
             return_fraction=ms_return.value, mass_offset=ms_offset.value,
+            ms_sfr_offset=ms_sfr_shift.value, show_delta_ms=delta_ms_toggle.value,
         )
         if image_fig is not None:
             image_pane.object = _fig_to_html(image_fig)
@@ -870,8 +930,48 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         selected = source.selected.indices
         refresh(selected, ordered=bool(selected) and tuple(selected) == path_state['indices'])
 
-    for widget in (cosmic_toggle, ms_toggle, ms_return, ms_offset):
+    for widget in (cosmic_toggle, ms_toggle, ms_return, ms_offset, ms_sfr_shift, delta_ms_toggle):
         widget.param.watch(update_cosmic_reference, 'value')
+
+    def compute_ms_deviation(event=None):
+        ms_deviation_button.disabled = True
+        ms_deviation_info.object = 'Computing integrated MS deviations…'
+        settings = dict(return_fraction=ms_return.value, mass_offset=ms_offset.value,
+                        ms_sfr_offset=ms_sfr_shift.value)
+        try:
+            with h5py.File(h5_path, 'r') as h:
+                rows = data['h5_rows']
+                masses = (_read_rows(h['phz_pp_median_stellarmass'], rows)
+                          if 'phz_pp_median_stellarmass' in h else
+                          next((run['properties']['log M★'] for run in data['runs'].values()
+                                if 'log M★' in run['properties']), np.full(n_objects, np.nan)))
+                values = catalog_deviations(
+                    _read_rows(h['sfh'], rows), h['sfh_time_grid'][:], data['redshift'], masses,
+                    _read_rows(h['sfh_time_norm'], rows) if 'sfh_time_norm' in h else None,
+                    epsilon=float(h.attrs.get('sfh_log_epsilon', 1e-10)), **settings)
+            suffix = (f" [R={settings['return_fraction']:g}, MS={settings['ms_sfr_offset']:g}, "
+                      f"mass={settings['mass_offset']:g} dex]")
+            labels = ['MS D+ excess'+suffix, 'MS D− deficit'+suffix,
+                      'MS calibrated time fraction'+suffix]
+            for run in data['runs'].values():
+                run['properties'].update({label: values[:, i] for i, label in enumerate(labels)})
+            properties = sorted({key for run in data['runs'].values() for key in run['properties']})
+            for widget in (left_color, right_color, filter_property):
+                widget.options = properties
+            left_color.value, right_color.value = labels[:2]
+            update_color(left_run, left_color, left_range, 'color_left', left_mapper,
+                         left_continuous, left_dynamic)
+            update_color(right_run, right_color, right_range, 'color_right', right_mapper,
+                         right_continuous, right_dynamic)
+            update_filter_bounds()
+            ms_deviation_info.object = (f"Computed for {np.isfinite(values[:, 0]).sum():,}/{n_objects:,} galaxies. "
+                'Colors and filters retain settings in their names; recompute after changing MS controls.')
+        except ValueError as error:
+            ms_deviation_info.object = f'Cannot compute: {error}'
+        finally:
+            ms_deviation_button.disabled = False
+
+    ms_deviation_button.on_click(compute_ms_deviation)
 
     def compute_rejuvenation(event=None):
         settings = dict(recent_width=rej_recent.value, lull_width=rej_lull.value,
@@ -1094,8 +1194,11 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         pn.pane.Markdown('SFR windows: [0, width] and [lag, lag + width]. Ratios use normalized formed mass; no MS calibration. T90 means 90% had already formed, so it is usually more recent than T50.', styles={'font-size': '11px'}),
         pn.pane.Markdown('**Rejuvenation candidates**'),
         rej_recent, rej_lull, rej_contrast, rej_old, rej_mass, rej_button, rej_info,
-        ms_toggle, ms_return, ms_offset,
-        pn.pane.Markdown("Green: main-sequence SFR along this galaxy’s inferred mass history, on the SAME scale as blue (not independently normalized). Blue above/below green means above/below MS in that time bin. Constant recycling and in-situ growth assumed; dotted portions extrapolate. IMF unverified: offset 0 assumes Kroupa; Chabrier +0.03 dex, Salpeter −0.21 dex.", styles={'font-size': '11px'}),
+        ms_toggle, delta_ms_toggle, ms_return, ms_offset, ms_sfr_shift,
+        ms_deviation_button, ms_deviation_info,
+        pn.pane.Markdown("D+ and D− integrate positive and negative SFR−MS differences separately, divided by the integral of SFR+MS. Both are in [0,1], with sum ≤1. Full inferred history including MS extrapolation; calibrated time fraction reports coverage. Undefined pre-formation bins are excluded; zero-SFR bins with nonzero MS count as deficit. Median histories only.", styles={'font-size': '11px'}),
+        pn.pane.Markdown("ΔMS = log10(SFR / shifted MS SFR). Zero is the reference; positive is above, negative below. Dotted segments extrapolate the MS. Triangles mark values beyond ±3 dex or zero SFR (−∞); bins with no inferred mass are undefined and blank. Uses the median history, without posterior uncertainty propagation.", styles={'font-size': '11px'}),
+        pn.pane.Markdown("Green: main-sequence SFR along this galaxy’s inferred mass history, on the SAME scale as blue (not independently normalized). The empirical SFR shift defaults to −0.93 dex, calibrated to the median 100 Myr SFH/MS offset at observation for 9,719 positive-rate bright validation galaxies with R=0. Set shift to 0 for the original MS. This constant shift across all epochs is illustrative, not a validated historical correction; blue/green compares against the shifted reference. Constant recycling and in-situ growth assumed; dotted portions extrapolate. IMF unverified: offset 0 assumes Kroupa; Chabrier +0.03 dex, Salpeter −0.21 dex.", styles={'font-size': '11px'}),
         cosmic_toggle,
         pn.pane.Markdown("Purple dashed: cosmic SFH integrated into the same bins and normalized to unit total mass, up to each galaxy’s redshift. A shape reference, not an individual-galaxy prediction. MD14 extrapolates at high redshift.", styles={'font-size': '11px'}),
         info,
