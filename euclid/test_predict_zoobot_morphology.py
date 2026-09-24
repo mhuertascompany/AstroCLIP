@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from euclid.predict_zoobot_morphology import (
+    compatible_checkpoint_hparams,
     model_input_channels,
     normalize_answer_name,
     prediction_table,
@@ -21,7 +22,29 @@ class DummySchema:
     ]
 
 
+class DummyAbstract:
+    def __init__(self, name=None, greyscale=False):
+        pass
+
+
+class DummyTree:
+    def __init__(self, schema, **super_kwargs):
+        pass
+
+
 class PredictZooBotMorphologyTest(unittest.TestCase):
+    def test_removes_obsolete_checkpoint_hyperparameters(self):
+        schema = DummySchema()
+        clean, ignored = compatible_checkpoint_hparams(
+            {'schema': schema, 'name': 'encoder', 'greyscale': True,
+             'n_blocks': 0},
+            DummyTree, DummyAbstract,
+        )
+        self.assertEqual(clean['schema'], schema)
+        self.assertEqual(clean['name'], 'encoder')
+        self.assertEqual(clean['greyscale'], True)
+        self.assertEqual(ignored, ['n_blocks'])
+
     def test_normalizes_schema_names_and_problem_alias(self):
         self.assertEqual(
             normalize_answer_name('smooth-or-featured_featured-or-disk'),

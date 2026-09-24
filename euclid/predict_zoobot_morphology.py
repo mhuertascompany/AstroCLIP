@@ -11,6 +11,7 @@ the result can be consumed by ``euclid.restore_morphology_metadata``.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import re
@@ -49,11 +50,42 @@ def normalized_schema_columns(schema):
     return raw, columns
 
 
+def compatible_checkpoint_hparams(hparams, tree_class, abstract_class):
+    """Drop Lightning hyperparameters removed by the installed ZooBot version."""
+    valid = set(inspect.signature(tree_class.__init__).parameters)
+    valid.update(inspect.signature(abstract_class.__init__).parameters)
+    valid.difference_update({'self', 'args', 'kwargs', 'super_kwargs'})
+    clean = {key: value for key, value in dict(hparams).items() if key in valid}
+    ignored = sorted(set(hparams).difference(clean))
+    if 'schema' not in clean:
+        raise ValueError('ZooBot checkpoint hyperparameters contain no schema.')
+    return clean, ignored
+
+
+def load_compatible_checkpoint(checkpoint, tree_class, abstract_class):
+    """Reconstruct an older ZooBot checkpoint with the current public API."""
+    try:
+        saved = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    except TypeError:  # PyTorch before the weights_only argument
+        saved = torch.load(checkpoint, map_location='cpu')
+    if 'state_dict' not in saved or 'hyper_parameters' not in saved:
+        raise ValueError('Not a complete ZooBot Lightning checkpoint.')
+    hparams, ignored = compatible_checkpoint_hparams(
+        saved['hyper_parameters'], tree_class, abstract_class,
+    )
+    model = tree_class(**hparams)
+    model.load_state_dict(saved['state_dict'], strict=True)
+    return model, ignored
+
+
 def load_full_model(repo_id=DEFAULT_REPO, filename=DEFAULT_FILENAME,
                     checkpoint=None):
     """Load a frozen FinetuneableZoobotTree from disk or Hugging Face."""
     try:
-        from zoobot.pytorch.training.finetune import FinetuneableZoobotTree
+        from zoobot.pytorch.training.finetune import (
+            FinetuneableZoobotAbstract,
+            FinetuneableZoobotTree,
+        )
     except ImportError as error:
         raise ImportError(
             'The full classifier requires Zoobot. Install it in the active '
@@ -70,9 +102,21 @@ def load_full_model(repo_id=DEFAULT_REPO, filename=DEFAULT_FILENAME,
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
 
-    model = FinetuneableZoobotTree.load_from_checkpoint(
-        str(checkpoint), map_location='cpu',
-    )
+    try:
+        model = FinetuneableZoobotTree.load_from_checkpoint(
+            str(checkpoint), map_location='cpu',
+        )
+    except TypeError as error:
+        if 'unexpected keyword argument' not in str(error):
+            raise
+        log.warning(
+            'Checkpoint uses obsolete ZooBot hyperparameters (%s); '
+            'reconstructing with the installed API.', error,
+        )
+        model, ignored = load_compatible_checkpoint(
+            checkpoint, FinetuneableZoobotTree, FinetuneableZoobotAbstract,
+        )
+        log.warning('Ignored obsolete checkpoint hyperparameters: %s', ignored)
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     model.eval()
