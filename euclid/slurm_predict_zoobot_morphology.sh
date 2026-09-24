@@ -32,6 +32,13 @@ MAX_OBJECTS=${4:-0}
 mkdir -p "${HF_HOME}" "$(dirname "${OUTPUT}")"
 cd /n03data/huertas/python/AstroCLIP
 
+DATASET_ARGS=()
+if [[ -f "${DATASET}" ]]; then
+    DATASET_ARGS=(--dataset "${DATASET}")
+else
+    echo "HDF5 not found; classifying directly from stamp filenames: ${DATASET}" >&2
+fi
+
 python - <<'PY'
 try:
     import zoobot
@@ -43,7 +50,7 @@ except ImportError as error:
 PY
 
 python -u -m euclid.predict_zoobot_morphology \
-    --dataset "${DATASET}" \
+    "${DATASET_ARGS[@]}" \
     --stamp-root "${STAMP_ROOT}" \
     --output "${OUTPUT}" \
     --repo-id mwalmsley/zoobot-finetuned-euclid \

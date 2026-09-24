@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -7,6 +9,7 @@ from euclid.predict_zoobot_morphology import (
     model_input_channels,
     normalize_answer_name,
     prediction_table,
+    select_stamps_without_h5,
 )
 
 
@@ -35,6 +38,21 @@ class DummyTree:
 
 
 class PredictZooBotMorphologyTest(unittest.TestCase):
+    def test_selects_stamps_without_h5(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vis = Path(directory) / 'VIS'
+            vis.mkdir()
+            for galaxy_id in (30, 10, 20):
+                (vis / f'VIS_{galaxy_id}.jpg').touch()
+            stamp_dir, rows, ids, n_paired, n_h5 = select_stamps_without_h5(
+                directory, max_objects=0,
+            )
+            self.assertEqual(stamp_dir, vis)
+            np.testing.assert_array_equal(ids, [10, 20, 30])
+            np.testing.assert_array_equal(rows, [-1, -1, -1])
+            self.assertEqual(n_paired, 3)
+            self.assertIsNone(n_h5)
+
     def test_removes_obsolete_checkpoint_hyperparameters(self):
         schema = DummySchema()
         clean, ignored = compatible_checkpoint_hparams(

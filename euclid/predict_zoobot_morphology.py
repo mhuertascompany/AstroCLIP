@@ -42,6 +42,32 @@ REQUIRED_EXPLORER_COLUMNS = {
 }
 
 
+def select_stamps_without_h5(stamp_root, band='VIS', max_objects=0, seed=42):
+    """Select directly from JPEG filenames when no full SFH HDF5 is present."""
+    stamp_root = Path(stamp_root)
+    stamp_dir = stamp_root / band if (stamp_root / band).is_dir() else stamp_root
+    if not stamp_dir.is_dir():
+        raise FileNotFoundError(f'Stamp directory not found: {stamp_dir}')
+    prefix = f'{band}_'
+    ids = []
+    for path in stamp_dir.glob(f'{prefix}*.jpg'):
+        try:
+            ids.append(int(path.stem[len(prefix):]))
+        except ValueError:
+            log.warning('Ignoring stamp with an unexpected name: %s', path)
+    galaxy_ids = np.asarray(sorted(ids), dtype=np.int64)
+    if not len(galaxy_ids):
+        raise ValueError(f'No {band}_<object_id>.jpg stamps found in {stamp_dir}.')
+    if len(np.unique(galaxy_ids)) != len(galaxy_ids):
+        raise ValueError('Stamp directory contains duplicate object IDs.')
+    if max_objects > 0 and max_objects < len(galaxy_ids):
+        rng = np.random.default_rng(seed)
+        selected = np.sort(rng.choice(len(galaxy_ids), max_objects, replace=False))
+        galaxy_ids = galaxy_ids[selected]
+    rows = np.full(len(galaxy_ids), -1, dtype=np.int64)
+    return stamp_dir, rows, galaxy_ids, len(ids), None
+
+
 def normalize_answer_name(name):
     """Convert a ZooBot schema label to the MER/HDF5 naming convention."""
     normalized = re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).strip('_').lower()
@@ -216,9 +242,14 @@ def run(dataset, stamp_root, output, band='VIS', image_size=224,
         raise FileExistsError(f'Refusing to overwrite {output}')
     if max_objects < 0:
         raise ValueError('max_objects must be nonnegative; zero means all stamps.')
-    stamp_dir, rows, galaxy_ids, n_paired, n_h5 = select_stamp_rows(
-        dataset, stamp_root, band, max_objects, seed,
-    )
+    if dataset is None:
+        stamp_dir, rows, galaxy_ids, n_paired, n_h5 = select_stamps_without_h5(
+            stamp_root, band, max_objects, seed,
+        )
+    else:
+        stamp_dir, rows, galaxy_ids, n_paired, n_h5 = select_stamp_rows(
+            dataset, stamp_root, band, max_objects, seed,
+        )
     device = torch.device(
         'cuda' if device_name == 'auto' and torch.cuda.is_available()
         else 'cpu' if device_name == 'auto' else device_name
@@ -248,7 +279,7 @@ def run(dataset, stamp_root, output, band='VIS', image_size=224,
     temporary.replace(output)
 
     manifest = {
-        'dataset': str(Path(dataset).resolve()),
+        'dataset': str(Path(dataset).resolve()) if dataset is not None else None,
         'stamp_directory': str(stamp_dir.resolve()),
         'model_repository': repo_id,
         'checkpoint_filename': filename,
@@ -270,7 +301,8 @@ def run(dataset, stamp_root, output, band='VIS', image_size=224,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--dataset', type=Path, required=True)
+    parser.add_argument('--dataset', type=Path,
+                        help='Optional HDF5 used only to record matching row numbers.')
     parser.add_argument('--stamp-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--band', default='VIS')

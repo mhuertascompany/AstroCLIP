@@ -1092,6 +1092,25 @@ usable JPEG, while replacing values for every newly classified stamp. Refresh
 the diagnostic/explorer metadata afterward; image embeddings and UMAP
 coordinates do not need to be recomputed.
 
+For the aligned bright frozen-MLP run, regenerate the diagnostics and local
+bundle from the saved validation embeddings after installing the full-sample
+ZooBot predictions:
+
+```bash
+sbatch euclid/slurm_refresh_bright_clip_explorer.sh
+```
+
+This is a CPU job. It does not reload the CLIP checkpoint, re-encode the
+images, or refit UMAP; the original coordinates therefore remain directly
+comparable to earlier cluster and track figures. It writes a new product at
+`training_bright_frozen_mlp/evaluation_best_full_zoobot`, including
+`euclid_clip_umap_diagnostics.pdf` and `explorer_bundle/`.
+
+ZooBot inference itself does not require the SFH HDF5. If the dataset argument
+does not exist, the SLURM script classifies every valid `VIS_<object_id>.jpg`
+directly and records `h5_row=-1`; the later restoration still performs an
+exact `object_id` join once the actual HDF5 path is supplied.
+
 ### Interactive Euclid embedding explorer
 
 Recent SFH activity is computed locally for existing bundles at startup:
