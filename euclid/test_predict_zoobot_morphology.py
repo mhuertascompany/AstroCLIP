@@ -18,6 +18,8 @@ class DummySchema:
         'has-spiral-arms_yes',
         'has-spiral-arms_no',
         'merging_none',
+        'merging_minor-disturbance',
+        'merging_major-disturbance',
         'merging_merger',
     ]
 
@@ -54,9 +56,25 @@ class PredictZooBotMorphologyTest(unittest.TestCase):
             normalize_answer_name('smooth-or-featured_problem'),
             'smooth_or_featured_artifact_star_zoom',
         )
+        self.assertEqual(
+            normalize_answer_name('smooth-or-featured-euclid_smooth'),
+            'smooth_or_featured_smooth',
+        )
+        self.assertEqual(
+            normalize_answer_name('smooth-or-featured-euclid_problem'),
+            'smooth_or_featured_artifact_star_zoom',
+        )
+        self.assertEqual(
+            normalize_answer_name('has-spiral-arms-euclid_yes'),
+            'has_spiral_arms_yes',
+        )
+        self.assertEqual(
+            normalize_answer_name('merging-euclid_major-disturbance'),
+            'merging_major_disturbance',
+        )
 
     def test_prediction_table_preserves_exact_ids_and_rows(self):
-        values = np.arange(14, dtype=np.float32).reshape(2, 7) + 1
+        values = np.arange(18, dtype=np.float32).reshape(2, 9) + 1
         table, _, columns = prediction_table(
             np.array([2700000000000000001, 2700000000000000002]),
             np.array([7, 9]), values, DummySchema(),
@@ -67,7 +85,7 @@ class PredictZooBotMorphologyTest(unittest.TestCase):
         self.assertIn('merging_merger', table.colnames)
 
     def test_rejects_nonpositive_concentrations(self):
-        values = np.ones((1, 7), dtype=np.float32)
+        values = np.ones((1, 9), dtype=np.float32)
         values[0, 2] = 0
         with self.assertRaisesRegex(ValueError, 'must be positive'):
             prediction_table(np.array([1]), np.array([0]), values, DummySchema())

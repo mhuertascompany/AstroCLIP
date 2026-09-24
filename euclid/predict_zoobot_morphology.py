@@ -29,11 +29,26 @@ log = logging.getLogger(__name__)
 
 DEFAULT_REPO = 'mwalmsley/zoobot-finetuned-euclid'
 DEFAULT_FILENAME = 'FinetuneableZoobotTree.ckpt'
+REQUIRED_EXPLORER_COLUMNS = {
+    'smooth_or_featured_smooth',
+    'smooth_or_featured_featured_or_disk',
+    'smooth_or_featured_artifact_star_zoom',
+    'has_spiral_arms_yes',
+    'has_spiral_arms_no',
+    'merging_none',
+    'merging_minor_disturbance',
+    'merging_major_disturbance',
+    'merging_merger',
+}
 
 
 def normalize_answer_name(name):
     """Convert a ZooBot schema label to the MER/HDF5 naming convention."""
     normalized = re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).strip('_').lower()
+    # The released checkpoint namespaces each decision-tree question with
+    # ``-euclid`` (e.g. smooth-or-featured-euclid_smooth), whereas the MER
+    # catalog omits that survey tag.
+    normalized = normalized.replace('_euclid_', '_')
     # Older internal Euclid schemas called the combined rejection answer
     # ``problem``; the released MER catalog calls it ``artifact_star_zoom``.
     if normalized == 'smooth_or_featured_problem':
@@ -142,7 +157,7 @@ def predict_batches(model, loader, device):
             galaxy_ids.append(np.asarray(batch_ids, dtype=np.int64))
             rows.append(np.asarray(batch_rows, dtype=np.int64))
             if batch_index == 0 or (batch_index + 1) % 50 == 0:
-                log.info('Classified %,d stamps', sum(len(x) for x in galaxy_ids))
+                log.info('Classified %s stamps', f'{sum(len(x) for x in galaxy_ids):,}')
     return (
         np.concatenate(predictions).astype(np.float32),
         np.concatenate(galaxy_ids),
@@ -165,6 +180,12 @@ def model_input_channels(model):
 
 def prediction_table(galaxy_ids, rows, predictions, schema):
     raw_columns, columns = normalized_schema_columns(schema)
+    missing_columns = sorted(REQUIRED_EXPLORER_COLUMNS.difference(columns))
+    if missing_columns:
+        raise ValueError(
+            'ZooBot schema cannot supply the explorer morphology fields; '
+            f'missing normalized columns: {missing_columns}'
+        )
     if predictions.shape != (len(galaxy_ids), len(columns)):
         raise ValueError(
             f'Predictions have shape {predictions.shape}, but schema has '
