@@ -44,6 +44,7 @@ from euclid.sfh_migration import catalog_migration
 from euclid.rejuvenation import catalog_diagnostics, LABELS as REJ_LABELS
 from euclid.main_sequence_sfh import main_sequence_along_sfh
 from euclid.ms_deviation import catalog_deviations
+from euclid.recent_ms import WINDOWS, catalog_recent_offsets, matched_mask
 from euclid.sfh_shape import sfh_duration_80, sfh_recent_activity
 from bokeh.models import (
     BasicTicker,
@@ -663,10 +664,14 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     z_safe, z_finite = _finite_values(data['redshift'])
     z_mask = np.ones(n_objects, dtype=bool)
     property_mask = np.ones(n_objects, dtype=bool)
+    match_mask = np.ones(n_objects, dtype=bool)
+    match_state = {'values': None, 'masses': None, 'settings': None}
     view = CDSView(filter=BooleanFilter(booleans=[True] * n_objects))
 
     def update_view():
-        view.filter = BooleanFilter(booleans=(z_mask & property_mask).tolist())
+        visible = z_mask & property_mask & match_mask
+        view.filter = BooleanFilter(booleans=visible.tolist())
+        source.selected.indices = [i for i in source.selected.indices if visible[i]]
 
     def make_plot(x_field, y_field, color_field, initial_values, title):
         _, _, _, lower, upper, _ = _bounds(initial_values)
@@ -794,9 +799,10 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     z_high = float(np.ceil(redshift_finite.max() * 10) / 10) if len(redshift_finite) else 6
     redshift_slider = pn.widgets.RangeSlider(
         name='Redshift range', start=z_low, end=z_high,
-        value=(z_low, z_high), step=0.1, width=220,
+        value=(z_low, z_high), step=0.01, width=220,
     )
 
+    property_enabled = pn.widgets.Checkbox(name='Use additional property filter', value=False)
     filter_property = pn.widgets.Select(
         name='Filter property (left run)', options=all_properties,
         value=left_color_default, width=220,
@@ -805,6 +811,15 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         'Filter range', property_values(left_run_default, left_color_default),
     )
     filter_range.width = 220
+    match_enabled = pn.widgets.Checkbox(name='Match mass + recent ΔMS', value=False)
+    match_window = pn.widgets.Select(name='Recent activity window', options=list(WINDOWS), value='0.1 cosmic age')
+    match_mass_low = pn.widgets.FloatInput(name='Minimum log M★', value=9.5, step=.1, width=105)
+    match_mass_high = pn.widgets.FloatInput(name='Maximum log M★', value=10.5, step=.1, width=105)
+    match_recent_low = pn.widgets.FloatInput(name='Minimum ΔMS', value=-.3, step=.1, width=105)
+    match_recent_high = pn.widgets.FloatInput(name='Maximum ΔMS', value=.3, step=.1, width=105)
+    match_compute = pn.widgets.Button(name='Compute recent ΔMS', button_type='primary')
+    match_select = pn.widgets.Button(name='Select all visible', button_type='success')
+    match_info = pn.pane.Markdown('Compute recent ΔMS, set mass/activity bounds and the redshift range, then enable matching.', width=220)
     cluster_count = pn.widgets.IntInput(
         name='k clusters', value=6, start=2, end=50, width=90,
     )
@@ -824,7 +839,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     ms_toggle = pn.widgets.Checkbox(name='MS along inferred mass history', value=True)
     delta_ms_toggle = pn.widgets.Checkbox(name='Show ΔMS history below SFH', value=True)
     ms_return = pn.widgets.FloatSlider(name='MS returned mass fraction R', start=0., end=.6, step=.05, value=0.)
-    ms_deviation_button = pn.widgets.Button(name='Compute D+ / D−', button_type='primary')
+    ms_deviation_button = pn.widgets.Button(name='Compute MS statistics', button_type='primary')
+    ms_delta_floor = pn.widgets.FloatInput(name='ΔMS lower floor (dex)', value=-3., step=.5)
     ms_deviation_info = pn.pane.Markdown('Uses the median SFH and current MS settings.')
     ms_sfr_shift = pn.widgets.FloatInput(name='Empirical MS SFR shift (dex)', value=-.93, step=.05)
     ms_offset = pn.widgets.FloatInput(name='Mass → Kroupa offset (dex)', value=0., step=.01)
@@ -882,7 +898,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         span = np.linalg.norm(np.ptp(xy[finite], axis=0)) if finite.any() else 0
         try:
             selected = sample_segment(xy, start, point, path_count.value,
-                                      span * path_radius.value / 100, z_mask & property_mask)
+                                      span * path_radius.value / 100, z_mask & property_mask & match_mask)
         except ValueError as error:
             info.object = str(error)
             return
@@ -933,9 +949,78 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     for widget in (cosmic_toggle, ms_toggle, ms_return, ms_offset, ms_sfr_shift, delta_ms_toggle):
         widget.param.watch(update_cosmic_reference, 'value')
 
+    def apply_match(event=None):
+        nonlocal match_mask
+        match_mask = np.ones(n_objects, dtype=bool)
+        if match_enabled.value:
+            if match_state['values'] is None:
+                match_mask[:] = False
+                match_info.object = 'Compute recent ΔMS first. No matched objects displayed.'
+            else:
+                j = list(WINDOWS).index(match_window.value)
+                match_mask = matched_mask(match_state['masses'], data['redshift'],
+                    match_state['values'][:, j], (match_mass_low.value, match_mass_high.value),
+                    redshift_slider.value, (match_recent_low.value, match_recent_high.value))
+                match_info.object = (f"**{np.count_nonzero(match_mask & property_mask):,} visible matches**. "
+                    f"{match_window.value}; {match_state['settings']}. ΔMS ≤ −4 dex is censored to −4.")
+        elif match_state['values'] is not None:
+            match_info.object = 'Matching disabled. Cached recent ΔMS is available for colors; enable matching to apply the bounds.'
+        clear_path()
+        update_view()
+        refresh(source.selected.indices)
+
+    def compute_recent(event=None):
+        match_compute.disabled = True
+        try:
+            settings = dict(return_fraction=ms_return.value, mass_offset=ms_offset.value,
+                            ms_sfr_offset=ms_sfr_shift.value)
+            with h5py.File(h5_path, 'r') as h:
+                rows = data['h5_rows']
+                masses = (_read_rows(h['phz_pp_median_stellarmass'], rows)
+                          if 'phz_pp_median_stellarmass' in h else
+                          next((run['properties']['log M★'] for run in data['runs'].values()
+                                if 'log M★' in run['properties']), np.full(n_objects, np.nan)))
+                values = catalog_recent_offsets(_read_rows(h['sfh'], rows), h['sfh_time_grid'][:],
+                    data['redshift'], masses,
+                    _read_rows(h['sfh_time_norm'], rows) if 'sfh_time_norm' in h else None,
+                    epsilon=float(h.attrs.get('sfh_log_epsilon', 1e-10)), **settings)
+            suffix = f"R={ms_return.value:g}, MS={ms_sfr_shift.value:g}, mass offset={ms_offset.value:g} dex"
+            match_state.update(values=values, masses=masses, settings=suffix)
+            labels = [f'Recent ΔMS {window} [floor=-4; {suffix}]' for window in WINDOWS]
+            for run in data['runs'].values():
+                run['properties'].update({label: values[:,j] for j,label in enumerate(labels)})
+            properties = sorted({key for run in data['runs'].values() for key in run['properties']})
+            for widget in (left_color, right_color, filter_property):
+                widget.options = properties
+            match_info.object = 'Recent ΔMS computed. Enable matching to apply the bounds.'
+            apply_match()
+        except ValueError as error:
+            match_info.object = f'Cannot compute recent ΔMS: {error}'
+        finally:
+            match_compute.disabled = False
+
+    def invalidate_recent(event=None):
+        match_state.update(values=None, settings=None)
+        apply_match()
+        match_info.object = 'MS settings changed: recompute recent ΔMS before matching.'
+
+    def select_visible(event=None):
+        clear_path()
+        selected = np.flatnonzero(z_mask & property_mask & match_mask).tolist()
+        source.selected.indices = selected
+        refresh(selected)
+
+    match_compute.on_click(compute_recent)
+    match_select.on_click(select_visible)
+    for widget in (match_enabled, match_window, match_mass_low, match_mass_high,
+                   match_recent_low, match_recent_high, redshift_slider):
+        widget.param.watch(apply_match, 'value')
+    for widget in (ms_return, ms_offset, ms_sfr_shift):
+        widget.param.watch(invalidate_recent, 'value')
+
     def compute_ms_deviation(event=None):
         ms_deviation_button.disabled = True
-        ms_deviation_info.object = 'Computing integrated MS deviations…'
+        ms_deviation_info.object = 'Computing MS history statistics…'
         settings = dict(return_fraction=ms_return.value, mass_offset=ms_offset.value,
                         ms_sfr_offset=ms_sfr_shift.value)
         try:
@@ -948,11 +1033,17 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
                 values = catalog_deviations(
                     _read_rows(h['sfh'], rows), h['sfh_time_grid'][:], data['redshift'], masses,
                     _read_rows(h['sfh_time_norm'], rows) if 'sfh_time_norm' in h else None,
-                    epsilon=float(h.attrs.get('sfh_log_epsilon', 1e-10)), **settings)
+                    epsilon=float(h.attrs.get('sfh_log_epsilon', 1e-10)),
+                    include_summary=True, delta_floor=ms_delta_floor.value, **settings)
             suffix = (f" [R={settings['return_fraction']:g}, MS={settings['ms_sfr_offset']:g}, "
                       f"mass={settings['mass_offset']:g} dex]")
             labels = ['MS D+ excess'+suffix, 'MS D− deficit'+suffix,
                       'MS calibrated time fraction'+suffix]
+            floor_suffix = f' [ΔMS floor={ms_delta_floor.value:g} dex]'+suffix
+            labels += [name+floor_suffix for name in (
+                'MS maximum positive ΔMS (dex)', 'MS minimum negative ΔMS (dex)',
+                'MS positive peak ∫Hdt', 'MS negative peak ∫Hdt',
+                'MS time-weighted mean ΔMS (dex)', 'MS below-floor time fraction')]
             for run in data['runs'].values():
                 run['properties'].update({label: values[:, i] for i, label in enumerate(labels)})
             properties = sorted({key for run in data['runs'].values() for key in run['properties']})
@@ -1041,7 +1132,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             left_run.value, filter_property.value,
         ))
         low, high = filter_range.value
-        property_mask = (values >= low) & (values <= high)
+        property_mask = ((values >= low) & (values <= high) if property_enabled.value
+                         else np.ones(n_objects, dtype=bool))
         update_view()
 
     def apply_redshift_filter(event=None):
@@ -1056,7 +1148,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         except ImportError:
             cluster_info.object = 'Install scikit-learn to use dynamic clustering.'
             return
-        visible = np.flatnonzero(z_mask & property_mask)
+        visible = np.flatnonzero(z_mask & property_mask & match_mask)
         k = cluster_count.value
         if len(visible) < k:
             cluster_info.object = f'Only {len(visible)} visible galaxies; need at least k={k}.'
@@ -1087,7 +1179,10 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         )
 
     def reset(event=None):
-        nonlocal property_mask, z_mask
+        nonlocal property_mask, z_mask, match_mask
+        match_enabled.value = False
+        property_enabled.value = False
+        match_mask = np.ones(n_objects, dtype=bool)
         property_mask = np.ones(n_objects, dtype=bool)
         z_mask = np.ones(n_objects, dtype=bool)
         redshift_slider.value = (z_low, z_high)
@@ -1110,12 +1205,18 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             writer = csv.writer(stream)
             writer.writerow([
                 'galaxy_id', 'redshift', 'source_h5_row', 'bundle_h5_row',
+                'catalog_log_stellar_mass', 'recent_delta_ms', 'recent_window', 'recent_ms_settings',
             ])
             for index in selected:
                 writer.writerow([
                     int(data['galaxy_ids'][index]), float(data['redshift'][index]),
                     int(data['source_h5_rows'][index]),
                     int(data['h5_rows'][index]),
+                    (float(match_state['masses'][index]) if match_state['masses'] is not None else ''),
+                    (float(match_state['values'][index, list(WINDOWS).index(match_window.value)])
+                     if match_state['values'] is not None else ''),
+                    match_window.value if match_state['values'] is not None else '',
+                    match_state['settings'] or '',
                 ])
         info.object = f'Saved **{len(selected):,}** IDs to `{selection_output}`.'
 
@@ -1147,6 +1248,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     right_range.param.watch(
         lambda event: setattr(right_mapper, 'high', float(event.new[1])), 'value',
     )
+    property_enabled.param.watch(apply_property_filter, 'value')
     filter_property.param.watch(update_filter_bounds, 'value')
     filter_range.param.watch(apply_property_filter, 'value')
     redshift_slider.param.watch(apply_redshift_filter, 'value')
@@ -1178,9 +1280,15 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         pn.pane.Markdown('## Euclid embedding explorer'),
         pn.layout.Divider(),
         redshift_slider,
+        pn.pane.Markdown('**Compare at matched mass, activity and redshift**'),
+        match_compute, match_window,
+        pn.Row(match_mass_low, match_mass_high),
+        pn.Row(match_recent_low, match_recent_high),
+        match_enabled, match_select, match_info,
+        pn.pane.Markdown('ΔMS = log₁₀(∫SFR dt / ∫MS dt) in the chosen window. Uses the current shifted MS along inferred mass history. Matching uses catalog log mass; all filters intersect. Missing values are excluded. The generic property filter below also applies. Select all visible or lasso separated UMAP regions to compare shapes; Save selected IDs exports the selected subset.', styles={'font-size':'11px'}),
         pn.layout.Divider(),
         pn.pane.Markdown('**Filter and cluster in the left panel**'),
-        filter_property,
+        property_enabled, filter_property,
         filter_range,
         pn.Row(cluster_count, cluster_button),
         reset_button,
@@ -1195,8 +1303,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         pn.pane.Markdown('**Rejuvenation candidates**'),
         rej_recent, rej_lull, rej_contrast, rej_old, rej_mass, rej_button, rej_info,
         ms_toggle, delta_ms_toggle, ms_return, ms_offset, ms_sfr_shift,
-        ms_deviation_button, ms_deviation_info,
-        pn.pane.Markdown("D+ and D− integrate positive and negative SFR−MS differences separately, divided by the integral of SFR+MS. Both are in [0,1], with sum ≤1. Full inferred history including MS extrapolation; calibrated time fraction reports coverage. Undefined pre-formation bins are excluded; zero-SFR bins with nonzero MS count as deficit. Median histories only.", styles={'font-size': '11px'}),
+        ms_delta_floor, ms_deviation_button, ms_deviation_info,
+        pn.pane.Markdown("D+ and D− integrate positive and negative SFR−MS differences separately, divided by the integral of SFR+MS. Both are in [0,1], with sum ≤1. Full inferred history including MS extrapolation; calibrated time fraction reports coverage. Undefined pre-formation bins are excluded; zero-SFR bins with nonzero MS count as deficit. Median histories only. ΔMS extrema and time-weighted mean use the adjustable lower floor, including zero SFR. Peak times are accumulated ∫Hdt = ln(a_obs/a_peak), evaluated at bin midpoints; proportional to elapsed fixed-overdensity halo dynamical times, with no halo prefactor applied. The mean remains weighted by physical time; ties use the most recent bin. If an excursion is absent its amplitude is zero and its time undefined. Below-floor time fraction indicates censoring. These statistics also include extrapolated MS epochs.", styles={'font-size': '11px'}),
         pn.pane.Markdown("ΔMS = log10(SFR / shifted MS SFR). Zero is the reference; positive is above, negative below. Dotted segments extrapolate the MS. Triangles mark values beyond ±3 dex or zero SFR (−∞); bins with no inferred mass are undefined and blank. Uses the median history, without posterior uncertainty propagation.", styles={'font-size': '11px'}),
         pn.pane.Markdown("Green: main-sequence SFR along this galaxy’s inferred mass history, on the SAME scale as blue (not independently normalized). The empirical SFR shift defaults to −0.93 dex, calibrated to the median 100 Myr SFH/MS offset at observation for 9,719 positive-rate bright validation galaxies with R=0. Set shift to 0 for the original MS. This constant shift across all epochs is illustrative, not a validated historical correction; blue/green compares against the shifted reference. Constant recycling and in-situ growth assumed; dotted portions extrapolate. IMF unverified: offset 0 assumes Kroupa; Chabrier +0.03 dex, Salpeter −0.21 dex.", styles={'font-size': '11px'}),
         cosmic_toggle,

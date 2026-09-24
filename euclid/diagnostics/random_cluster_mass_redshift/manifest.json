@@ -1,0 +1,27 @@
+{
+  "seed": 42,
+  "mass_edges": [
+    9.0,
+    9.5,
+    10.0,
+    10.5,
+    11.0,
+    11.5
+  ],
+  "redshift_edges": [
+    0.0,
+    0.3,
+    0.6,
+    1.0,
+    1.5
+  ],
+  "n_parent": 13717,
+  "n_in_bins": 12355,
+  "n_outside_bins": 1362,
+  "n_selected": 134,
+  "pages": 18,
+  "ssfr_selection": false,
+  "mass_source": "PHZ catalog median stellar mass",
+  "redshift_source": "explorer membership redshift",
+  "bundle": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle"
+}

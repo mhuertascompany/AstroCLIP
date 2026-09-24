@@ -1,0 +1,34 @@
+{
+  "source": "euclid_selected_galaxies.csv",
+  "n_source_ids": 647,
+  "n_matched_with_stamps": 647,
+  "n_with_log_stellar_mass_at_least_10p5": 249,
+  "selection": "Three descendants from the selected IDs with log stellar mass >= 10.8, chosen nearest the 10th, 50th, and 90th percentiles of PHZ deltaMS",
+  "ms_sfr_offset_dex": -0.93,
+  "descendants": [
+    {
+      "galaxy_id": 2697467918685275892,
+      "log_stellar_mass": 10.939706802368164,
+      "redshift": 0.8479999899864197,
+      "phz_log_ssfr": -9.917871475219727,
+      "phz_delta_ms": 0.39021897775214176,
+      "activity_quantile": 0.1
+    },
+    {
+      "galaxy_id": 2754811443675276593,
+      "log_stellar_mass": 10.879434585571289,
+      "redshift": 0.6399999856948853,
+      "phz_log_ssfr": -9.52278208732605,
+      "phz_delta_ms": 0.956468778224893,
+      "activity_quantile": 0.5
+    },
+    {
+      "galaxy_id": 2722018820686215292,
+      "log_stellar_mass": 10.915478706359863,
+      "redshift": 1.003999948501587,
+      "phz_log_ssfr": -8.420492172241211,
+      "phz_delta_ms": 1.762882973102649,
+      "activity_quantile": 0.9
+    }
+  ]
+}

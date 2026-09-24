@@ -1,0 +1,39 @@
+{
+  "catalog": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/phz_sfr_mass_matched_bright.fits",
+  "membership": "euclid/diagnostics/cluster_recent_ms_100myr/cluster_membership.csv",
+  "formula": "phz_pp_median_sfr - phz_pp_median_stellarmass",
+  "n": 13717,
+  "n_valid": 13717,
+  "summary": [
+    {
+      "cluster": 1,
+      "n": 4928,
+      "n_valid": 4928,
+      "median_log_ssfr": -9.46057802438736,
+      "p16_p84": [
+        -9.833048615455628,
+        -8.973316556215286
+      ]
+    },
+    {
+      "cluster": 2,
+      "n": 5303,
+      "n_valid": 5303,
+      "median_log_ssfr": -9.54594498872757,
+      "p16_p84": [
+        -9.965248309373855,
+        -9.066043219566346
+      ]
+    },
+    {
+      "cluster": 3,
+      "n": 3486,
+      "n_valid": 3486,
+      "median_log_ssfr": -10.768901735544205,
+      "p16_p84": [
+        -11.6306666970253,
+        -10.087178683280944
+      ]
+    }
+  ]
+}

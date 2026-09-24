@@ -62,12 +62,13 @@ ZOOBOT_KEYS = [key for key in MORPHOLOGY_KEYS if key.startswith('zoobot_')]
 
 
 class StampDataset(Dataset):
-    def __init__(self, stamp_dir, band, galaxy_ids, rows, image_size=224):
+    def __init__(self, stamp_dir, band, galaxy_ids, rows, image_size=224,
+                 num_channels=3):
         self.stamp_dir = Path(stamp_dir)
         self.band = band
         self.galaxy_ids = np.asarray(galaxy_ids, dtype=np.int64)
         self.rows = np.asarray(rows, dtype=np.int64)
-        self.transform = _inference_transform(image_size)
+        self.transform = _inference_transform(image_size, num_channels)
 
     def __len__(self):
         return len(self.galaxy_ids)

@@ -1,0 +1,36 @@
+{
+  "descendant_id": 2648419808652582361,
+  "descendant_bundle_index": 11378,
+  "descendant_log_stellar_mass": 11.000049591064453,
+  "descendant_redshift": 0.8100000023841858,
+  "minimum_descendant_mass": 10.5,
+  "minimum_progenitor_mass": 9.0,
+  "fractions_used": [
+    0.8,
+    0.6,
+    0.4,
+    0.2,
+    0.1,
+    0.03,
+    0.01
+  ],
+  "mass_tolerance_dex": 0.15,
+  "history_gyr": 2.0,
+  "minimum_comparison_gyr": 0.5,
+  "n_analogues_per_stage": 5,
+  "selection_uses": [
+    "predicted stellar mass",
+    "renormalized cumulative SFH"
+  ],
+  "selection_does_not_use": [
+    "redshift",
+    "morphology",
+    "image embedding",
+    "UMAP position",
+    "sSFR"
+  ],
+  "formed_mass_return_fraction": 0.0,
+  "bundle": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle",
+  "archive": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle/00_training_bright_frozen_mlp_euclid_clip_umap_diagnostics.npz",
+  "pdf": "output/pdf/euclid_progenitor_analogue_pilot.pdf"
+}

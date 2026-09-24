@@ -1,0 +1,38 @@
+{
+  "source": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle/euclid_explorer.h5",
+  "seed": 42,
+  "u_max": 3.0,
+  "bins": 250,
+  "examples": [
+    {
+      "object_id": "2651296610638876525",
+      "redshift": 0.12399999797344208,
+      "retained_mass_fraction": 1.0000000000000002
+    },
+    {
+      "object_id": "2656673204647552685",
+      "redshift": 0.1080000028014183,
+      "retained_mass_fraction": 1.0
+    },
+    {
+      "object_id": "2755606972664657618",
+      "redshift": 0.7200000286102295,
+      "retained_mass_fraction": 1.0
+    },
+    {
+      "object_id": "2705097314677698697",
+      "redshift": 0.7739999890327454,
+      "retained_mass_fraction": 1.0000000000000004
+    },
+    {
+      "object_id": "2708461817638786982",
+      "redshift": 0.5120000243186951,
+      "retained_mass_fraction": 1.0
+    },
+    {
+      "object_id": "2765031540674418632",
+      "redshift": 0.3499999940395355,
+      "retained_mass_fraction": 0.9805091293909053
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "archive": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle/00_training_bright_frozen_mlp_euclid_clip_umap_diagnostics.npz",
+  "bundle": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle",
+  "embedding": "sfh_embedding",
+  "algorithm": "KMeans k=3 n_init=10 seed=42 on stored embeddings",
+  "label_order": "increasing median mean fractional lookback",
+  "window": "0.1 cosmic age",
+  "settings": {
+    "return_fraction": 0.0,
+    "mass_offset": 0.0,
+    "ms_sfr_offset": -0.93,
+    "epsilon": 1e-10
+  },
+  "summary": [
+    {
+      "cluster": 1,
+      "n": 4928,
+      "n_valid_recent": 4928,
+      "median_delta": 0.25557159654065054,
+      "n_censored": 0,
+      "low": 11,
+      "middle": 4409,
+      "high": 508
+    },
+    {
+      "cluster": 2,
+      "n": 5303,
+      "n_valid_recent": 5303,
+      "median_delta": -0.224007018954368,
+      "n_censored": 14,
+      "low": 762,
+      "middle": 4534,
+      "high": 7
+    },
+    {
+      "cluster": 3,
+      "n": 3486,
+      "n_valid_recent": 3486,
+      "median_delta": -4.0,
+      "n_censored": 1999,
+      "low": 2964,
+      "middle": 500,
+      "high": 22
+    }
+  ]
+}

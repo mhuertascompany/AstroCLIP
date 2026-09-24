@@ -1,0 +1,62 @@
+{
+  "selection": "euclid_selected_galaxies.csv",
+  "selection_mass_cut": null,
+  "minimum_progenitor_mass": 9.0,
+  "ms_sfr_offset_dex": -0.93,
+  "examples": [
+    {
+      "mass_quantile": 0.05,
+      "galaxy_id": 2763283538658028988,
+      "log_stellar_mass": 10.252273559570312,
+      "redshift": 0.3799999952316284,
+      "phz_delta_ms": 0.5363827578429129,
+      "n_checkpoints": 12,
+      "pdf": "euclid/diagnostics/selected_progenitor_mass_examples/mass_q0.05_2763283538658028988.pdf"
+    },
+    {
+      "mass_quantile": 0.2,
+      "galaxy_id": 2644190652681068440,
+      "log_stellar_mass": 10.609413146972656,
+      "redshift": 0.2919999957084656,
+      "phz_delta_ms": 0.3996890767164526,
+      "n_checkpoints": 13,
+      "pdf": "euclid/diagnostics/selected_progenitor_mass_examples/mass_q0.20_2644190652681068440.pdf"
+    },
+    {
+      "mass_quantile": 0.4,
+      "galaxy_id": 2748087812675550990,
+      "log_stellar_mass": 10.847530364990234,
+      "redshift": 0.5979999899864197,
+      "phz_delta_ms": -0.015850089326901462,
+      "n_checkpoints": 13,
+      "pdf": "euclid/diagnostics/selected_progenitor_mass_examples/mass_q0.40_2748087812675550990.pdf"
+    },
+    {
+      "mass_quantile": 0.6,
+      "galaxy_id": 2751998450659860515,
+      "log_stellar_mass": 11.057034492492676,
+      "redshift": 0.7919999957084656,
+      "phz_delta_ms": -0.46985902876153285,
+      "n_checkpoints": 14,
+      "pdf": "euclid/diagnostics/selected_progenitor_mass_examples/mass_q0.60_2751998450659860515.pdf"
+    },
+    {
+      "mass_quantile": 0.8,
+      "galaxy_id": 2753746377651000618,
+      "log_stellar_mass": 11.241734504699707,
+      "redshift": 0.8600000143051147,
+      "phz_delta_ms": -2.148464066356427,
+      "n_checkpoints": 14,
+      "pdf": "euclid/diagnostics/selected_progenitor_mass_examples/mass_q0.80_2753746377651000618.pdf"
+    },
+    {
+      "mass_quantile": 0.95,
+      "galaxy_id": 2660514061680209499,
+      "log_stellar_mass": 11.48779582977295,
+      "redshift": 0.9200000166893005,
+      "phz_delta_ms": -0.7550414327848052,
+      "n_checkpoints": 14,
+      "pdf": "euclid/diagnostics/selected_progenitor_mass_examples/mass_q0.95_2660514061680209499.pdf"
+    }
+  ]
+}

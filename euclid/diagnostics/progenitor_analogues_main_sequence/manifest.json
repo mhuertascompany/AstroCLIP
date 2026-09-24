@@ -1,0 +1,47 @@
+{
+  "descendant_id": 2735366649682752752,
+  "descendant_bundle_index": 11783,
+  "descendant_log_stellar_mass": 10.999632835388184,
+  "descendant_redshift": 0.7059999704360962,
+  "descendant_phz_log_ssfr": -10.21717780828476,
+  "descendant_phz_delta_ms": 0.23791181499051406,
+  "quenched_descendant": false,
+  "quenched_log_ssfr_max": -11.5,
+  "main_sequence_descendant": true,
+  "main_sequence_delta_max": 0.3,
+  "minimum_descendant_mass": 10.5,
+  "minimum_progenitor_mass": 9.0,
+  "fractions_used": [
+    0.95,
+    0.9,
+    0.85,
+    0.8,
+    0.6,
+    0.4,
+    0.2,
+    0.1,
+    0.03,
+    0.01
+  ],
+  "mass_tolerance_dex": 0.15,
+  "history_gyr": 2.0,
+  "minimum_comparison_gyr": 0.5,
+  "n_analogues_per_stage": 5,
+  "selection_uses": [
+    "predicted stellar mass",
+    "renormalized cumulative SFH"
+  ],
+  "selection_does_not_use": [
+    "redshift",
+    "morphology",
+    "image embedding",
+    "UMAP position",
+    "sSFR"
+  ],
+  "formed_mass_return_fraction": 0.0,
+  "ms_sfr_offset_dex": -0.93,
+  "catalog": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/phz_sfr_mass_matched_bright.fits",
+  "bundle": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle",
+  "archive": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle/00_training_bright_frozen_mlp_euclid_clip_umap_diagnostics.npz",
+  "pdf": "output/pdf/euclid_progenitor_analogue_main_sequence.pdf"
+}

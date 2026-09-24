@@ -112,7 +112,7 @@ def read_catalog(path):
 
 def restore_metadata(dataset, catalogs, columns=DEFAULT_COLUMNS,
                      id_column='object_id', allow_missing=False, replace=False,
-                     dry_run=False):
+                     dry_run=False, preserve_unmatched=False):
     """Add ID-aligned FITS metadata datasets without touching SFH arrays."""
     dataset = Path(dataset)
     catalogs = [Path(path) for path in catalogs]
@@ -162,6 +162,16 @@ def restore_metadata(dataset, catalogs, columns=DEFAULT_COLUMNS,
         key: values for key, values in merged.items()
         if replace or key not in existing
     }
+    if preserve_unmatched:
+        if not replace:
+            raise ValueError('--preserve-unmatched requires --replace.')
+        with h5py.File(dataset, 'r') as source:
+            for key, values in pending.items():
+                if key not in source:
+                    continue
+                previous = np.asarray(source[key][:], dtype=np.float32)
+                missing = ~np.isfinite(values)
+                values[missing] = previous[missing]
     retained = sorted(set(merged).difference(pending))
     print(f'Existing datasets retained: {retained}', flush=True)
     print(f'Datasets to add: {sorted(pending)}', flush=True)
@@ -227,11 +237,13 @@ def main():
     parser.add_argument('--allow-missing', action='store_true')
     parser.add_argument('--replace', action='store_true',
                         help='Replace existing metadata datasets after staging new values.')
+    parser.add_argument('--preserve-unmatched', action='store_true',
+                        help='With --replace, retain existing values where the new catalog is missing.')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     restore_metadata(
         args.dataset, args.catalog, args.columns, args.id_column,
-        args.allow_missing, args.replace, args.dry_run,
+        args.allow_missing, args.replace, args.dry_run, args.preserve_unmatched,
     )
 
 

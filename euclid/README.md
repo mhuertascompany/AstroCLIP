@@ -1041,6 +1041,57 @@ VIS magnitude, redshift, size, and point-like probability: if those dominate
 the map while morphology is mixed, the encoder is mostly organizing image
 quality or angular scale rather than galaxy structure.
 
+To classify every bright object that has a usable stamp, run the complete
+frozen Euclid ZooBot decision tree rather than the encoder alone. The published
+checkpoint contains the encoder and its 46-answer Dirichlet head. The resulting
+FITS columns use the same names as the MER ZooBot columns, so the explorer can
+derive conditional smooth, spiral, bar, and merger probabilities from them.
+
+First run a 100-object smoke test on n36:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+
+sbatch euclid/slurm_predict_zoobot_morphology.sh \
+  "${BASE}/sfh_clip_150k.h5" \
+  "${BASE}/zoobot_stamps_rmax" \
+  "${BASE}/zoobot_full_predictions_smoke.fits" \
+  100
+```
+
+The first run downloads
+`mwalmsley/zoobot-finetuned-euclid/FinetuneableZoobotTree.ckpt` into
+`/n03data/huertas/.cache/huggingface`. If the job reports that the `zoobot`
+package is missing, install it once in `cosmos_visual` with
+`python -m pip install "zoobot[pytorch]"`, then resubmit. A successful smoke
+test writes both the FITS catalog and a JSON manifest listing all checkpoint
+schema labels.
+
+Then classify all available stamps (`0` means all):
+
+```bash
+sbatch euclid/slurm_predict_zoobot_morphology.sh \
+  "${BASE}/sfh_clip_150k.h5" \
+  "${BASE}/zoobot_stamps_rmax" \
+  "${BASE}/zoobot_full_predictions.fits" \
+  0
+```
+
+The current stamp set contains 136,983 of the 150,000 catalog objects. Patch
+the newly inferred concentrations into the HDF5 with a CPU SLURM job only
+after classification has finished:
+
+```bash
+sbatch euclid/slurm_restore_full_zoobot_predictions.sh \
+  "${BASE}/sfh_clip_150k.h5" \
+  "${BASE}/zoobot_full_predictions.fits"
+```
+
+`--preserve-unmatched` keeps an existing MER value for an object without a
+usable JPEG, while replacing values for every newly classified stamp. Refresh
+the diagnostic/explorer metadata afterward; image embeddings and UMAP
+coordinates do not need to be recomputed.
+
 ### Interactive Euclid embedding explorer
 
 Recent SFH activity is computed locally for existing bundles at startup:
@@ -1671,3 +1722,127 @@ and four generated rows; compare the same seed row across pages. Cluster
 labels appear in the titles and `selection.json`. Individual generated PNGs
 are also saved. Six random objects are illustrative examples, not a statistical
 comparison of the full cluster populations.
+
+
+### MS history summary statistics in the explorer
+
+Click **Compute MS statistics** to add D+/D−, signed maximum positive and
+minimum negative ΔMS, their accumulated expansion times ∫Hdt, and the
+physical-time-weighted mean ΔMS to the color and filter menus. These use the
+median SFH and current MS controls (including the empirical MS shift).
+
+ΔMS is log10(SFR / MS SFR). The adjustable lower floor defaults to −3 dex,
+so zero-SFR bins do not produce an infinite mean. A below-floor time fraction
+records how much of the history is censored. The floor is included in property
+names. Peak times use ∫Hdt = ln(a_obs/a_peak) from the bin midpoint to observation;
+ties select the most recent bin. This is proportional to elapsed halo dynamical
+times for fixed overdensity, without choosing a halo-dependent prefactor.
+The mean ΔMS still uses physical-time weights. The SFH training grid is unchanged. An absent
+positive or negative excursion has amplitude zero and undefined time.
+Pre-formation bins are excluded. Full inferred histories include MS
+extrapolation; consult the calibrated time fraction. Recompute after changing
+settings. Extrema are bin-level statistics and can be sensitive to isolated
+features; the signed mean can cancel early excess against later deficit.
+
+
+### Compare morphology at matched mass, recent activity, and redshift
+
+In the local explorer:
+
+1. Set the MS controls, then click **Compute recent ΔMS**. This computes all
+   three windows: 100 Myr, 0.1 cosmic age, and 0.2 cosmic age.
+2. Choose a window; set minimum/maximum catalog log stellar mass and recent
+   ΔMS, plus the existing redshift range. Enable **Match mass + recent ΔMS**.
+3. Click **Select all visible** for random cutout/SFH examples across the
+   matched subset, or lasso separate UMAP regions. **New random sample** draws
+   more examples. **Save selected IDs** exports selected IDs plus mass, recent
+   ΔMS, window, and MS settings. It saves all selected objects, not only the
+   displayed gallery examples.
+
+Recent ΔMS is log10(∫SFR dt / ∫MS dt), with partial-bin overlap and the same
+physical window for numerator/denominator. The MS follows the inferred mass
+history and current R, mass-offset, and empirical SFR-shift controls. This is
+not an average of log offsets. Rates are bin-averaged within source bins.
+Values ≤−4 dex (including exact zero SFH rate) are censored to −4 for plotting
+and selection; missing/incomplete windows are excluded. A lower bound of −4
+therefore includes censored objects. The mass matching bounds use catalog
+mass without the MS conversion offset. Recompute when MS settings change.
+
+All filters intersect on both UMAPs, including line sampling and clustering.
+The optional **Use additional property filter** is disabled by default to
+avoid unintentionally restricting the matched subset by SFH shape. **Show
+all** clears matching and other filters. Recent ΔMS values are also available
+in the color menus with their computation settings in the labels.
+
+These are range-matched exploratory subsets, not statistically balanced
+samples; mass, redshift, and activity distributions can still differ within
+wide ranges. Neighbors in a 2D UMAP need not preserve all high-dimensional
+SFH similarities. Inspect the histories and morphology measurements directly.
+
+### SFH-selected progenitor-analogue pilot
+
+Run the local pilot from the repository root:
+
+```bash
+python -m euclid.progenitor_analogues
+```
+
+The default selects a stamped descendant closest to log(M*/Msun)=11, subject
+to log(M*/Msun)>=10.5. The observed descendant is the f=1 anchor. Earlier
+states use formed-mass fractions 0.99, 0.98, 0.97, 0.96, 0.95, 0.90, 0.85,
+0.80, 0.60, 0.40, 0.20, 0.10, 0.03, and 0.01. At every earlier state the code computes the descendant's
+mass with R=0, then searches the full explorer sample within +/-0.15 dex.
+Progenitor candidates are allowed below 10.5 down to a default floor of
+log(M*/Msun)=9. Candidate redshift is unrestricted.
+
+For the SFH comparison, the descendant history before each earlier state is
+renormalized to the mass present at that state. It is compared over up to 2 Gyr
+with each candidate's cumulative SFH before its own observation epoch. The
+ranking statistic is the mean absolute separation of these two cumulative
+curves. Redshift, morphology, present-day sSFR, UMAP position, and image
+embeddings are not used in selection. They can therefore be inspected as
+outcomes rather than matching inputs.
+
+The UMAP overview uses the fixed three-cluster KMeans assignment from
+`cluster_recent_ms_100myr`, while checkpoint colors encode physical lookback
+time. A separate panel follows the median ZooBot P(smooth), P(spiral arms), and
+P(merger/disturbed) of the selected analogue ensemble. Individual image panels
+report the same probabilities when available. Missing morphology remains
+`n/a`; neither cluster membership nor morphology enters the matching score.
+
+Outputs are written to `euclid/diagnostics/progenitor_analogues/`, with the PDF
+at `output/pdf/euclid_progenitor_analogue_pilot.pdf`. The checkpoint census
+reports mass-compatible counts, usable stamps, candidate-redshift quantiles,
+and the actual comparison duration. Very early checkpoints may have less than
+0.5 Gyr of pre-state history; these remain visible but are marked weakly
+constrained. The UMAP path joins medians of independent analogue ensembles and
+must not be interpreted as the orbit of one galaxy. Stellar mass formed in
+merged progenitors is another limitation of mapping a reconstructed integrated
+SFH onto a single main-progenitor sequence.
+
+To repeat the pilot with a quenched descendant, defined from the PHZ catalog as
+log(sSFR/yr^-1)<-11.5, use:
+
+```bash
+python -m euclid.progenitor_analogues \
+  --quenched-descendant \
+  --output euclid/diagnostics/progenitor_analogues_quenched \
+  --pdf output/pdf/euclid_progenitor_analogue_quenched.pdf
+```
+
+For interpretation only, the overview plots every selected candidate's PHZ
+deltaMS at its own observed redshift and mass. Each candidate SFH panel also
+shows that candidate's Speagle MS history in green, using R=0 and the adopted
+-0.93 dex empirical SFR shift. These candidate-specific MS values do not enter
+the analogue ranking. Because candidate redshift is unrestricted, they should
+not be read as measurements at the descendant checkpoint redshift.
+
+For a directly comparable main-sequence descendant, defined by
+|deltaMS|<=0.3 dex using the same shifted MS, run:
+
+```bash
+python -m euclid.progenitor_analogues \
+  --main-sequence-descendant \
+  --output euclid/diagnostics/progenitor_analogues_main_sequence \
+  --pdf output/pdf/euclid_progenitor_analogue_main_sequence.pdf
+```

@@ -124,4 +124,5 @@ def main_sequence_along_sfh(time, log_sfh, redshift, log_mass,
                 sfr=sfr, ms_sfr=reference_sfr, delta_ms=delta,
                 mass_at_centers=final_mass*(older+.5*observed),
                 mass_at_edges=final_mass*np.r_[np.cumsum(observed[::-1])[::-1], 0.],
-                total_formed_mass=total_formed_mass, duration_years=duration_years)
+                total_formed_mass=total_formed_mass, duration_years=duration_years,
+                observation_age_years=age*1e9)

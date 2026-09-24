@@ -1,0 +1,57 @@
+{
+  "mass_range": [
+    10,
+    10.5
+  ],
+  "matching": "Deterministic nearest triplets; no reuse; match PHZ sSFR, PHZ mass, redshift",
+  "tolerances": {
+    "log_ssfr": 0.1,
+    "log_mass": 0.15,
+    "redshift": 0.15
+  },
+  "groups": [
+    {
+      "triplet": 1,
+      "target": -10.2,
+      "ssfr_spread": 0.005081430077552795,
+      "mass_spread": 0.005470275878904474,
+      "redshift_spread": 0.029999971389770508
+    },
+    {
+      "triplet": 2,
+      "target": -10.2,
+      "ssfr_spread": 0.009454607963560235,
+      "mass_spread": 0.021010398864746094,
+      "redshift_spread": 0.030000030994415283
+    },
+    {
+      "triplet": 3,
+      "target": -9.9,
+      "ssfr_spread": 0.0019363760948198916,
+      "mass_spread": 0.004502296447757459,
+      "redshift_spread": 0.009999990463256891
+    },
+    {
+      "triplet": 4,
+      "target": -9.9,
+      "ssfr_spread": 0.010920003056524408,
+      "mass_spread": 0.02199840545654297,
+      "redshift_spread": 0.0019999742507935125
+    },
+    {
+      "triplet": 5,
+      "target": -9.6,
+      "ssfr_spread": 0.013274997472763062,
+      "mass_spread": 0.013041496276855469,
+      "redshift_spread": 0.009999990463256891
+    },
+    {
+      "triplet": 6,
+      "target": -9.6,
+      "ssfr_spread": 0.00721991062164129,
+      "mass_spread": 0.038422584533691406,
+      "redshift_spread": 0.017999976873397827
+    }
+  ],
+  "n_selected": 18
+}

@@ -1,0 +1,26 @@
+{
+  "source": "/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bundle/euclid_explorer.h5",
+  "epsilon": 1e-10,
+  "window_myr": 100,
+  "return_fraction": 0,
+  "summary": [
+    {
+      "cluster": 1,
+      "n": 6,
+      "n_zero": 0,
+      "median_sfh_minus_phz_positive": -0.5339611655296093
+    },
+    {
+      "cluster": 2,
+      "n": 6,
+      "n_zero": 0,
+      "median_sfh_minus_phz_positive": -1.1703741707441129
+    },
+    {
+      "cluster": 3,
+      "n": 6,
+      "n_zero": 5,
+      "median_sfh_minus_phz_positive": -1.8153052457735477
+    }
+  ]
+}

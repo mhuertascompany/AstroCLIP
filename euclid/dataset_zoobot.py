@@ -14,9 +14,9 @@ from torchvision import transforms
 from .training_index import build_pair_index
 
 
-def _inference_transform(image_size):
+def _inference_transform(image_size, num_output_channels=3):
     return transforms.Compose([
-        transforms.Grayscale(num_output_channels=3),
+        transforms.Grayscale(num_output_channels=num_output_channels),
         transforms.Resize(image_size, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),

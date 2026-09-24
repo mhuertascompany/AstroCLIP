@@ -65,6 +65,28 @@ class RestoreMorphologyMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'floating point'):
             align_catalog(table, np.array([10], dtype=np.int64))
 
+    def test_replace_can_preserve_values_for_unmatched_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / 'sfh.h5'
+            with h5py.File(dataset, 'w') as target:
+                target['galaxy_id'] = np.array([10, 20, 30], dtype=np.int64)
+                target['merging_merger'] = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+            catalog = root / 'predictions.fits'
+            Table({
+                'object_id': np.array([10, 30], dtype=np.int64),
+                'merging_merger': np.array([11.0, 33.0], dtype=np.float32),
+            }).write(catalog)
+
+            restore_metadata(
+                dataset, [catalog], allow_missing=True, replace=True,
+                preserve_unmatched=True,
+            )
+            with h5py.File(dataset, 'r') as source:
+                np.testing.assert_allclose(
+                    source['merging_merger'][:], [11.0, 2.0, 33.0]
+                )
+
 
 if __name__ == '__main__':
     unittest.main()
