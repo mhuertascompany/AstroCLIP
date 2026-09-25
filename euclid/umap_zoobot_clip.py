@@ -538,6 +538,10 @@ def parse_args():
                         help='Checkpoint/run label printed on every PDF section.')
     parser.add_argument('--max-objects', type=int, default=0,
                         help='Random deterministic subset; zero uses all objects.')
+    parser.add_argument(
+        '--skip-shared-manifold', action='store_true',
+        help='Skip the stacked 2N-object image/SFH UMAP for large samples.',
+    )
     return parser.parse_args()
 
 
@@ -590,12 +594,14 @@ def main():
         )
     log.info('Fitting averaged joint UMAP')
     xy_joint = fit_umap(joint, args.n_neighbors, args.min_dist, args.seed)
-    log.info('Fitting stacked shared-manifold UMAP')
-    xy_shared = fit_umap(
-        np.concatenate([image, sfh]), args.n_neighbors, args.min_dist, args.seed,
-    )
-    xy_shared_image = xy_shared[:len(image)]
-    xy_shared_sfh = xy_shared[len(image):]
+    xy_shared_image = xy_shared_sfh = None
+    if not args.skip_shared_manifold:
+        log.info('Fitting stacked shared-manifold UMAP')
+        xy_shared = fit_umap(
+            np.concatenate([image, sfh]), args.n_neighbors, args.min_dist, args.seed,
+        )
+        xy_shared_image = xy_shared[:len(image)]
+        xy_shared_sfh = xy_shared[len(image):]
 
     morphology_keys = [
         'vis_magnitude', 'concentration', 'asymmetry', 'smoothness',
@@ -631,9 +637,10 @@ def main():
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(args.output) as pdf:
-        shared_manifold_page(
-            pdf, xy_shared_image, xy_shared_sfh, rng, run_label=args.run_label,
-        )
+        if xy_shared_image is not None:
+            shared_manifold_page(
+                pdf, xy_shared_image, xy_shared_sfh, rng, run_label=args.run_label,
+            )
         suffix = f' - {args.run_label}' if args.run_label else ''
         property_pages(pdf, xy_image, morphology,
                        'Euclid VIS image embedding: morphology' + suffix)
@@ -671,9 +678,12 @@ def main():
         'xy_image': xy_image,
         'xy_sfh': xy_sfh,
         'xy_joint': xy_joint,
-        'xy_shared_image': xy_shared_image,
-        'xy_shared_sfh': xy_shared_sfh,
     }
+    if xy_shared_image is not None:
+        npz_data.update({
+            'xy_shared_image': xy_shared_image,
+            'xy_shared_sfh': xy_shared_sfh,
+        })
     if sfh_preprojection is not None:
         npz_data.update({
             'sfh_preprojection_embedding': sfh_preprojection,

@@ -17,6 +17,8 @@ import matplotlib
 import numpy as np
 import pandas as pd
 from PIL import Image
+import astropy.units as u
+from astropy.cosmology import z_at_value
 from astropy.table import Table
 
 from .cosmic_sfh import COSMOLOGY
@@ -49,6 +51,32 @@ DEFAULT_FORMED_FRACTIONS = [
     0.99, 0.98, 0.97, 0.96, 0.95, 0.90, 0.85, 0.80,
     0.60, 0.40, 0.20, 0.10, 0.03, 0.01,
 ]
+
+
+def descendant_epoch_redshifts(
+    descendant_redshift: float, lookback_gyr: np.ndarray | float
+) -> np.ndarray:
+    """Convert lookback from a descendant into the corresponding cosmic redshift."""
+    lookback = np.asarray(lookback_gyr, dtype=float)
+    result = np.full(lookback.shape, np.nan, dtype=float)
+    if not np.isfinite(descendant_redshift) or descendant_redshift < 0:
+        return result
+    observation_age = float(COSMOLOGY.age(descendant_redshift).to_value("Gyr"))
+    epoch_age = observation_age - lookback
+    at_observation = np.isfinite(lookback) & np.isclose(lookback, 0.0, atol=1e-10)
+    result[at_observation] = descendant_redshift
+    valid = np.isfinite(epoch_age) & (epoch_age > 0) & (lookback > 1e-10)
+    if valid.any():
+        result[valid] = np.asarray(
+            z_at_value(
+                COSMOLOGY.age,
+                epoch_age[valid] * u.Gyr,
+                zmin=max(0.0, descendant_redshift * 0.999999),
+                zmax=1000.0,
+            ),
+            dtype=float,
+        )
+    return result
 
 
 def bin_edges_from_centres(centres: np.ndarray) -> np.ndarray:
@@ -191,6 +219,7 @@ def _load_inputs(
             raise ValueError("The UMAP archive does not contain every explorer object")
         mass = archive["log_stellar_mass"][positions].astype(float)
         xy_sfh = archive["xy_sfh"][positions].astype(float)
+        xy_joint = archive["xy_joint"][positions].astype(float)
         morphology = {}
         for key in (
             "zoobot_smooth_conditional_fraction",
@@ -260,6 +289,7 @@ def _load_inputs(
         "redshift": redshift,
         "mass": mass,
         "xy_sfh": xy_sfh,
+        "xy_joint": xy_joint,
         "cluster": clusters,
         **morphology,
         "epsilon": epsilon,
@@ -522,7 +552,7 @@ def _plot_cluster_background(
     ax: plt.Axes, data: dict[str, np.ndarray | float], alpha: float = 0.13
 ) -> None:
     """Draw the fixed three SFH clusters as a quiet UMAP context layer."""
-    xy = np.asarray(data["xy_sfh"])
+    xy = np.asarray(data["xy_joint"])
     labels = np.asarray(data.get("cluster", np.full(len(xy), -1)), dtype=int)
     for cluster, color in CLUSTER_COLORS.items():
         mask = labels == cluster
@@ -561,7 +591,7 @@ def make_report(
     ids = np.asarray(data["ids"])
     mass = np.asarray(data["mass"])
     redshift = np.asarray(data["redshift"])
-    xy = np.asarray(data["xy_sfh"])
+    xy = np.asarray(data["xy_joint"])
     lookbacks = np.array([float(stage["state_lookback_gyr"]) for stage in stages])
     time_min = float(np.min(lookbacks))
     time_max = float(np.max(lookbacks))
@@ -574,10 +604,12 @@ def make_report(
     descendant_ssfr = float(np.asarray(data["catalog_log_ssfr"])[descendant_index])
     descendant_delta_ms = float(np.asarray(data["catalog_delta_ms"])[descendant_index])
     descendant_sfh_delta_ms = _sfh_delta_ms_100myr(data, descendant_index)
+    descendant_redshift = float(redshift[descendant_index])
+    checkpoint_redshifts = descendant_epoch_redshifts(descendant_redshift, lookbacks)
 
     with PdfPages(pdf_path) as pdf:
-        fig = plt.figure(figsize=(14, 8.5), layout="constrained")
-        grid = fig.add_gridspec(2, 3, width_ratios=(1.05, 1.45, 1.45))
+        fig = plt.figure(figsize=(18, 9.5), layout="constrained")
+        grid = fig.add_gridspec(2, 3, width_ratios=(1.05, 1.50, 1.65))
         image_ax = fig.add_subplot(grid[0, 0])
         with Image.open(stamps / f"VIS_{descendant_id}.jpg") as image:
             image_ax.imshow(np.asarray(image.convert("L")), cmap="gray", origin="upper")
@@ -588,6 +620,17 @@ def make_report(
             f"SFH-100Myr deltaMS={_format_delta_ms(descendant_sfh_delta_ms)} dex"
         )
         image_ax.axis("off")
+        descendant_morphology_text = (
+            "Descendant ZooBot\n"
+            f"P(smooth)={_format_probability(np.asarray(data['zoobot_smooth_conditional_fraction'])[descendant_index])}  "
+            f"P(spiral)={_format_probability(np.asarray(data['zoobot_spiral_probability'])[descendant_index])}\n"
+            f"P(merger)={_format_probability(np.asarray(data['zoobot_merger_probability'])[descendant_index])}"
+        )
+        image_ax.text(
+            0.02, 0.02, descendant_morphology_text, transform=image_ax.transAxes,
+            color="white", fontsize=7.5, ha="left", va="bottom",
+            bbox=dict(facecolor="black", edgecolor="none", alpha=0.68, pad=2.5),
+        )
 
         sfh_ax = fig.add_subplot(grid[1, 0])
         _plot_sfh(sfh_ax, data, descendant_index, "#245c8a")
@@ -601,19 +644,34 @@ def make_report(
         umap_ax = fig.add_subplot(grid[:, 1])
         _plot_cluster_background(umap_ax, data)
         centroid_path = []
-        for stage_number, (stage, color) in enumerate(zip(stages, colors), start=1):
+        for stage_number, (stage, color, checkpoint_redshift) in enumerate(
+            zip(stages, colors, checkpoint_redshifts), start=1
+        ):
             selected = candidates[candidates.stage == stage_number]
             if selected.empty:
                 continue
             indices = selected.bundle_index.to_numpy(dtype=int)
+            centroid = np.median(xy[indices], axis=0)
             umap_ax.scatter(
                 xy[indices, 0], xy[indices, 1], s=40, c=[color], edgecolor="white",
                 linewidth=0.6, zorder=3,
             )
-            centroid_path.append(np.median(xy[indices], axis=0))
+            centroid_path.append(centroid)
+            umap_ax.annotate(
+                str(stage_number), xy=centroid, xytext=(5, 4),
+                textcoords="offset points", fontsize=6.5, color="0.05",
+                fontweight="bold", ha="left", va="center", zorder=6,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.78, pad=0.8),
+            )
         umap_ax.scatter(
             *xy[descendant_index], marker="*", s=180, c="#d73027", edgecolor="white",
             linewidth=0.8, label="descendant", zorder=5,
+        )
+        umap_ax.annotate(
+            "D", xy=xy[descendant_index],
+            xytext=(7, 7), textcoords="offset points", fontsize=6.2,
+            color="#a50f15", fontweight="bold", zorder=7,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=1.2),
         )
         if centroid_path:
             path = np.vstack(centroid_path[::-1] + [xy[descendant_index]])
@@ -625,21 +683,23 @@ def make_report(
             fraction=0.045, pad=0.02,
         )
         umap_ax.set(
-            xlabel="SFH UMAP 1", ylabel="SFH UMAP 2",
-            title="Analogue positions and fixed SFH-cluster regions",
+            xlabel="Joint-average UMAP 1", ylabel="Joint-average UMAP 2",
+            title="Numbered analogue track in the joint embedding",
         )
 
         right = grid[:, 2].subgridspec(4, 1, height_ratios=(1.45, 0.78, 0.78, 0.62))
         table_ax = fig.add_subplot(right[0])
         table_ax.axis("off")
         display = census.copy()
+        display["#"] = np.arange(1, len(display) + 1).astype(str)
         display["f"] = display.formed_mass_fraction.map(lambda x: f"{x:.2f}")
         display["L"] = display.state_lookback_gyr.map(lambda x: f"{x:.2f}")
         display["logM"] = display.predicted_log_stellar_mass.map(lambda x: f"{x:.2f}")
         display["T"] = display.comparison_history_gyr.map(lambda x: f"{x:.2f}")
         display["N"] = display.n_with_stamp.map(lambda x: f"{x:,}")
-        display["zmed"] = display.candidate_redshift_median.map(lambda x: f"{x:.2f}")
-        columns = ["f", "L", "logM", "T", "N", "zmed"]
+        display["z_d"] = [f"{value:.2f}" for value in checkpoint_redshifts]
+        display["z_a"] = display.candidate_redshift_median.map(lambda x: f"{x:.2f}")
+        columns = ["#", "f", "L", "z_d", "logM", "T", "N", "z_a"]
         table = table_ax.table(
             cellText=display[columns].values,
             colLabels=columns,
@@ -649,7 +709,7 @@ def make_report(
             bbox=(0.0, 0.0, 1.0, 1.0),
         )
         table.auto_set_font_size(False)
-        table.set_fontsize(8.5)
+        table.set_fontsize(7.0)
         table.scale(1, 1.35)
         ms_ax = fig.add_subplot(right[1])
         for stage_number, (stage, color) in enumerate(zip(stages, colors), start=1):
@@ -700,6 +760,7 @@ def make_report(
             ("zoobot_merger_probability", "P(merger/disturbed)", "#C44E52", "^"),
         ]
         for field, label, color, marker in morphology_fields:
+            descendant_value = float(np.asarray(data[field])[descendant_index])
             medians = []
             for stage_number in range(1, len(stages) + 1):
                 selected = candidates[candidates.stage == stage_number]
@@ -710,17 +771,41 @@ def make_report(
                 lookbacks, medians, color=color, marker=marker, ms=3.5, lw=1.2,
                 label=label,
             )
+            if np.isfinite(descendant_value):
+                morphology_ax.scatter(
+                    0.0, descendant_value, color=color, marker="*", s=80,
+                    edgecolor="black", linewidth=0.45, zorder=5,
+                )
         morphology_ax.set(
             ylim=(-0.03, 1.03), xlabel="Descendant checkpoint lookback [Gyr]",
-            ylabel="Median probability", title="Morphology of selected analogues",
+            ylabel="Probability", title="Descendant and selected-analogue morphology",
         )
         morphology_ax.grid(alpha=0.15)
-        morphology_ax.legend(fontsize=6.5, ncol=3, loc="best")
+        handles, labels = morphology_ax.get_legend_handles_labels()
+        handles.append(
+            Line2D([], [], marker="*", color="none", markerfacecolor="0.75",
+                   markeredgecolor="black", markersize=8, label="descendant (t=0)")
+        )
+        labels.append("descendant (t=0)")
+        morphology_ax.legend(handles, labels, fontsize=6.2, ncol=2, loc="best")
+        redshift_ax = morphology_ax.twiny()
+        redshift_ax.set_xlim(morphology_ax.get_xlim())
+        redshift_tick_indices = np.unique(
+            np.linspace(0, len(lookbacks) - 1, min(5, len(lookbacks))).round().astype(int)
+        )
+        redshift_tick_positions = np.r_[0.0, lookbacks[redshift_tick_indices]]
+        redshift_tick_values = np.r_[descendant_redshift, checkpoint_redshifts[redshift_tick_indices]]
+        redshift_ax.set_xticks(redshift_tick_positions)
+        redshift_ax.set_xticklabels([f"{value:.2f}" for value in redshift_tick_values])
+        redshift_ax.set_xlabel("Descendant-frame redshift", fontsize=7, labelpad=1)
+        redshift_ax.tick_params(axis="x", labelsize=6.5, pad=1)
 
         notes_ax = fig.add_subplot(right[3])
         notes_ax.axis("off")
         notes_ax.text(
             0, 1,
+            "Track/table: L = descendant lookback; z_d = corresponding descendant-frame redshift;\n"
+            "z_a = median observed redshift of the selected analogues.\n\n"
             "Selection variables\n"
             "- predicted stellar mass, within +/-0.15 dex\n"
             "- cumulative SFH before each descendant state\n"
@@ -730,7 +815,7 @@ def make_report(
             "outcomes, not selection variables. The\n"
             "dashed path joins ensemble medians, not\n"
             "one galaxy's orbit.",
-            va="top", fontsize=8.5, linespacing=1.25,
+            va="top", fontsize=7.7, linespacing=1.2,
         )
         if descendant_ssfr < -11.5:
             descendant_kind = "Quenched-descendant"
@@ -766,7 +851,7 @@ def make_report(
                     "SFH-100Myr deltaMS="
                     f"{_format_delta_ms(_sfh_delta_ms_100myr(data, index))}\n"
                     f"D={row.cumulative_sfh_distance:.3f}",
-                    fontsize=9,
+                    fontsize=8,
                 )
                 morphology_text = (
                     f"P(smooth)={_format_probability(np.asarray(data['zoobot_smooth_conditional_fraction'])[index])}  "
@@ -908,6 +993,7 @@ def main() -> None:
         "n_analogues_per_stage": args.n_analogues,
         "selection_uses": ["predicted stellar mass", "renormalized cumulative SFH"],
         "selection_does_not_use": ["redshift", "morphology", "image embedding", "UMAP position", "sSFR"],
+        "track_visualization_space": "xy_joint (normalized average of aligned image and SFH embeddings)",
         "formed_mass_return_fraction": 0.0,
         "ms_sfr_offset_dex": args.ms_sfr_offset,
         "catalog": str(args.catalog),

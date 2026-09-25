@@ -1180,6 +1180,47 @@ backbone embedding. Image encoder in this bundle means the trained image
 adapter output. Comparing with the earlier raw-ZooBot 30k archive in the same
 app restricts the display to the intersection of galaxy IDs.
 
+#### Full bright-sample explorer
+
+The validation explorer above contains 13,717 objects. To search for
+progenitor analogues among every bright galaxy with a usable stamp, first
+encode the full paired sample on a GPU and then build the UMAP and download
+bundle on a CPU node:
+
+```bash
+EMBED_JOB=$(sbatch --parsable euclid/slurm_export_bright_clip_full_embeddings.sh)
+sbatch --dependency=afterok:${EMBED_JOB} \
+  euclid/slurm_build_bright_clip_full_explorer.sh
+```
+
+The first job performs inference only. It deliberately skips the quadratic
+all-pairs retrieval calculation used by validation. The second job fits image,
+aligned-SFH, pre-projection-SFH, and normalized joint-average UMAPs for all
+stamp-paired objects. It skips the optional stacked 2N-object shared-manifold
+UMAP to keep the full run tractable. The final download archive is:
+
+```text
+/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/training_bright_frozen_mlp/full_sample_explorer_bundle.tar
+```
+
+After downloading it locally:
+
+```bash
+FULL=/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bright_full
+mkdir -p "${FULL}"
+tar -xf full_sample_explorer_bundle.tar -C "${FULL}" --strip-components=1
+tar -xf "${FULL}/VIS_stamps.tar" -C "${FULL}"
+
+python -m euclid.explore_embeddings \
+  --h5 "${FULL}/euclid_explorer.h5" \
+  --stamps "${FULL}/VIS" \
+  --umap "${FULL}/00_full_sample_explorer_euclid_clip_full_umap_diagnostics.npz" \
+  --label 'Bright frozen MLP — full paired sample'
+```
+
+The source 150k HDF5 and model checkpoint remain on Candide; local work only
+requires the compact explorer data, UMAP archive, and VIS JPEGs.
+
 For the bright catalog, `smooth_or_featured_artifact_star_zoom` is entirely
 missing. Diagnostics therefore also expose explicitly conditional smooth and
 featured fractions, each divided by `smooth + featured`. Missing, negative,

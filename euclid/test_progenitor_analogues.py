@@ -9,6 +9,7 @@ from euclid.progenitor_analogues import (
     candidate_curve,
     candidate_curves,
     curve_distance,
+    descendant_epoch_redshifts,
     descendant_state_curve,
     lookback_at_formed_fraction,
     older_fraction,
@@ -51,6 +52,11 @@ class ProgenitorAnalogueMathTest(unittest.TestCase):
         for index in range(2):
             scalar = candidate_curve(weights[index], self.edges, norms[index], tau)
             np.testing.assert_allclose(vectorized[index], scalar, atol=1e-12)
+
+    def test_descendant_epoch_redshift_uses_descendant_cosmic_clock(self):
+        redshifts = descendant_epoch_redshifts(0.7, np.array([0.0, 1.0, 3.0]))
+        self.assertAlmostEqual(redshifts[0], 0.7, places=5)
+        self.assertTrue(np.all(np.diff(redshifts) > 0))
 
     def test_quenched_descendant_cut_is_applied_before_mass_proximity(self):
         data = {

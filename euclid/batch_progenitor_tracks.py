@@ -36,23 +36,29 @@ def _population_report(
     output_pdf: Path,
 ) -> None:
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    xy = np.asarray(data["xy_sfh"])
+    xy = np.asarray(data["xy_joint"])
     masses = np.asarray(data["mass"])
     delta = descendants.phz_delta_ms.to_numpy(float)
     norm = Normalize(vmin=np.nanpercentile(delta, 2), vmax=np.nanpercentile(delta, 98))
     cmap = plt.get_cmap("coolwarm")
+    small_sample = len(descendants) <= 20
+    descendant_size = 42 if small_sample else 13
+    track_alpha = 0.58 if small_sample else 0.10
+    track_width = 1.25 if small_sample else 0.7
     with PdfPages(output_pdf) as pdf:
         fig, axes = plt.subplots(1, 2, figsize=(14, 6.5), layout="constrained")
         _plot_cluster_background(axes[0], data, alpha=0.10)
         indices = descendants.bundle_index.to_numpy(int)
         points = axes[0].scatter(xy[indices, 0], xy[indices, 1], c=delta, cmap=cmap,
-                                 norm=norm, s=13, alpha=0.8, linewidths=0,
+                                 norm=norm, s=descendant_size, alpha=0.9,
+                                 linewidths=0,
                                  rasterized=True)
         fig.colorbar(points, ax=axes[0], label="Descendant PHZ deltaMS [dex]")
-        axes[0].set(xlabel="SFH UMAP 1", ylabel="SFH UMAP 2",
+        axes[0].set(xlabel="Joint-average UMAP 1", ylabel="Joint-average UMAP 2",
                     title=f"All {len(descendants):,} selected descendants")
         axes[1].scatter(descendants.log_stellar_mass, descendants.phz_delta_ms,
-                        c=descendants.redshift, cmap="viridis", s=14, alpha=0.7,
+                        c=descendants.redshift, cmap="viridis",
+                        s=descendant_size, alpha=0.85,
                         linewidths=0, rasterized=True)
         axes[1].axhline(0, color="k", ls="--", lw=1)
         axes[1].set(xlabel="PHZ log stellar mass", ylabel="PHZ deltaMS [dex]",
@@ -68,10 +74,16 @@ def _population_report(
         for galaxy_id, group in checkpoints.groupby("descendant_id", sort=False):
             row = descendant_lookup.loc[int(galaxy_id)]
             ordered = group.sort_values("formed_mass_fraction")
-            path_x = np.r_[ordered.analogue_centroid_x.to_numpy(float), row.sfh_umap_x]
-            path_y = np.r_[ordered.analogue_centroid_y.to_numpy(float), row.sfh_umap_y]
-            ax.plot(path_x, path_y, color=cmap(norm(row.phz_delta_ms)), alpha=0.10, lw=0.7)
-        ax.set(xlabel="SFH UMAP 1", ylabel="SFH UMAP 2",
+            path_x = np.r_[ordered.analogue_centroid_x.to_numpy(float), row.joint_umap_x]
+            path_y = np.r_[ordered.analogue_centroid_y.to_numpy(float), row.joint_umap_y]
+            ax.plot(
+                path_x,
+                path_y,
+                color=cmap(norm(row.phz_delta_ms)),
+                alpha=track_alpha,
+                lw=track_width,
+            )
+        ax.set(xlabel="Joint-average UMAP 1", ylabel="Joint-average UMAP 2",
                title="All analogue-centroid tracks\nColor encodes descendant PHZ deltaMS")
         scalar = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         fig.colorbar(scalar, ax=ax, label="Descendant PHZ deltaMS [dex]")
@@ -199,10 +211,10 @@ def main() -> None:
                 candidate_indices = group.bundle_index.to_numpy(int)
                 mask = census.stage == stage
                 census.loc[mask, "analogue_centroid_x"] = np.median(
-                    np.asarray(data["xy_sfh"])[candidate_indices, 0]
+                    np.asarray(data["xy_joint"])[candidate_indices, 0]
                 )
                 census.loc[mask, "analogue_centroid_y"] = np.median(
-                    np.asarray(data["xy_sfh"])[candidate_indices, 1]
+                    np.asarray(data["xy_joint"])[candidate_indices, 1]
                 )
                 census.loc[mask, "median_cumulative_sfh_distance"] = np.median(
                     group.cumulative_sfh_distance
@@ -219,8 +231,8 @@ def main() -> None:
                 "redshift": float(np.asarray(data["redshift"])[index]),
                 "phz_log_ssfr": float(np.asarray(data["catalog_log_ssfr"])[index]),
                 "phz_delta_ms": float(np.asarray(data["catalog_delta_ms"])[index]),
-                "sfh_umap_x": float(np.asarray(data["xy_sfh"])[index, 0]),
-                "sfh_umap_y": float(np.asarray(data["xy_sfh"])[index, 1]),
+                "joint_umap_x": float(np.asarray(data["xy_joint"])[index, 0]),
+                "joint_umap_y": float(np.asarray(data["xy_joint"])[index, 1]),
                 "n_checkpoints": len(census),
             }
         )
@@ -250,6 +262,7 @@ def main() -> None:
         "curve_points": args.curve_points,
         "selection_uses": ["predicted stellar mass", "renormalized cumulative SFH"],
         "selection_does_not_use": ["redshift", "morphology", "UMAP position", "sSFR"],
+        "track_visualization_space": "xy_joint (normalized average of aligned image and SFH embeddings)",
         "summary_pdf": str(args.pdf),
     }
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

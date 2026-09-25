@@ -174,3 +174,10 @@ ceph_data
 astroclip/_version.py
 lightning_logs
 supervised.sh
+
+# Generated scientific reports and local exploration products
+*.pdf
+*.png
+output/
+tmp/
+euclid/diagnostics/
