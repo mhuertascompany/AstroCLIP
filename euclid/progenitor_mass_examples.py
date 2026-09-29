@@ -36,6 +36,9 @@ def main() -> None:
     )
     parser.add_argument("--minimum-progenitor-mass", type=float, default=9.0)
     parser.add_argument("--ms-sfr-offset", type=float, default=-0.93)
+    parser.add_argument("--global-shape-weight", type=float, default=0.0)
+    parser.add_argument("--continuity-weight", type=float, default=0.0)
+    parser.add_argument("--continuity-pool", type=int, default=40)
     args = parser.parse_args()
 
     selected = pd.read_csv(args.selection)
@@ -65,7 +68,10 @@ def main() -> None:
             if descendant_mass + np.log10(fraction) >= args.minimum_progenitor_mass - 0.01
         ]
         candidates, census, stages = find_analogues(
-            data, index, fractions, stamps=stamps, n_analogues=5
+            data, index, fractions, stamps=stamps, n_analogues=5,
+            global_shape_weight=args.global_shape_weight,
+            continuity_weight=args.continuity_weight,
+            continuity_pool=args.continuity_pool,
         )
         destination = args.output / str(galaxy_id)
         destination.mkdir(parents=True, exist_ok=True)
@@ -94,6 +100,9 @@ def main() -> None:
                 "selection_mass_cut": None,
                 "minimum_progenitor_mass": args.minimum_progenitor_mass,
                 "ms_sfr_offset_dex": args.ms_sfr_offset,
+                "global_shape_weight": args.global_shape_weight,
+                "continuity_weight": args.continuity_weight,
+                "continuity_pool": args.continuity_pool,
                 "examples": records,
             },
             indent=2,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 
@@ -158,7 +159,12 @@ def main() -> None:
     parser.add_argument("--mass-tolerance", type=float, default=0.15)
     parser.add_argument("--history-gyr", type=float, default=2.0)
     parser.add_argument("--n-analogues", type=int, default=5)
+    parser.add_argument("--global-shape-weight", type=float, default=0.0)
+    parser.add_argument("--continuity-weight", type=float, default=0.0)
+    parser.add_argument("--continuity-pool", type=int, default=40)
     parser.add_argument("--curve-points", type=int, default=128)
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel descendant workers; threads share the loaded catalogue.")
     parser.add_argument("--ms-sfr-offset", type=float, default=-0.93)
     parser.add_argument("--fractions", type=float, nargs="+", default=DEFAULT_FRACTIONS)
     args = parser.parse_args()
@@ -179,10 +185,7 @@ def main() -> None:
     if not np.all(stamp_mask[indices]):
         raise ValueError("At least one selected descendant is missing its VIS stamp")
 
-    descendant_rows = []
-    checkpoint_frames = []
-    candidate_frames = []
-    for number, index in enumerate(indices, start=1):
+    def compute_descendant(index):
         descendant_mass = float(np.asarray(data["mass"])[index])
         fractions = [
             f for f in args.fractions
@@ -198,13 +201,15 @@ def main() -> None:
             n_analogues=args.n_analogues,
             stamp_mask=stamp_mask,
             n_curve_points=args.curve_points,
+            global_shape_weight=args.global_shape_weight,
+            continuity_weight=args.continuity_weight,
+            continuity_pool=args.continuity_pool,
         )
         descendant_id = int(ids[index])
         if not candidates.empty:
             candidates.insert(0, "descendant_id", descendant_id)
             candidates.insert(1, "descendant_bundle_index", int(index))
             candidates.insert(2, "descendant_log_stellar_mass", descendant_mass)
-            candidate_frames.append(candidates)
             census.insert(0, "descendant_id", descendant_id)
             census.insert(1, "descendant_bundle_index", int(index))
             for stage, group in candidates.groupby("stage"):
@@ -222,22 +227,35 @@ def main() -> None:
                 census.loc[mask, "best_cumulative_sfh_distance"] = np.min(
                     group.cumulative_sfh_distance
                 )
+        descendant = {
+            "galaxy_id": descendant_id,
+            "bundle_index": int(index),
+            "log_stellar_mass": descendant_mass,
+            "redshift": float(np.asarray(data["redshift"])[index]),
+            "phz_log_ssfr": float(np.asarray(data["catalog_log_ssfr"])[index]),
+            "phz_delta_ms": float(np.asarray(data["catalog_delta_ms"])[index]),
+            "joint_umap_x": float(np.asarray(data["xy_joint"])[index, 0]),
+            "joint_umap_y": float(np.asarray(data["xy_joint"])[index, 1]),
+            "n_checkpoints": len(census),
+        }
+        return descendant, census, candidates
+
+    descendant_rows = []
+    checkpoint_frames = []
+    candidate_frames = []
+    executor = ThreadPoolExecutor(max_workers=args.workers) if args.workers > 1 else None
+    results = (executor.map(compute_descendant, indices) if executor is not None
+               else map(compute_descendant, indices))
+    for number, (descendant, census, candidates) in enumerate(results, start=1):
+        descendant_rows.append(descendant)
+        if not census.empty:
             checkpoint_frames.append(census)
-        descendant_rows.append(
-            {
-                "galaxy_id": descendant_id,
-                "bundle_index": int(index),
-                "log_stellar_mass": descendant_mass,
-                "redshift": float(np.asarray(data["redshift"])[index]),
-                "phz_log_ssfr": float(np.asarray(data["catalog_log_ssfr"])[index]),
-                "phz_delta_ms": float(np.asarray(data["catalog_delta_ms"])[index]),
-                "joint_umap_x": float(np.asarray(data["xy_joint"])[index, 0]),
-                "joint_umap_y": float(np.asarray(data["xy_joint"])[index, 1]),
-                "n_checkpoints": len(census),
-            }
-        )
+        if not candidates.empty:
+            candidate_frames.append(candidates)
         if number % 25 == 0 or number == len(indices):
             print(f"Processed {number:,}/{len(indices):,} descendants", flush=True)
+    if executor is not None:
+        executor.shutdown()
 
     descendants = pd.DataFrame(descendant_rows)
     checkpoints = pd.concat(checkpoint_frames, ignore_index=True)
@@ -257,10 +275,25 @@ def main() -> None:
         "n_checkpoints": len(checkpoints),
         "n_ranked_analogues": len(candidates),
         "n_analogues_per_checkpoint": args.n_analogues,
+        "global_shape_weight": args.global_shape_weight,
+        "continuity_weight": args.continuity_weight,
+        "continuity_pool": args.continuity_pool,
         "mass_tolerance_dex": args.mass_tolerance,
         "history_gyr": args.history_gyr,
         "curve_points": args.curve_points,
-        "selection_uses": ["predicted stellar mass", "renormalized cumulative SFH"],
+        "workers": args.workers,
+        "selection_uses": [
+            "predicted stellar mass",
+            "renormalized cumulative SFH over physical time",
+            *(
+                ["complete renormalized SFH shape over fractional time"]
+                if args.global_shape_weight > 0 else []
+            ),
+            *(
+                ["adjacent-stage SFH branch consistency"]
+                if args.continuity_weight > 0 else []
+            ),
+        ],
         "selection_does_not_use": ["redshift", "morphology", "UMAP position", "sSFR"],
         "track_visualization_space": "xy_joint (normalized average of aligned image and SFH embeddings)",
         "summary_pdf": str(args.pdf),

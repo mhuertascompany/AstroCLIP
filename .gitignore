@@ -178,6 +178,22 @@ supervised.sh
 # Generated scientific reports and local exploration products
 *.pdf
 *.png
+*.h5
+*.hdf5
+*.fits
+*.fit
+*.fz
+*.npy
+*.npz
+*.parquet
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.pt
+*.pth
 output/
 tmp/
 euclid/diagnostics/
+euclid_selected_galaxies*.csv
+.DS_Store

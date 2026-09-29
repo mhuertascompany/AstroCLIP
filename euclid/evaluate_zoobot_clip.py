@@ -105,8 +105,9 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
     )
 
 
-def extract_embeddings(model, loader, device):
+def extract_embeddings(model, loader, device, include_image_preprojection=False):
     image_embeddings = []
+    image_preprojection_embeddings = []
     sfh_embeddings = []
     sfh_preprojection_embeddings = []
     reconstructions = []
@@ -119,7 +120,14 @@ def extract_embeddings(model, loader, device):
             sfhs = batch['sfh'].to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=use_amp):
-                image_embedding = F.normalize(model.encode_image(images), dim=-1)
+                if include_image_preprojection:
+                    image_latent = model.encode_image_latent(images)
+                    image_preprojection = F.normalize(image_latent, dim=-1)
+                    image_embedding = F.normalize(
+                        model.project_image(image_latent), dim=-1,
+                    )
+                else:
+                    image_embedding = F.normalize(model.encode_image(images), dim=-1)
                 sfh_latent = model.encode_sfh_latent(sfhs)
                 sfh_embedding = F.normalize(model.project_sfh(sfh_latent), dim=-1)
                 sfh_preprojection = F.normalize(sfh_latent, dim=-1)
@@ -128,6 +136,10 @@ def extract_embeddings(model, loader, device):
                         model.sfh_decoder(sfh_latent).float().cpu().numpy()
                     )
             image_embeddings.append(image_embedding.float().cpu().numpy())
+            if include_image_preprojection:
+                image_preprojection_embeddings.append(
+                    image_preprojection.float().cpu().numpy()
+                )
             sfh_embeddings.append(sfh_embedding.float().cpu().numpy())
             sfh_preprojection_embeddings.append(
                 sfh_preprojection.float().cpu().numpy()
@@ -138,13 +150,16 @@ def extract_embeddings(model, loader, device):
     reconstruction = (
         np.concatenate(reconstructions) if reconstructions else None
     )
-    return (
+    result = (
         np.concatenate(image_embeddings),
         np.concatenate(sfh_embeddings),
         np.concatenate(sfh_preprojection_embeddings),
         np.concatenate(seen_ids),
         reconstruction,
     )
+    if include_image_preprojection:
+        return result + (np.concatenate(image_preprojection_embeddings),)
+    return result
 
 
 def summarize_sfh_reconstruction(prediction, target_log, epsilon=1e-10):
@@ -582,7 +597,9 @@ def main():
         args.image_size, args.batch_size, args.num_workers,
     )
     (image_embedding, sfh_embedding, sfh_preprojection_embedding,
-     encoded_ids, reconstruction) = extract_embeddings(model, loader, device)
+     encoded_ids, reconstruction, image_preprojection_embedding) = extract_embeddings(
+        model, loader, device, include_image_preprojection=True,
+    )
     if not np.array_equal(encoded_ids, val_ids):
         raise ValueError('Embedding extraction changed validation ID order.')
 
@@ -616,6 +633,9 @@ def main():
         ),
         'embedding_diagnostics': {
             'image': embedding_diagnostics(image_embedding, rng),
+            'image_preprojection': embedding_diagnostics(
+                image_preprojection_embedding, rng,
+            ),
             'sfh': embedding_diagnostics(sfh_embedding, rng),
             'sfh_preprojection': embedding_diagnostics(
                 sfh_preprojection_embedding, rng,
@@ -657,6 +677,7 @@ def main():
             h5_row=val_rows,
             redshift=redshifts,
             image_embedding=image_embedding,
+            image_preprojection_embedding=image_preprojection_embedding,
             sfh_embedding=sfh_embedding,
             sfh_preprojection_embedding=sfh_preprojection_embedding,
         )

@@ -86,6 +86,12 @@ def parse_args():
     model.add_argument('--unfreeze-blocks', type=int, default=0)
     model.add_argument('--backbone-lr-scale', type=float, default=0.1)
     model.add_argument(
+        '--image-projection', choices=('legacy', 'mlp'), default='legacy',
+        help='Image adapter architecture; mlp enables an unrestricted deep adapter.',
+    )
+    model.add_argument('--image-projection-hidden-dim', type=int, default=512)
+    model.add_argument('--image-projection-hidden-layers', type=int, default=2)
+    model.add_argument(
         '--sfh-encoder', choices=('mlp', 'transformer'), default='transformer',
     )
     model.add_argument('--sfh-d-model', type=int, default=128)
@@ -104,13 +110,14 @@ def parse_args():
     model.add_argument('--sfh-decoder-layers', type=int, default=2)
     model.add_argument(
         '--sfh-projection',
-        choices=('identity', 'linear', 'residual_mlp'), default='identity',
+        choices=('identity', 'linear', 'residual_mlp', 'mlp'), default='identity',
         help='Map from the SFH encoder latent into CLIP space (default: identity).',
     )
     model.add_argument(
         '--sfh-projection-hidden-dim', type=int, default=512,
-        help='Hidden width of the residual MLP SFH projection.',
+        help='Hidden width of the MLP SFH projection.',
     )
+    model.add_argument('--sfh-projection-hidden-layers', type=int, default=2)
     model.add_argument(
         '--sfh-projection-residual-scale', type=float, default=0.1,
         help='Fixed residual-branch scale for the residual MLP projection.',
@@ -208,6 +215,11 @@ def validate_args(args):
         )
     if args.sfh_projection_hidden_dim <= 0:
         raise ValueError('--sfh-projection-hidden-dim must be positive.')
+    if args.image_projection_hidden_dim <= 0:
+        raise ValueError('--image-projection-hidden-dim must be positive.')
+    if min(args.image_projection_hidden_layers,
+           args.sfh_projection_hidden_layers) <= 0:
+        raise ValueError('Projection hidden-layer counts must be positive.')
     if args.sfh_projection_residual_scale <= 0:
         raise ValueError('--sfh-projection-residual-scale must be positive.')
     if args.unfreeze_blocks < 0:
@@ -277,6 +289,9 @@ def main():
         warmup_epochs=args.warmup_epochs,
         unfreeze_blocks=args.unfreeze_blocks,
         backbone_lr_scale=args.backbone_lr_scale,
+        image_projection_type=args.image_projection,
+        image_projection_hidden_dim=args.image_projection_hidden_dim,
+        image_projection_hidden_layers=args.image_projection_hidden_layers,
         sfh_encoder_type=args.sfh_encoder,
         sfh_d_model=args.sfh_d_model,
         sfh_n_heads=args.sfh_n_heads,
@@ -291,6 +306,7 @@ def main():
         sfh_projection_type=args.sfh_projection,
         sfh_projection_hidden_dim=args.sfh_projection_hidden_dim,
         sfh_projection_residual_scale=args.sfh_projection_residual_scale,
+        sfh_projection_hidden_layers=args.sfh_projection_hidden_layers,
         freeze_sfh_encoder=args.freeze_sfh_encoder,
         freeze_sfh_decoder=args.freeze_sfh_decoder,
     )
@@ -339,15 +355,25 @@ def main():
     ]
     logger = CSVLogger(save_dir=str(log_dir), name=args.run_name)
 
+    sfh_projection_details = (
+        f'hidden={args.sfh_projection_hidden_dim} x '
+        f'{args.sfh_projection_hidden_layers}'
+    )
+    if args.sfh_projection == 'residual_mlp':
+        sfh_projection_details += (
+            f', residual scale={args.sfh_projection_residual_scale:g}'
+        )
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
         f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
+        f'image projection={args.image_projection}, '
+        f'hidden={args.image_projection_hidden_dim} x '
+        f'{args.image_projection_hidden_layers}; '
         f'SFH encoder={args.sfh_encoder}; '
         f'SFH encoder frozen={args.freeze_sfh_encoder}; '
         f'SFH projection={args.sfh_projection}; '
-        f'SFH projection hidden={args.sfh_projection_hidden_dim}, '
-        f'residual scale={args.sfh_projection_residual_scale:g}; '
+        f'SFH projection {sfh_projection_details}; '
         f'SFH reconstruction weight={args.sfh_reconstruction_weight:g}; '
         f'SFH soft-positive weight={args.soft_positive_weight:g}, '
         f'k={args.soft_positive_k}',

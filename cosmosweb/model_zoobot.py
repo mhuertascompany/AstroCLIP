@@ -46,7 +46,11 @@ from .sfh_transformer import (
     SFHTransformerEncoder,
 )
 from .sfh_similarity import soft_cross_entropy, wasserstein_soft_targets
-from .zoobot_encoder import MultiFilterZooBotImageEncoder, ZooBotImageEncoder
+from .zoobot_encoder import (
+    FlexibleProjection,
+    MultiFilterZooBotImageEncoder,
+    ZooBotImageEncoder,
+)
 
 
 class ResidualSFHProjection(nn.Module):
@@ -79,7 +83,8 @@ class ResidualSFHProjection(nn.Module):
 
 def make_sfh_projection(kind: str, embed_dim: int,
                         hidden_dim: int | None = None,
-                        residual_scale: float = 0.1) -> nn.Module:
+                        residual_scale: float = 0.1,
+                        hidden_layers: int = 2) -> nn.Module:
     """Build the optional map from the SFH latent into the CLIP space.
 
     The linear option starts as the identity, so an autoencoder latent is
@@ -97,9 +102,15 @@ def make_sfh_projection(kind: str, embed_dim: int,
             embed_dim, hidden_dim=hidden_dim,
             residual_scale=residual_scale,
         )
+    if kind == 'mlp':
+        return FlexibleProjection(
+            embed_dim, embed_dim,
+            hidden_dim=hidden_dim or 2 * embed_dim,
+            hidden_layers=hidden_layers,
+        )
     raise ValueError(
         f'Unknown sfh_projection_type={kind!r}; choose identity, linear, '
-        'or residual_mlp.'
+        'residual_mlp, or mlp.'
     )
 
 
@@ -120,6 +131,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         warmup_epochs:    int   = 5,
         unfreeze_blocks:  int   = 0,
         backbone_lr_scale: float = 0.1,
+        image_projection_type: str = 'legacy',
+        image_projection_hidden_dim: int | None = None,
+        image_projection_hidden_layers: int = 2,
         sfh_encoder_type: str = 'mlp',
         sfh_d_model:      int = 128,
         sfh_n_heads:      int = 4,
@@ -134,6 +148,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_projection_type: str = 'identity',
         sfh_projection_hidden_dim: int | None = None,
         sfh_projection_residual_scale: float = 0.1,
+        sfh_projection_hidden_layers: int = 2,
         freeze_sfh_encoder: bool = False,
         freeze_sfh_decoder: bool = False,
     ) -> None:
@@ -148,17 +163,26 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError('sfh_reconstruction_weight cannot be negative.')
         if not 0 <= sfh_reconstruction_w1_weight <= 1:
             raise ValueError('sfh_reconstruction_w1_weight must lie in [0, 1].')
-        if sfh_projection_type not in {'identity', 'linear', 'residual_mlp'}:
+        if sfh_projection_type not in {'identity', 'linear', 'residual_mlp', 'mlp'}:
             raise ValueError(
-                'sfh_projection_type must be identity, linear, or residual_mlp.'
+                'sfh_projection_type must be identity, linear, residual_mlp, or mlp.'
             )
+        if image_projection_type not in {'legacy', 'mlp'}:
+            raise ValueError('image_projection_type must be legacy or mlp.')
         if (
             sfh_projection_hidden_dim is not None
             and sfh_projection_hidden_dim < 1
         ):
             raise ValueError('sfh_projection_hidden_dim must be positive.')
+        if (
+            image_projection_hidden_dim is not None
+            and image_projection_hidden_dim < 1
+        ):
+            raise ValueError('image_projection_hidden_dim must be positive.')
         if sfh_projection_residual_scale <= 0:
             raise ValueError('sfh_projection_residual_scale must be positive.')
+        if min(image_projection_hidden_layers, sfh_projection_hidden_layers) < 1:
+            raise ValueError('Projection hidden-layer counts must be positive.')
         if freeze_sfh_decoder and sfh_reconstruction_weight <= 0:
             raise ValueError(
                 'freeze_sfh_decoder requires a positive reconstruction weight '
@@ -177,6 +201,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             model_name=zoobot_model_name,
             embed_dim=embed_dim,
             unfreeze_blocks=unfreeze_blocks,
+            projection_type=image_projection_type,
+            projection_hidden_dim=image_projection_hidden_dim,
+            projection_hidden_layers=image_projection_hidden_layers,
         )
         if sfh_encoder_type == 'mlp':
             self.sfh_encoder = SFHEncoder(
@@ -200,6 +227,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             sfh_projection_type, embed_dim,
             hidden_dim=sfh_projection_hidden_dim,
             residual_scale=sfh_projection_residual_scale,
+            hidden_layers=sfh_projection_hidden_layers,
         )
         if sfh_reconstruction_weight > 0:
             if sfh_encoder_type != 'transformer':
@@ -297,7 +325,15 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     # ── encoders (public API, used by evaluate / umap scripts) ───────────────
 
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
-        return self.image_encoder(image)
+        return self.project_image(self.encode_image_latent(image))
+
+    def encode_image_latent(self, image: torch.Tensor) -> torch.Tensor:
+        """Return frozen ZooBot features before the trainable CLIP adapter."""
+        return self.image_encoder.encode_backbone(image)
+
+    def project_image(self, latent: torch.Tensor) -> torch.Tensor:
+        """Map frozen ZooBot features into the aligned CLIP space."""
+        return self.image_encoder.projection(latent)
 
     def encode_sfh_latent(self, sfh: torch.Tensor) -> torch.Tensor:
         return self.sfh_encoder(sfh)

@@ -66,6 +66,10 @@ def load_embeddings(path):
     redshift = np.asarray(archive['redshift'], dtype=np.float32)
     image = _normalize_rows(archive['image_embedding'])
     sfh = _normalize_rows(archive['sfh_embedding'])
+    image_preprojection = (
+        _normalize_rows(archive['image_preprojection_embedding'])
+        if 'image_preprojection_embedding' in archive else None
+    )
     sfh_preprojection = (
         _normalize_rows(archive['sfh_preprojection_embedding'])
         if 'sfh_preprojection_embedding' in archive else None
@@ -80,9 +84,17 @@ def load_embeddings(path):
         )
     if image.shape != sfh.shape or image.ndim != 2:
         raise ValueError('Image and SFH embeddings must have the same 2D shape.')
+    if image_preprojection is not None:
+        if image_preprojection.ndim != 2 or len(image_preprojection) != n_objects:
+            raise ValueError(
+                'Pre-projection image embedding must be a 2D array with one row per object.'
+            )
     if len(np.unique(galaxy_ids)) != n_objects:
         raise ValueError('Embedding archive contains duplicate galaxy IDs.')
-    return galaxy_ids, rows, redshift, image, sfh, sfh_preprojection
+    return (
+        galaxy_ids, rows, redshift, image, sfh,
+        image_preprojection, sfh_preprojection,
+    )
 
 
 def _catalog_property(source, rows, candidates, valid=None):
@@ -564,7 +576,7 @@ def main():
         raise ValueError('Use n-neighbors >= 2 and min-dist in [0, 1].')
 
     (galaxy_ids, rows, redshift, image, sfh,
-     sfh_preprojection) = load_embeddings(args.embeddings)
+     image_preprojection, sfh_preprojection) = load_embeddings(args.embeddings)
     rng = np.random.default_rng(args.seed)
     if args.max_objects > 0 and args.max_objects < len(galaxy_ids):
         selected = np.sort(rng.choice(len(galaxy_ids), args.max_objects, replace=False))
@@ -573,6 +585,8 @@ def main():
         )
         if sfh_preprojection is not None:
             sfh_preprojection = sfh_preprojection[selected]
+        if image_preprojection is not None:
+            image_preprojection = image_preprojection[selected]
     joint = _normalize_rows(image + sfh)
     properties, sources = load_properties(
         args.dataset, rows, galaxy_ids, redshift, image, sfh, args.per_object,
@@ -591,6 +605,12 @@ def main():
         log.info('Fitting frozen pre-projection SFH UMAP')
         xy_sfh_preprojection = fit_umap(
             sfh_preprojection, args.n_neighbors, args.min_dist, args.seed,
+        )
+    xy_image_preprojection = None
+    if image_preprojection is not None:
+        log.info('Fitting frozen pre-projection ZooBot UMAP')
+        xy_image_preprojection = fit_umap(
+            image_preprojection, args.n_neighbors, args.min_dist, args.seed,
         )
     log.info('Fitting averaged joint UMAP')
     xy_joint = fit_umap(joint, args.n_neighbors, args.min_dist, args.seed)
@@ -655,6 +675,11 @@ def main():
                 pdf, xy_sfh_preprojection, physical,
                 'Frozen SFH autoencoder latent: physical and SFH properties' + suffix,
             )
+        if xy_image_preprojection is not None:
+            property_pages(
+                pdf, xy_image_preprojection, morphology,
+                'Frozen ZooBot backbone: morphology' + suffix,
+            )
         property_pages(pdf, xy_joint, morphology,
                        'Euclid averaged joint embedding: morphology' + suffix)
         property_pages(pdf, xy_joint, physical,
@@ -688,6 +713,11 @@ def main():
         npz_data.update({
             'sfh_preprojection_embedding': sfh_preprojection,
             'xy_sfh_preprojection': xy_sfh_preprojection,
+        })
+    if image_preprojection is not None:
+        npz_data.update({
+            'image_preprojection_embedding': image_preprojection,
+            'xy_image_preprojection': xy_image_preprojection,
         })
     npz_data.update({key: np.asarray(value, dtype=np.float32)
                      for key, value in properties.items()})

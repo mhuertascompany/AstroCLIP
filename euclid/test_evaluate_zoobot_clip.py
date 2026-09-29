@@ -1,13 +1,56 @@
 import numpy as np
+import torch
 
 from euclid.evaluate_zoobot_clip import (
     embedding_diagnostics,
+    extract_embeddings,
     projection_geometry_diagnostics,
     retrieval_ranks,
     sfh_shape_neighborhood_test,
     summarize_sfh_reconstruction,
     summarize_ranks,
 )
+
+
+def test_extract_embeddings_can_return_both_preprojection_spaces():
+    class FakeModel:
+        sfh_decoder = None
+
+        def eval(self):
+            return self
+
+        def encode_image_latent(self, image):
+            return image.flatten(1)
+
+        def project_image(self, latent):
+            return latent[:, :2]
+
+        def encode_sfh_latent(self, sfh):
+            return sfh
+
+        def project_sfh(self, latent):
+            return latent[:, :2]
+
+    loader = [{
+        'image': torch.tensor([
+            [[[3., 4.], [0., 0.]]],
+            [[[0., 0.], [0., 2.]]],
+        ]),
+        'sfh': torch.tensor([[1., 2., 3.], [3., 2., 1.]]),
+        'galaxy_id': torch.tensor([10, 20]),
+    }]
+    result = extract_embeddings(
+        FakeModel(), loader, torch.device('cpu'),
+        include_image_preprojection=True,
+    )
+    image, sfh, sfh_pre, ids, reconstruction, image_pre = result
+    assert image.shape == (2, 2)
+    assert sfh.shape == (2, 2)
+    assert sfh_pre.shape == (2, 3)
+    assert image_pre.shape == (2, 4)
+    np.testing.assert_array_equal(ids, [10, 20])
+    assert reconstruction is None
+    np.testing.assert_allclose(np.linalg.norm(image_pre, axis=1), 1.0)
 
 
 def test_retrieval_ranks_find_aligned_pairs():

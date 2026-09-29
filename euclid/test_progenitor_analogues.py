@@ -9,6 +9,7 @@ from euclid.progenitor_analogues import (
     candidate_curve,
     candidate_curves,
     curve_distance,
+    analogue_transition_distance,
     descendant_epoch_redshifts,
     descendant_state_curve,
     lookback_at_formed_fraction,
@@ -52,6 +53,24 @@ class ProgenitorAnalogueMathTest(unittest.TestCase):
         for index in range(2):
             scalar = candidate_curve(weights[index], self.edges, norms[index], tau)
             np.testing.assert_allclose(vectorized[index], scalar, atol=1e-12)
+
+    def test_transition_distance_is_zero_for_consistent_uniform_histories(self):
+        uniform_rate_weights = np.diff(self.edges)
+        sfh = np.vstack([uniform_rate_weights, uniform_rate_weights])
+        norms = np.array([10.0, 8.0])
+        distance = analogue_transition_distance(
+            older_index=1,
+            younger_index=0,
+            older_fraction=0.8,
+            younger_fraction=1.0,
+            sfh=sfh,
+            edges=self.edges,
+            norms=norms,
+            history_gyr=2.0,
+            n_curve_points=32,
+        )
+        # Uniform SFHs truncated at a later state and renormalized remain uniform.
+        self.assertAlmostEqual(distance, 0.0, places=7)
 
     def test_descendant_epoch_redshift_uses_descendant_cosmic_clock(self):
         redshifts = descendant_epoch_redshifts(0.7, np.array([0.0, 1.0, 3.0]))

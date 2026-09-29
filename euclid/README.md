@@ -745,7 +745,8 @@ archive stores both `sfh_embedding` (after the trainable linear projection) and
 `sfh_preprojection_embedding` (the unchanged autoencoder latent). Evaluation
 also reports the overlap of their nearest-neighbour graphs and the correlation
 of their pairwise cosine similarities. The UMAP diagnostic and interactive
-explorer expose `SFH encoder` and `SFH autoencoder latent` as separate spaces.
+explorer expose `Aligned SFH projection` and `Unaligned SFH autoencoder` as
+separate spaces.
 This distinguishes successful image alignment from destruction of the original
 SFH geometry.
 
@@ -927,6 +928,30 @@ new bright validation sample. Treat this as exploratory validation rather
 than an independent test set. Compare alignment and SFH-neighborhood metrics
 on the saved bright split when assessing whether morphology information is
 preserved in the adapted spaces.
+
+#### Unrestricted symmetric-adapter alignment
+
+To test whether a shared SFH--morphology organization exists without forcing
+the aligned space to retain the original SFH geometry, use unrestricted MLP
+adapters on both modalities. The ZooBot backbone and pretrained SFH encoder
+remain frozen, but each feeds an independently initialized
+`LayerNorm -> 1024 -> GELU -> 1024 -> GELU -> 256` adapter. There is no
+identity initialization, residual connection, or fixed residual scale. Thus
+both aligned representations may reorganize substantially while the original
+backbone representations remain available for before/after diagnostics.
+
+```bash
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+
+sbatch euclid/slurm_train_zoobot_clip_bright_unrestricted_adapters_test.sh "${AE}"
+sbatch euclid/slurm_train_zoobot_clip_bright_unrestricted_adapters.sh "${AE}"
+```
+
+The smoke test uses 2,048 pairs for three epochs. The full run writes to
+`training_bright_frozen_unrestricted_adapters`, trains for at most 60 epochs,
+and uses patience 12. Compare it with the residual-adapter run using held-out
+retrieval, aligned-versus-unaligned neighbour overlap, pairwise-geometry
+correlation, and mass/redshift-matched permutation baselines.
 
 For the VIS<22 bright sample, first check whether the pretrained Euclid ZooBot
 backbone itself organizes the galaxies by morphology. The image-only exporter
@@ -1175,10 +1200,14 @@ python -m euclid.explore_embeddings \
   --label 'Bright frozen encoders + MLP, best epoch 20'
 ```
 
-The export includes the pre-adapter SFH embedding but not the raw ZooBot
-backbone embedding. Image encoder in this bundle means the trained image
-adapter output. Comparing with the earlier raw-ZooBot 30k archive in the same
-app restricts the display to the intersection of galaxy IDs.
+Current exports include both representations before their adapters and both
+aligned 256-dimensional projections. In each explorer panel the embedding
+menu therefore offers `Aligned joint average`, `Aligned image projection`,
+`Aligned SFH projection`, `Unaligned ZooBot backbone`, and `Unaligned SFH
+autoencoder`. Selections, filters, stamp galleries, and SFH galleries remain
+linked by galaxy ID while either panel changes space. Bundles generated before
+this addition still expose every array they contain; rerun the full embedding
+export and UMAP jobs to add the unaligned ZooBot view to an older bundle.
 
 #### Full bright-sample explorer
 
@@ -1194,10 +1223,11 @@ sbatch --dependency=afterok:${EMBED_JOB} \
 ```
 
 The first job performs inference only. It deliberately skips the quadratic
-all-pairs retrieval calculation used by validation. The second job fits image,
-aligned-SFH, pre-projection-SFH, and normalized joint-average UMAPs for all
-stamp-paired objects. It skips the optional stacked 2N-object shared-manifold
-UMAP to keep the full run tractable. The final download archive is:
+all-pairs retrieval calculation used by validation. The second job fits
+aligned-image, aligned-SFH, pre-projection-ZooBot, pre-projection-SFH, and
+normalized joint-average UMAPs for all stamp-paired objects. It skips the
+optional stacked 2N-object shared-manifold UMAP to keep the full run tractable.
+The final download archive is:
 
 ```text
 /n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/training_bright_frozen_mlp/full_sample_explorer_bundle.tar
@@ -1248,6 +1278,29 @@ embedding spaces while preserving selections by galaxy ID. Selected objects
 show their VIS stamps, median SFHs with 16th--84th percentile posterior bands,
 and the population SFH of the complete selection. Redshift and scalar-property
 filters are available, and selections can be saved to CSV.
+
+The explorer computes **Post-peak decline slope [dex/Gyr; 300 Myr smooth]**
+and **Pre-peak rise slope [dex/Gyr; 300 Myr smooth]** when it opens a bundle.
+The SFH is Gaussian-smoothed over 300 Myr in physical time. The positive
+post-peak slope is
+`[log10(SFR_peak) - log10(SFR_observation)] / peak lookback time`; the positive
+pre-peak slope is
+`[log10(SFR_peak) - log10(SFR_oldest)] / time from oldest bin to peak`. Both
+require one dominant interior peak and at least 0.3 dex of contrast on each
+side. The relevant branch must be predominantly monotonic, and each measured
+interval must span at least 300 Myr. Histories that fail these conditions are
+`NaN` and disappear when the corresponding property is selected. **Clear
+single-peak declining SFH (0/1)** exposes the post-peak classification for
+filtering. Rates below 0.1% of the smoothed peak are floored when calculating
+the endpoint slopes.
+
+On macOS, the stamp gallery detects iCloud optimized-storage placeholders
+without opening them (`st_blocks == 0`). Opening such a file can otherwise
+start a synchronous download and freeze the Panel callback. For each selection
+the explorer searches up to 4,096 candidates to find 16 locally resident
+stamps, reports how many placeholders were skipped, and keeps the SFH gallery
+available even if none are local. It does not initiate downloads from inside
+the interactive callback.
 
 The app clusters in the full 256-dimensional image, SFH, or joint latent space
 when those arrays are present. UMAP coordinates are used for navigation and
@@ -1468,6 +1521,13 @@ for ordinary lasso/box selections; **New random sample** returns to random
 examples. Changing coordinates or filters clears the line overlay. This
 samples observed galaxies, not interpolated embeddings or generated images;
 a UMAP path is not necessarily a physical evolutionary sequence.
+
+The explorer exposes the MER `SERSIC_SERSIC_VIS_RADIUS` twice: the catalogue
+value as **VIS Sérsic radius [arcsec]**, and a derived **VIS Sérsic radius
+[proper kpc]**. The physical value uses each object's redshift and the same
+preprocessing cosmology used for the SFH time conversion. Invalid radii or
+redshifts remain missing rather than being assigned a physical size. The
+catalogue Kron radius and semimajor axis remain in pixels.
 
 Individual explorer SFH panels also show a top axis labeled **Time before
 observation [Gyr]**. It converts fractional time `f` to
@@ -1783,6 +1843,67 @@ labels appear in the titles and `selection.json`. Individual generated PNGs
 are also saved. Six random objects are illustrative examples, not a statistical
 comparison of the full cluster populations.
 
+### Match recent SFR while changing the earlier SFH
+
+`select_matched_recent_sfr_histories` builds a controlled test of whether the
+diffusion model responds mainly to current activity or to the longer SFH. It
+selects PHZ star-forming galaxies and matches each pair in SFH-derived 100 Myr
+SFR, stellar mass, and redshift. One experiment separates the physical time
+of peak SFH; a second, disjoint experiment separates mass-weighted stellar age.
+The 100 Myr rate is the normalized mass fraction formed in the latest 100 Myr
+times observed stellar mass divided by 100 Myr, with R=0. By default, the SFH
+and PHZ SFRs must agree within 1 dex and the SFH rate must exceed
+log(SFR/Msun yr^-1)=-1.5, avoiding nominally star-forming catalog objects whose
+reconstructed recent SFH is exactly or nearly zero.
+
+```bash
+BUNDLE=/path/to/full_sample_explorer_bundle
+python -m euclid.select_matched_recent_sfr_histories \
+  --bundle "${BUNDLE}" \
+  --archive "${BUNDLE}/00_full_sample_explorer_euclid_clip_full_umap_diagnostics.npz" \
+  --catalog /path/to/phz_sfr_mass_matched_bright.fits \
+  --conditions /path/to/diffusion_conditions_aligned_best.npz \
+  --n-pairs 4 --seed 20260925 \
+  --output euclid/diagnostics/matched_recent_sfr_histories.csv \
+  --pdf output/pdf/matched_recent_sfr_different_histories.pdf
+```
+
+Supplying `--conditions` restricts selection to IDs available to the trained
+diffusion model. The output CSV is ordered as adjacent matched pairs and is
+accepted directly by the existing shared-noise sampler. After copying it to
+Candide:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+sbatch euclid/slurm_sample_diffusion_clusters.sh \
+  "${BASE}/matched_recent_sfr_histories.csv"
+```
+
+The explorer also calculates three physical diagnostics at load time:
+**SFH log10(SFR100 / Msun yr^-1), R=0**, **SFH peak time before observation
+[Gyr]**, and **SFH mass-weighted age [Gyr]**. The original fractional peak
+time and fractional recent-activity properties remain available.
+
+To calculate analogue tracks for every matched pair, first run
+`batch_progenitor_tracks` with the matched CSV as its selection. Then make the
+pair-oriented report from that output:
+
+```bash
+python -m euclid.plot_paired_progenitor_tracks \
+  --selection euclid/diagnostics/matched_recent_sfr_histories.csv \
+  --tracks euclid/diagnostics/matched_recent_sfr_progenitor_tracks \
+  --bundle "${BUNDLE}" \
+  --archive "${BUNDLE}/00_full_sample_explorer_euclid_clip_full_umap_diagnostics.npz" \
+  --output output/pdf/matched_recent_sfr_paired_progenitor_tracks.pdf
+```
+
+Each page overlays the pair's median analogue trajectories in the joint UMAP,
+shows the two observed stamps and SFHs, and plots median ZooBot smooth, spiral,
+and disturbed/merger probabilities for the five selected analogues at each
+checkpoint. Stars at lookback zero are the observed descendants. Analogue
+matching still uses only predicted mass and the renormalized cumulative SFH;
+morphology and UMAP coordinates remain outcomes.
+
 
 ### MS history summary statistics in the explorer
 
@@ -1879,6 +2000,37 @@ constrained. The UMAP path joins medians of independent analogue ensembles and
 must not be interpreted as the orbit of one galaxy. Stellar mass formed in
 merged progenitors is another limitation of mapping a reconstructed integrated
 SFH onto a single main-progenitor sequence.
+
+The default 2 Gyr cumulative statistic can be degenerate for nearly flat
+cumulative histories: candidates can agree locally while their complete SFH
+shapes differ. An optional global fractional-history term addresses that case:
+
+```bash
+python -m euclid.progenitor_analogues \
+  --global-shape-weight 0.1
+```
+
+This ranks candidates with
+`Dlocal + 0.1 Dglobal`. `Dlocal` is the original physical-time comparison;
+`Dglobal` compares the complete pre-checkpoint descendant history with the
+candidate history after both time axes are mapped to [0,1]. Both distances are
+saved in `analogue_candidates.csv`. Tests on the selected six-object review
+sample reduced the median complete-shape distance and the typical UMAP path
+jumps, although individual objects can still become less smooth. UMAP is never
+used by the score.
+
+For populations where preserving the visible complete SFH shape is more
+important, `--global-shape-weight 0.25` is a useful stronger compromise. In the
+six-object calibration it reduced the median global distance from 0.059 to
+0.047 relative to weight 0.1, while changing the median local distance only
+from 0.025 to 0.026. Weight 0.5 reduced the global distance further but began
+to degrade the local physical-time match and the largest UMAP jumps.
+
+For an explicitly coherent sequence, `--continuity-weight W` considers the
+best `--continuity-pool` candidates at every checkpoint and adds an SFH-only
+transition cost between adjacent analogues. This is experimental: it produces
+a more self-consistent branch, but it did not consistently reduce UMAP jumps in
+the review sample, so the default remains independent checkpoint matching.
 
 To repeat the pilot with a quenched descendant, defined from the PHZ catalog as
 log(sSFR/yr^-1)<-11.5, use:

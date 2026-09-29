@@ -25,6 +25,30 @@ from zoobot.pytorch.training import finetune
 from .backbone_unfreezing import unfreeze_last_feature_blocks
 
 
+class FlexibleProjection(nn.Module):
+    """Unrestricted MLP adapter for learning a new shared representation."""
+
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int,
+                 hidden_layers: int = 2, dropout: float = 0.1) -> None:
+        super().__init__()
+        if min(input_dim, output_dim, hidden_dim, hidden_layers) < 1:
+            raise ValueError('Projection dimensions and hidden_layers must be positive.')
+        layers = [nn.LayerNorm(input_dim)]
+        current_dim = input_dim
+        for _ in range(hidden_layers):
+            layers.extend([
+                nn.Linear(current_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ])
+            current_dim = hidden_dim
+        layers.append(nn.Linear(current_dim, output_dim))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.network(latent)
+
+
 class ZooBotImageEncoder(nn.Module):
     """
     ZooBOT EfficientNet backbone + trainable MLP projection head.
@@ -56,6 +80,9 @@ class ZooBotImageEncoder(nn.Module):
         embed_dim:       int   = 256,
         dropout:         float = 0.1,
         unfreeze_blocks: int   = 0,
+        projection_type: str = 'legacy',
+        projection_hidden_dim: int | None = None,
+        projection_hidden_layers: int = 2,
     ) -> None:
         super().__init__()
 
@@ -108,14 +135,24 @@ class ZooBotImageEncoder(nn.Module):
             out   = self.backbone(dummy)
             backbone_dim = out.flatten(1).shape[1]
 
-        # MLP projection: backbone_dim → embed_dim → embed_dim  (same as CosmosImageEncoder)
-        self.projection = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(backbone_dim, embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim, embed_dim),
-        )
+        if projection_type == 'legacy':
+            # Preserve the exact module layout expected by existing checkpoints.
+            self.projection = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(backbone_dim, embed_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim, embed_dim),
+            )
+        elif projection_type == 'mlp':
+            self.projection = FlexibleProjection(
+                backbone_dim, embed_dim,
+                hidden_dim=projection_hidden_dim or 2 * embed_dim,
+                hidden_layers=projection_hidden_layers,
+                dropout=dropout,
+            )
+        else:
+            raise ValueError("projection_type must be 'legacy' or 'mlp'.")
 
     def train(self, mode: bool = True):
         """Keep a fully frozen backbone in inference mode during training."""
@@ -135,9 +172,12 @@ class ZooBotImageEncoder(nn.Module):
         -------
         Tensor (B, embed_dim)  — NOT L2-normalised here.
         """
+        return self.projection(self.encode_backbone(x))
+
+    def encode_backbone(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the frozen ZooBot representation before CLIP projection."""
         features = self.backbone(x)           # (B, backbone_dim) or (B, C, 1, 1)
-        features = features.flatten(1)        # (B, backbone_dim)
-        return self.projection(features)      # (B, embed_dim)
+        return features.flatten(1)            # (B, backbone_dim)
 
 
 def _load_backbone(ckpt_path: str | Path):

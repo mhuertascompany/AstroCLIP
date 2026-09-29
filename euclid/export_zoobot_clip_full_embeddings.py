@@ -102,8 +102,9 @@ def main() -> None:
         args.dataset, args.stamp_root, rows, galaxy_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
     )
-    image, sfh, sfh_preprojection, encoded_ids, _ = extract_embeddings(
-        model, loader, device,
+    (image, sfh, sfh_preprojection, encoded_ids, _,
+     image_preprojection) = extract_embeddings(
+        model, loader, device, include_image_preprojection=True,
     )
     if not np.array_equal(encoded_ids, galaxy_ids):
         raise ValueError("Embedding extraction changed the full-sample ID order")
@@ -117,6 +118,7 @@ def main() -> None:
         h5_row=rows,
         redshift=redshift,
         image_embedding=image.astype(np.float32),
+        image_preprojection_embedding=image_preprojection.astype(np.float32),
         sfh_embedding=sfh.astype(np.float32),
         sfh_preprojection_embedding=sfh_preprojection.astype(np.float32),
     )

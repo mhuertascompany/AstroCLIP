@@ -50,13 +50,33 @@ class EuclidUmapDiagnosticsTests(unittest.TestCase):
                 image_embedding=np.array([[2.0, 0.0], [0.0, 3.0]]),
                 sfh_embedding=np.array([[4.0, 0.0], [0.0, 5.0]]),
             )
-            ids, rows, redshift, image, sfh, preprojection = load_embeddings(path)
+            (ids, rows, redshift, image, sfh,
+             image_preprojection, sfh_preprojection) = load_embeddings(path)
             np.testing.assert_array_equal(ids, [10, 20])
             np.testing.assert_array_equal(rows, [0, 1])
             np.testing.assert_allclose(np.linalg.norm(image, axis=1), 1.0)
             np.testing.assert_allclose(np.linalg.norm(sfh, axis=1), 1.0)
             np.testing.assert_allclose(redshift, [0.5, 1.0])
-            self.assertIsNone(preprojection)
+            self.assertIsNone(image_preprojection)
+            self.assertIsNone(sfh_preprojection)
+
+    def test_load_embeddings_reads_unaligned_modalities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'embeddings.npz'
+            np.savez(
+                path,
+                galaxy_id=np.array([10, 20]), h5_row=np.array([0, 1]),
+                redshift=np.array([0.5, 1.0]),
+                image_embedding=np.eye(2), sfh_embedding=np.eye(2),
+                image_preprojection_embedding=np.array(
+                    [[3., 4., 0.], [0., 0., 2.]],
+                ),
+                sfh_preprojection_embedding=np.array([[2., 0.], [0., 2.]]),
+            )
+            values = load_embeddings(path)
+            self.assertEqual(values[5].shape, (2, 3))
+            self.assertEqual(values[6].shape, (2, 2))
+            np.testing.assert_allclose(np.linalg.norm(values[5], axis=1), 1.0)
 
     def test_sfh_properties_respect_recent_to_old_time_direction(self):
         with tempfile.TemporaryDirectory() as directory:

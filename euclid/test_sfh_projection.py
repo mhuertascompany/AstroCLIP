@@ -50,6 +50,23 @@ class SFHProjectionTests(unittest.TestCase):
         optimizer.step()
         self.assertFalse(torch.equal(projection(latent), latent))
 
+    def test_unrestricted_mlp_can_replace_original_sfh_geometry(self):
+        import torch
+
+        from cosmosweb.model_zoobot import make_sfh_projection
+
+        projection = make_sfh_projection(
+            'mlp', 8, hidden_dim=32, hidden_layers=2,
+        )
+        latent = torch.randn(4, 8)
+        output = projection(latent)
+        self.assertEqual(output.shape, latent.shape)
+        self.assertFalse(torch.allclose(output, latent))
+        output.square().sum().backward()
+        self.assertTrue(all(
+            parameter.grad is not None for parameter in projection.parameters()
+        ))
+
     def test_frozen_autoencoder_is_separate_from_trainable_projection(self):
         import torch
         import torch.nn as nn
@@ -58,13 +75,16 @@ class SFHProjectionTests(unittest.TestCase):
 
         class FakeImageEncoder(nn.Module):
             def __init__(self, ckpt_path=None, model_name=None, embed_dim=8,
-                         unfreeze_blocks=0):
+                         unfreeze_blocks=0, **kwargs):
                 super().__init__()
                 self.backbone = nn.Identity()
                 self.projection = nn.Linear(embed_dim, embed_dim)
 
             def forward(self, images):
-                return self.projection(images.flatten(1)[:, :8])
+                return self.projection(self.encode_backbone(images))
+
+            def encode_backbone(self, images):
+                return images.flatten(1)[:, :8]
 
         with mock.patch.object(
             clip_module, 'ZooBotImageEncoder', FakeImageEncoder,

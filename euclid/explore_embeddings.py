@@ -45,7 +45,12 @@ from euclid.rejuvenation import catalog_diagnostics, LABELS as REJ_LABELS
 from euclid.main_sequence_sfh import main_sequence_along_sfh
 from euclid.ms_deviation import catalog_deviations
 from euclid.recent_ms import WINDOWS, catalog_recent_offsets, matched_mask
-from euclid.sfh_shape import sfh_duration_80, sfh_recent_activity
+from euclid.sfh_shape import (
+    sfh_duration_80,
+    sfh_post_peak_decline,
+    sfh_recent_activity,
+)
+from euclid.physical_size import angular_radius_to_proper_kpc
 from bokeh.models import (
     BasicTicker,
     BooleanFilter,
@@ -76,7 +81,8 @@ _PROPERTY_LABELS = {
     'vis_magnitude': 'VIS total magnitude (AB)',
     'log_stellar_mass': 'log M★',
     'sersic_index': 'Sérsic index n',
-    'sersic_radius': 'Sérsic radius',
+    'sersic_radius': 'VIS Sérsic radius [arcsec]',
+    'sersic_radius_kpc': 'VIS Sérsic radius [proper kpc]',
     'axis_ratio': 'Sérsic axis ratio b/a',
     'fwhm': 'FWHM',
     'kron_radius': 'Kron radius',
@@ -108,6 +114,14 @@ _PROPERTY_LABELS = {
     'sfh_recent_birthrate': 'Recent SFR / lifetime mean (latest 10%)',
     'sfh_recent_trend': 'Recent SFH trend (+ rising, - declining)',
     'sfh_log_recent_sfr_per_formed_mass': 'log10 recent SFR / formed mass (yr⁻¹; floor −15)',
+    'sfh_recent_mass_fraction_100myr': 'SFH mass fraction formed in latest 100 Myr',
+    'sfh_log_sfr_per_stellar_mass_100myr_r0': 'SFH log10(sSFR100 / yr⁻¹), R=0',
+    'sfh_log_sfr_100myr_r0': 'SFH log10(SFR100 / M☉ yr⁻¹), R=0',
+    'sfh_peak_age_gyr': 'SFH peak time before observation [Gyr]',
+    'sfh_mass_weighted_age_gyr': 'SFH mass-weighted age [Gyr]',
+    'sfh_post_peak_decline_slope_dex_gyr': 'Post-peak decline slope [dex/Gyr; 300 Myr smooth]',
+    'sfh_pre_peak_rise_slope_dex_gyr': 'Pre-peak rise slope [dex/Gyr; 300 Myr smooth]',
+    'sfh_single_peak_declining': 'Clear single-peak declining SFH (0/1)',
     'sfh_duration_80': 'SFH duration: central 80% (fractional time)',
     'sfh_t50_lookback': 'SFH t50 fractional lookback',
     'sfh_entropy': 'Normalized SFH entropy',
@@ -130,16 +144,18 @@ _PROPERTY_PALETTES = {
 }
 
 _COORDINATES = {
-    'Joint average': 'xy_joint',
-    'Image encoder': 'xy_image',
-    'SFH encoder': 'xy_sfh',
-    'SFH autoencoder latent': 'xy_sfh_preprojection',
-    'Shared UMAP: image': 'xy_shared_image',
-    'Shared UMAP: SFH': 'xy_shared_sfh',
+    'Aligned joint average': 'xy_joint',
+    'Aligned image projection': 'xy_image',
+    'Aligned SFH projection': 'xy_sfh',
+    'Unaligned ZooBot backbone': 'xy_image_preprojection',
+    'Unaligned SFH autoencoder': 'xy_sfh_preprojection',
+    'Shared aligned UMAP: image': 'xy_shared_image',
+    'Shared aligned UMAP: SFH': 'xy_shared_sfh',
 }
 
 _ARCHIVE_RESERVED = {
     'galaxy_id', 'h5_row', 'image_embedding', 'sfh_embedding',
+    'image_preprojection_embedding',
     'sfh_preprojection_embedding', 'joint_embedding', *_COORDINATES.values(),
 }
 
@@ -210,10 +226,11 @@ def _load_archive(path):
 
         embeddings = {}
         for label, key in (
-            ('Joint average', 'joint_embedding'),
-            ('Image encoder', 'image_embedding'),
-            ('SFH encoder', 'sfh_embedding'),
-            ('SFH autoencoder latent', 'sfh_preprojection_embedding'),
+            ('Aligned joint average', 'joint_embedding'),
+            ('Aligned image projection', 'image_embedding'),
+            ('Aligned SFH projection', 'sfh_embedding'),
+            ('Unaligned ZooBot backbone', 'image_preprojection_embedding'),
+            ('Unaligned SFH autoencoder', 'sfh_preprojection_embedding'),
         ):
             if key not in archive:
                 continue
@@ -266,14 +283,20 @@ def load_data(h5_path, archive_paths, labels=None):
             _read_rows(source['source_h5_row'], h5_rows).astype(np.int64)
             if 'source_h5_row' in source else h5_rows.copy()
         )
-        duration = sfh_duration_80(
-            _read_rows(source['sfh'], h5_rows), source['sfh_time_grid'][:],
-            float(source.attrs.get('sfh_log_epsilon', 1e-10)),
+        sfh_log = _read_rows(source['sfh'], h5_rows)
+        sfh_time = source['sfh_time_grid'][:]
+        epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
+        age_myr = (
+            _read_rows(source['sfh_time_norm'], h5_rows)
+            if 'sfh_time_norm' in source else None
         )
+        duration = sfh_duration_80(sfh_log, sfh_time, epsilon)
         activity = sfh_recent_activity(
-            _read_rows(source['sfh'], h5_rows), source['sfh_time_grid'][:],
-            float(source.attrs.get('sfh_log_epsilon', 1e-10)),
-            _read_rows(source['sfh_time_norm'], h5_rows) if 'sfh_time_norm' in source else None,
+            sfh_log, sfh_time, epsilon, age_myr,
+        )
+        decline = (
+            sfh_post_peak_decline(sfh_log, sfh_time, age_myr, epsilon)
+            if age_myr is not None else {}
         )
     runs = {}
     used_labels = set()
@@ -303,6 +326,15 @@ def load_data(h5_path, archive_paths, labels=None):
         }
         runs[label]['properties'][_PROPERTY_LABELS['sfh_duration_80']] = duration
         runs[label]['properties'].update({_PROPERTY_LABELS[k]: v for k, v in activity.items() if k in _PROPERTY_LABELS})
+        runs[label]['properties'].update({
+            _PROPERTY_LABELS[k]: v for k, v in decline.items() if k in _PROPERTY_LABELS
+        })
+        mass = runs[label]['properties'].get(_PROPERTY_LABELS['log_stellar_mass'])
+        log_specific = activity.get('sfh_log_sfr_per_stellar_mass_100myr_r0')
+        if mass is not None and log_specific is not None:
+            runs[label]['properties'][_PROPERTY_LABELS['sfh_log_sfr_100myr_r0']] = (
+                np.asarray(mass, dtype=float) + np.asarray(log_specific, dtype=float)
+            )
 
     first_properties = next(iter(runs.values()))['properties']
     redshift = first_properties.get('Redshift z')
@@ -314,11 +346,20 @@ def load_data(h5_path, archive_paths, labels=None):
                 redshift = _read_rows(source['redshift'], h5_rows).astype(float)
     if redshift is None:
         redshift = np.full(len(galaxy_ids), np.nan)
+    redshift = np.asarray(redshift, dtype=float)
+    angular_label = _PROPERTY_LABELS['sersic_radius']
+    physical_label = _PROPERTY_LABELS['sersic_radius_kpc']
+    for run in runs.values():
+        angular_radius = run['properties'].get(angular_label)
+        if angular_radius is not None:
+            run['properties'][physical_label] = angular_radius_to_proper_kpc(
+                angular_radius, redshift,
+            )
     return {
         'galaxy_ids': galaxy_ids,
         'h5_rows': h5_rows,
         'source_h5_rows': source_rows,
-        'redshift': np.asarray(redshift, dtype=float),
+        'redshift': redshift,
         'runs': runs,
     }
 
@@ -329,6 +370,62 @@ def _stamp_directory(path, band):
     if (path / band).is_dir():
         return path / band
     return path
+
+
+def _stamp_is_local(path):
+    """Return False for missing files and macOS/iCloud dataless placeholders."""
+    try:
+        metadata = path.stat()
+    except OSError:
+        return False
+    if not path.is_file() or metadata.st_size <= 0:
+        return False
+    # Optimized-storage iCloud files retain their logical size but occupy zero
+    # filesystem blocks. Opening one can synchronously start a network download
+    # and freeze the Panel callback for minutes.
+    blocks = getattr(metadata, 'st_blocks', None)
+    return blocks is None or blocks > 0
+
+
+def _gallery_indices(selected, stamp_dir, galaxy_ids, rng, band, ordered):
+    """Choose display rows, preferring locally resident stamps without blocking."""
+    selected = np.asarray(selected, dtype=int)
+    if stamp_dir is None:
+        n = min(N_DISPLAY, len(selected))
+        shown = (selected[:n] if ordered else
+                 np.sort(rng.choice(selected, n, replace=False)))
+        return shown, {'checked': n, 'unavailable': 0, 'local': n, 'fallback': False}
+
+    candidates = selected if ordered else rng.permutation(selected)
+    # Avoid a long stat loop if an unusual selection contains almost no local
+    # files. Normal selections fill 16 slots after only a few dozen probes.
+    probe_limit = min(len(candidates), max(4096, N_DISPLAY))
+    shown = []
+    unavailable = 0
+    checked = 0
+    for index in candidates[:probe_limit]:
+        checked += 1
+        stamp = stamp_dir / f'{band}_{int(galaxy_ids[index])}.jpg'
+        if _stamp_is_local(stamp):
+            shown.append(int(index))
+            if len(shown) == N_DISPLAY:
+                break
+        else:
+            unavailable += 1
+    fallback = False
+    if not shown:
+        # Keep SFH visualization available even when every checked stamp is an
+        # iCloud placeholder. The image panels remain explicit placeholders.
+        n = min(N_DISPLAY, len(selected))
+        shown = (selected[:n] if ordered else candidates[:n]).tolist()
+        fallback = True
+    return np.asarray(shown, dtype=int), {
+        'checked': checked,
+        'unavailable': unavailable,
+        'local': 0 if fallback else len(shown),
+        'fallback': fallback,
+        'probe_limited': checked == probe_limit and probe_limit < len(candidates),
+    }
 
 
 def _linear_sfh(log_sfh, epsilon):
@@ -441,9 +538,10 @@ def _fig_to_html(fig):
 
 def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmic_reference=False,
              ms_reference=False, return_fraction=0., mass_offset=0., ms_sfr_offset=-.93, show_delta_ms=True):
-    n = min(N_DISPLAY, len(selected))
-    shown = (np.asarray(selected, dtype=int)[:n] if ordered else
-             np.sort(rng.choice(np.asarray(selected, dtype=int), n, replace=False)))
+    shown, stamp_status = _gallery_indices(
+        selected, stamp_dir, data['galaxy_ids'], rng, band, ordered,
+    )
+    n = len(shown)
     rows = data['h5_rows'][shown]
     ids = data['galaxy_ids'][shown]
     redshift = data['redshift'][shown]
@@ -495,17 +593,24 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmi
         for axis in axes:
             axis.set_visible(False)
 
+    stamp_load_failures = 0
     for index, (galaxy_id, z) in enumerate(zip(ids, redshift)):
         if image_axes is not None:
             image_axis = image_axes.flat[index]
             image_axis.set_visible(True)
             stamp = stamp_dir / f'{band}_{int(galaxy_id)}.jpg'
-            if stamp.is_file():
-                with Image.open(stamp) as image:
-                    image_axis.imshow(np.asarray(image.convert('L')), cmap='gray',
-                                      interpolation='nearest')
+            if _stamp_is_local(stamp):
+                try:
+                    with Image.open(stamp) as image:
+                        image_axis.imshow(np.asarray(image.convert('L')), cmap='gray',
+                                          interpolation='nearest')
+                except (OSError, ValueError):
+                    stamp_load_failures += 1
+                    image_axis.text(0.5, 0.5, 'unreadable local stamp',
+                                    ha='center', va='center', fontsize=7)
             else:
-                image_axis.text(0.5, 0.5, 'missing stamp', ha='center', va='center')
+                image_axis.text(0.5, 0.5, 'stamp not local\n(iCloud placeholder)',
+                                ha='center', va='center', fontsize=7)
             image_axis.set_xticks([])
             image_axis.set_yticks([])
             image_axis.set_title(f'{index + 1}. {int(galaxy_id)}  z={z:.2f}', fontsize=5, pad=1)
@@ -541,7 +646,9 @@ def _gallery(h5_path, stamp_dir, selected, data, rng, band, ordered=False, cosmi
     if fig_images is not None:
         fig_images.tight_layout(pad=0.4)
     fig_sfhs.tight_layout(pad=0.4)
-    return fig_images, fig_sfhs
+    stamp_status['load_failures'] = stamp_load_failures
+    stamp_status['shown'] = n
+    return fig_images, fig_sfhs, stamp_status
 
 
 def _population_sfh(h5_path, rows):
@@ -626,10 +733,12 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         embeddings = data['runs'][run_name]['embeddings']
         if embedding_name in embeddings:
             return embeddings[embedding_name]
-        if embedding_name == 'Shared UMAP: image' and 'Image encoder' in embeddings:
-            return embeddings['Image encoder']
-        if embedding_name == 'Shared UMAP: SFH' and 'SFH encoder' in embeddings:
-            return embeddings['SFH encoder']
+        if (embedding_name == 'Shared aligned UMAP: image'
+                and 'Aligned image projection' in embeddings):
+            return embeddings['Aligned image projection']
+        if (embedding_name == 'Shared aligned UMAP: SFH'
+                and 'Aligned SFH projection' in embeddings):
+            return embeddings['Aligned SFH projection']
         return None
 
     left_embedding_default = next(iter(data['runs'][left_run_default]['coordinates']))
@@ -924,17 +1033,27 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             info.object = '_No galaxies selected._'
             image_pane.object = sfh_pane.object = population_pane.object = _BLANK_HTML
             return
-        info.object = (
-            f'**{len(selected):,}** selected — showing '
-            f'{min(N_DISPLAY, len(selected))} ' + ('examples in line order' if ordered else 'random examples')
-        )
         gallery_state['rng_before'] = rng.bit_generator.state
-        image_fig, sfh_fig = _gallery(
+        image_fig, sfh_fig, stamp_status = _gallery(
             h5_path, stamp_dir, selected, data, rng, band, ordered=ordered,
             cosmic_reference=cosmic_toggle.value, ms_reference=ms_toggle.value,
             return_fraction=ms_return.value, mass_offset=ms_offset.value,
             ms_sfr_offset=ms_sfr_shift.value, show_delta_ms=delta_ms_toggle.value,
         )
+        mode = 'examples in line order' if ordered else 'random examples'
+        status = f'**{len(selected):,}** selected — showing **{stamp_status["shown"]}** {mode}'
+        if stamp_dir is not None:
+            if stamp_status['fallback']:
+                status += (f'. No local stamps found among {stamp_status["checked"]:,} checked; '
+                           'showing SFHs with iCloud placeholders')
+            elif stamp_status['unavailable']:
+                status += (f'. Skipped **{stamp_status["unavailable"]:,}** non-local '
+                           'iCloud placeholders while filling the gallery')
+            if stamp_status['probe_limited']:
+                status += ' (local search capped at 4,096 candidates)'
+            if stamp_status['load_failures']:
+                status += f'. **{stamp_status["load_failures"]}** local stamps were unreadable'
+        info.object = status + '.'
         if image_fig is not None:
             image_pane.object = _fig_to_html(image_fig)
         sfh_pane.object = _fig_to_html(sfh_fig)
@@ -1278,6 +1397,11 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
 
     sidebar = pn.Column(
         pn.pane.Markdown('## Euclid embedding explorer'),
+        pn.pane.Markdown(
+            'Choose aligned or unaligned coordinates independently above each '
+            'panel. Selections remain linked by galaxy ID.',
+            styles={'font-size': '11px'},
+        ),
         pn.layout.Divider(),
         redshift_slider,
         pn.pane.Markdown('**Compare at matched mass, activity and redshift**'),

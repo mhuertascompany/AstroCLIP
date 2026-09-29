@@ -190,6 +190,103 @@ def curve_distance(target: np.ndarray, candidate: np.ndarray) -> float:
     return float(np.mean(np.abs(np.asarray(target) - np.asarray(candidate))))
 
 
+def analogue_transition_distance(
+    older_index: int,
+    younger_index: int,
+    older_fraction: float,
+    younger_fraction: float,
+    sfh: np.ndarray,
+    edges: np.ndarray,
+    norms: np.ndarray,
+    history_gyr: float,
+    n_curve_points: int,
+) -> float:
+    """SFH distance for the hypothesis that ``older`` precedes ``younger``.
+
+    The younger analogue is rewound until it has assembled the relative mass
+    fraction implied by two adjacent descendant checkpoints. Its remaining
+    pre-state history is then compared with the complete history of the older
+    analogue. UMAP, morphology, and redshift are not used.
+    """
+    relative_fraction = float(older_fraction / younger_fraction)
+    if not 0.0 < relative_fraction < 1.0:
+        return np.inf
+    state_lookback = lookback_at_formed_fraction(
+        sfh[younger_index], edges, float(norms[younger_index]), relative_fraction
+    )
+    comparison_gyr = min(
+        float(history_gyr),
+        float(norms[younger_index]) - state_lookback,
+        float(norms[older_index]),
+    )
+    if comparison_gyr <= 0:
+        return np.inf
+    tau = np.linspace(0.0, comparison_gyr, int(n_curve_points))
+    target = descendant_state_curve(
+        sfh[younger_index], edges, float(norms[younger_index]),
+        state_lookback, relative_fraction, tau,
+    )
+    candidate = candidate_curve(
+        sfh[older_index], edges, float(norms[older_index]), tau
+    )
+    return curve_distance(target, candidate)
+
+
+def _select_coherent_branches(
+    stage_pools: list[dict[str, object]],
+    sfh: np.ndarray,
+    edges: np.ndarray,
+    norms: np.ndarray,
+    history_gyr: float,
+    n_curve_points: int,
+    continuity_weight: float,
+    n_branches: int,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Select globally coherent paths through independently ranked stage pools."""
+    costs: list[np.ndarray] = []
+    predecessors: list[np.ndarray] = []
+    transition_costs: list[np.ndarray] = []
+    first_scores = np.asarray(stage_pools[0]["scores"], dtype=float)
+    costs.append(first_scores.copy())
+    predecessors.append(np.full(len(first_scores), -1, dtype=int))
+    transition_costs.append(np.full(len(first_scores), np.nan))
+
+    for stage_number in range(1, len(stage_pools)):
+        previous = stage_pools[stage_number - 1]
+        current = stage_pools[stage_number]
+        previous_indices = np.asarray(previous["indices"], dtype=int)
+        current_indices = np.asarray(current["indices"], dtype=int)
+        transition = np.empty((len(previous_indices), len(current_indices)))
+        for i, younger_index in enumerate(previous_indices):
+            for j, older_index in enumerate(current_indices):
+                transition[i, j] = analogue_transition_distance(
+                    int(older_index), int(younger_index),
+                    float(current["fraction"]), float(previous["fraction"]),
+                    sfh, edges, norms, history_gyr, n_curve_points,
+                )
+        accumulated = costs[-1][:, None] + continuity_weight * transition
+        best_previous = np.argmin(accumulated, axis=0)
+        node_scores = np.asarray(current["scores"], dtype=float)
+        costs.append(
+            node_scores + accumulated[best_previous, np.arange(len(current_indices))]
+        )
+        predecessors.append(best_previous)
+        transition_costs.append(
+            transition[best_previous, np.arange(len(current_indices))]
+        )
+
+    terminal_order = np.argsort(costs[-1])[: min(n_branches, len(costs[-1]))]
+    paths = [np.empty(len(stage_pools), dtype=int) for _ in terminal_order]
+    path_transitions = [np.full(len(stage_pools), np.nan) for _ in terminal_order]
+    for branch, terminal in enumerate(terminal_order):
+        position = int(terminal)
+        for stage_number in range(len(stage_pools) - 1, -1, -1):
+            paths[branch][stage_number] = position
+            path_transitions[branch][stage_number] = transition_costs[stage_number][position]
+            position = int(predecessors[stage_number][position])
+    return paths, path_transitions
+
+
 def _load_inputs(
     bundle: Path,
     archive_path: Path,
@@ -353,8 +450,22 @@ def find_analogues(
     stamps: Path | None = None,
     stamp_mask: np.ndarray | None = None,
     n_curve_points: int = 256,
+    global_shape_weight: float = 0.0,
+    continuity_weight: float = 0.0,
+    continuity_pool: int = 40,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, np.ndarray | float]]]:
-    """Rank analogue candidates at each descendant mass-fraction checkpoint."""
+    """Rank analogue candidates at each descendant mass-fraction checkpoint.
+
+    With ``continuity_weight > 0``, a dynamic program selects branches whose
+    adjacent analogues are mutually compatible under their SFHs. This addresses
+    discontinuous tracks without selecting on UMAP or morphology.
+    """
+    if continuity_weight < 0:
+        raise ValueError("continuity_weight must be non-negative")
+    if global_shape_weight < 0:
+        raise ValueError("global_shape_weight must be non-negative")
+    if continuity_pool < n_analogues:
+        raise ValueError("continuity_pool must be at least n_analogues")
     ids = np.asarray(data["ids"])
     mass = np.asarray(data["mass"])
     redshift = np.asarray(data["redshift"])
@@ -370,6 +481,7 @@ def find_analogues(
     rows: list[dict[str, float | int | bool]] = []
     census: list[dict[str, float | int]] = []
     stages: list[dict[str, np.ndarray | float]] = []
+    stage_pools: list[dict[str, object]] = []
     for stage, fraction in enumerate(fractions, start=1):
         state_lookback = lookback_at_formed_fraction(
             descendant_sfh, edges, descendant_norm, fraction
@@ -404,31 +516,32 @@ def find_analogues(
         pool = np.flatnonzero(mass_ok & history_ok & stamp_ok)
         pool = pool[pool != descendant_index]
         curves = candidate_curves(sfh[pool], edges, norms[pool], tau)
-        scores = np.mean(np.abs(curves - target_curve[None, :]), axis=1)
-        order = np.argsort(scores)[:n_analogues]
-        chosen = pool[order]
-        chosen_scores = scores[order]
-        for rank, (index, score) in enumerate(zip(chosen, chosen_scores), start=1):
-            rows.append(
-                {
-                    "stage": stage,
-                    "formed_mass_fraction": fraction,
-                    "state_lookback_gyr": state_lookback,
-                    "predicted_log_stellar_mass": predicted_mass,
-                    "comparison_history_gyr": comparison_gyr,
-                    "shape_comparison_limited": comparison_gyr < minimum_comparison_gyr,
-                    "rank": rank,
-                    "galaxy_id": int(ids[index]),
-                    "bundle_index": int(index),
-                    "log_stellar_mass": float(mass[index]),
-                    "mass_offset_dex": float(mass[index] - predicted_mass),
-                    "redshift": float(redshift[index]),
-                    "phz_log_ssfr": float(catalog_log_ssfr[index]),
-                    "phz_delta_ms": float(catalog_delta_ms[index]),
-                    "cumulative_sfh_distance": float(score),
-                    "has_stamp": bool(stamp_ok[index]),
-                }
-            )
+        local_scores = np.mean(np.abs(curves - target_curve[None, :]), axis=1)
+        fractional_tau = np.linspace(0.0, 1.0, n_curve_points)
+        target_global_curve = descendant_state_curve(
+            descendant_sfh, edges, descendant_norm, state_lookback, fraction,
+            fractional_tau * available_history,
+        )
+        candidate_global_curves = candidate_curves(
+            sfh[pool], edges, np.ones(len(pool)), fractional_tau
+        )
+        global_scores = np.mean(
+            np.abs(candidate_global_curves - target_global_curve[None, :]), axis=1
+        )
+        matching_scores = local_scores + global_shape_weight * global_scores
+        pool_order = np.argsort(matching_scores)[: min(continuity_pool, len(matching_scores))]
+        stage_pools.append({
+            "indices": pool[pool_order],
+            "scores": matching_scores[pool_order],
+            "local_scores": local_scores[pool_order],
+            "global_scores": global_scores[pool_order],
+            "fraction": fraction,
+            "state_lookback": state_lookback,
+            "predicted_mass": predicted_mass,
+            "comparison_gyr": comparison_gyr,
+            "limited": comparison_gyr < minimum_comparison_gyr,
+            "stamp_ok": stamp_ok,
+        })
         census.append(
             {
                 "stage": stage,
@@ -440,7 +553,7 @@ def find_analogues(
                 "n_mass_compatible": int(mass_ok.sum()),
                 "n_with_history": int((mass_ok & history_ok).sum()),
                 "n_with_stamp": int((mass_ok & history_ok & stamp_ok).sum()),
-                "n_selected": int(len(chosen)),
+                "n_selected": int(min(n_analogues, len(pool_order))),
                 "candidate_redshift_p16": float(np.percentile(redshift[pool], 16))
                 if len(pool)
                 else np.nan,
@@ -450,9 +563,7 @@ def find_analogues(
                 "candidate_redshift_p84": float(np.percentile(redshift[pool], 84))
                 if len(pool)
                 else np.nan,
-                "selected_delta_ms_median": float(
-                    np.nanmedian(catalog_delta_ms[chosen])
-                ) if len(chosen) else np.nan,
+                "selected_delta_ms_median": np.nan,
             }
         )
         stages.append(
@@ -465,6 +576,72 @@ def find_analogues(
                 "tau": tau,
                 "target_curve": target_curve,
             }
+        )
+
+    if not stage_pools:
+        return pd.DataFrame(rows), pd.DataFrame(census), stages
+    if continuity_weight > 0 and len(stage_pools) > 1:
+        paths, path_transitions = _select_coherent_branches(
+            stage_pools, sfh, edges, norms, history_gyr, n_curve_points,
+            continuity_weight, n_analogues,
+        )
+        selections = []
+        for stage_number in range(len(stage_pools)):
+            positions = np.array([path[stage_number] for path in paths], dtype=int)
+            transitions = np.array(
+                [path[stage_number] for path in path_transitions], dtype=float
+            )
+            selections.append((positions, transitions))
+    else:
+        selections = [
+            (
+                np.arange(min(n_analogues, len(pool["indices"]))),
+                np.full(min(n_analogues, len(pool["indices"])), np.nan),
+            )
+            for pool in stage_pools
+        ]
+
+    for stage_number, (stage_pool, selection) in enumerate(
+        zip(stage_pools, selections), start=1
+    ):
+        positions, transitions = selection
+        selected_indices = np.asarray(stage_pool["indices"], dtype=int)[positions]
+        selected_matching_scores = np.asarray(stage_pool["scores"], dtype=float)[positions]
+        selected_local_scores = np.asarray(stage_pool["local_scores"], dtype=float)[positions]
+        selected_global_scores = np.asarray(stage_pool["global_scores"], dtype=float)[positions]
+        for rank, (index, matching_score, local_score, global_score, transition) in enumerate(
+            zip(
+                selected_indices, selected_matching_scores, selected_local_scores,
+                selected_global_scores, transitions,
+            ),
+            start=1,
+        ):
+            rows.append({
+                "stage": stage_number,
+                "formed_mass_fraction": float(stage_pool["fraction"]),
+                "state_lookback_gyr": float(stage_pool["state_lookback"]),
+                "predicted_log_stellar_mass": float(stage_pool["predicted_mass"]),
+                "comparison_history_gyr": float(stage_pool["comparison_gyr"]),
+                "shape_comparison_limited": bool(stage_pool["limited"]),
+                "rank": rank,
+                "galaxy_id": int(ids[index]),
+                "bundle_index": int(index),
+                "log_stellar_mass": float(mass[index]),
+                "mass_offset_dex": float(
+                    mass[index] - float(stage_pool["predicted_mass"])
+                ),
+                "redshift": float(redshift[index]),
+                "phz_log_ssfr": float(catalog_log_ssfr[index]),
+                "phz_delta_ms": float(catalog_delta_ms[index]),
+                "cumulative_sfh_distance": float(local_score),
+                "global_cumulative_sfh_distance": float(global_score),
+                "analogue_matching_score": float(matching_score),
+                "transition_sfh_distance": float(transition),
+                "has_stamp": bool(np.asarray(stage_pool["stamp_ok"])[index]),
+            })
+        census[stage_number - 1]["selected_delta_ms_median"] = (
+            float(np.nanmedian(catalog_delta_ms[selected_indices]))
+            if len(selected_indices) else np.nan
         )
     return pd.DataFrame(rows), pd.DataFrame(census), stages
 
@@ -606,6 +783,25 @@ def make_report(
     descendant_sfh_delta_ms = _sfh_delta_ms_100myr(data, descendant_index)
     descendant_redshift = float(redshift[descendant_index])
     checkpoint_redshifts = descendant_epoch_redshifts(descendant_redshift, lookbacks)
+    inferred_global_weight = 0.0
+    if {
+        "analogue_matching_score", "cumulative_sfh_distance",
+        "global_cumulative_sfh_distance",
+    }.issubset(candidates.columns):
+        global_distance = candidates.global_cumulative_sfh_distance.to_numpy(float)
+        valid_global = np.isfinite(global_distance) & (global_distance > 0)
+        if valid_global.any():
+            inferred_global_weight = float(np.nanmedian(
+                (
+                    candidates.analogue_matching_score.to_numpy(float)[valid_global]
+                    - candidates.cumulative_sfh_distance.to_numpy(float)[valid_global]
+                ) / global_distance[valid_global]
+            ))
+    uses_global_shape = inferred_global_weight > 1e-8
+    ranking_description = (
+        f"combined local + {inferred_global_weight:.2g} global cumulative-SFH score"
+        if uses_global_shape else "local cumulative-SFH distance"
+    )
 
     with PdfPages(pdf_path) as pdf:
         fig = plt.figure(figsize=(18, 9.5), layout="constrained")
@@ -802,19 +998,26 @@ def make_report(
 
         notes_ax = fig.add_subplot(right[3])
         notes_ax.axis("off")
-        notes_ax.text(
-            0, 1,
+        global_note = (
+            f"- complete fractional-history shape (weight={inferred_global_weight:.2g})\n\n"
+            if uses_global_shape else "\n"
+        )
+        notes_text = (
             "Track/table: L = descendant lookback; z_d = corresponding descendant-frame redshift;\n"
             "z_a = median observed redshift of the selected analogues.\n\n"
             "Selection variables\n"
             "- predicted stellar mass, within +/-0.15 dex\n"
             "- cumulative SFH before each descendant state\n"
-            "- 2 Gyr physical-time comparison when available\n\n"
-            "Candidate redshift, morphology, deltaMS,\n"
+            "- 2 Gyr physical-time comparison when available\n"
+            + global_note
+            + "Candidate redshift, morphology, deltaMS,\n"
             "image embedding, and UMAP position are\n"
             "outcomes, not selection variables. The\n"
             "dashed path joins ensemble medians, not\n"
-            "one galaxy's orbit.",
+            "one galaxy's orbit."
+        )
+        notes_ax.text(
+            0, 1, notes_text,
             va="top", fontsize=7.7, linespacing=1.2,
         )
         if descendant_ssfr < -11.5:
@@ -850,7 +1053,8 @@ def make_report(
                     f"PHZ deltaMS={row.phz_delta_ms:+.2f}; "
                     "SFH-100Myr deltaMS="
                     f"{_format_delta_ms(_sfh_delta_ms_100myr(data, index))}\n"
-                    f"D={row.cumulative_sfh_distance:.3f}",
+                    f"Dlocal={row.cumulative_sfh_distance:.3f}; "
+                    f"Dglobal={row.global_cumulative_sfh_distance:.3f}",
                     fontsize=8,
                 )
                 morphology_text = (
@@ -894,7 +1098,7 @@ def make_report(
                 f"Earlier state f={float(stage['fraction']):.2f}: "
                 f"lookback={float(stage['state_lookback_gyr']):.2f} Gyr, "
                 f"predicted log M*={float(stage['predicted_mass']):.2f}\n"
-                "Candidates ranked by cumulative-SFH distance; redshift and morphology were not matched"
+                f"Candidates ranked by {ranking_description}; redshift and morphology were not matched"
                 "\nGreen MS curves use each candidate's own observed z and mass (R=0; shifted MS)"
                 + (
                     f"\nCAUTION: only {float(stage['comparison_gyr']):.2f} Gyr of "
@@ -930,6 +1134,18 @@ def main() -> None:
     parser.add_argument("--minimum-comparison-gyr", type=float, default=0.5)
     parser.add_argument("--n-analogues", type=int, default=5)
     parser.add_argument(
+        "--global-shape-weight", type=float, default=0.0,
+        help="Weight of complete fractional-history shape relative to the local 2-Gyr match.",
+    )
+    parser.add_argument(
+        "--continuity-weight", type=float, default=0.0,
+        help="Weight of adjacent-analogue SFH consistency; 0 preserves independent matching.",
+    )
+    parser.add_argument(
+        "--continuity-pool", type=int, default=40,
+        help="Independently best candidates per stage considered by coherent-path matching.",
+    )
+    parser.add_argument(
         "--fractions", type=float, nargs="+",
         default=DEFAULT_FORMED_FRACTIONS,
     )
@@ -964,6 +1180,9 @@ def main() -> None:
         minimum_comparison_gyr=args.minimum_comparison_gyr,
         n_analogues=args.n_analogues,
         stamps=stamps,
+        global_shape_weight=args.global_shape_weight,
+        continuity_weight=args.continuity_weight,
+        continuity_pool=args.continuity_pool,
     )
     args.output.mkdir(parents=True, exist_ok=True)
     candidates.to_csv(args.output / "analogue_candidates.csv", index=False)
@@ -991,7 +1210,21 @@ def main() -> None:
         "history_gyr": args.history_gyr,
         "minimum_comparison_gyr": args.minimum_comparison_gyr,
         "n_analogues_per_stage": args.n_analogues,
-        "selection_uses": ["predicted stellar mass", "renormalized cumulative SFH"],
+        "global_shape_weight": args.global_shape_weight,
+        "continuity_weight": args.continuity_weight,
+        "continuity_pool": args.continuity_pool,
+        "selection_uses": [
+            "predicted stellar mass",
+            "renormalized cumulative SFH over physical time",
+            *(
+                ["complete renormalized SFH shape over fractional time"]
+                if args.global_shape_weight > 0 else []
+            ),
+            *(
+                ["adjacent-stage SFH branch consistency"]
+                if args.continuity_weight > 0 else []
+            ),
+        ],
         "selection_does_not_use": ["redshift", "morphology", "image embedding", "UMAP position", "sSFR"],
         "track_visualization_space": "xy_joint (normalized average of aligned image and SFH embeddings)",
         "formed_mass_return_fraction": 0.0,
