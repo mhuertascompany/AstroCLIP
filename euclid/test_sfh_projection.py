@@ -11,6 +11,56 @@ RUNTIME_AVAILABLE = all(
 
 @unittest.skipUnless(RUNTIME_AVAILABLE, 'CLIP runtime dependencies are absent')
 class SFHProjectionTests(unittest.TestCase):
+    def test_pcmepp_adds_trainable_uncertainty_and_uses_mean_as_embedding(self):
+        import torch
+        import torch.nn as nn
+
+        import cosmosweb.model_zoobot as clip_module
+
+        class FakeImageEncoder(nn.Module):
+            def __init__(self, ckpt_path=None, model_name=None, embed_dim=8,
+                         unfreeze_blocks=0, **kwargs):
+                super().__init__()
+                self.backbone = nn.Identity()
+                self.projection = nn.Linear(embed_dim, embed_dim)
+
+            def forward(self, images):
+                return self.projection(self.encode_backbone(images))
+
+            def encode_backbone(self, images):
+                return images.flatten(1)[:, :8]
+
+        with mock.patch.object(
+            clip_module, 'ZooBotImageEncoder', FakeImageEncoder,
+        ):
+            model = clip_module.CosmosWebZooBotCLIP(
+                zoobot_model_name='fake', embed_dim=8, sfh_input_dim=12,
+                sfh_encoder_type='mlp', sfh_projection_type='mlp',
+                sfh_projection_hidden_dim=16, queue_size=0,
+                alignment_objective='pcmepp',
+            )
+
+        images = torch.randn(4, 2, 2, 2)
+        sfhs = torch.randn(4, 12)
+        image_mean, image_logvar = model.encode_image_distribution(images)
+        sfh_mean, sfh_logvar = model.encode_sfh_distribution(sfhs)
+        torch.testing.assert_close(
+            image_mean, torch.nn.functional.normalize(model.encode_image(images), dim=-1),
+        )
+        torch.testing.assert_close(
+            sfh_mean, torch.nn.functional.normalize(model.encode_sfh(sfhs), dim=-1),
+        )
+        self.assertEqual(image_logvar.shape, image_mean.shape)
+        self.assertEqual(sfh_logvar.shape, sfh_mean.shape)
+
+        loss = model.training_step({'image': images, 'sfh': sfhs}, 0)
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        self.assertIsNotNone(model.image_log_variance.weight.grad)
+        self.assertIsNotNone(model.sfh_log_variance.weight.grad)
+        self.assertIsNotNone(model.pcme_scale.grad)
+        self.assertIsNotNone(model.pcme_bias.grad)
+
     def test_linear_projection_starts_as_identity_and_receives_gradients(self):
         import torch
 

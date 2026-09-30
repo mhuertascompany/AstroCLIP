@@ -20,8 +20,6 @@ import torch.nn.functional as F
 from scipy.spatial.distance import cdist
 from torch.utils.data import DataLoader
 
-from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
-
 from .dataset_zoobot import EuclidZooBotDataset
 from .training_index import inspect_sfh_file
 
@@ -105,12 +103,15 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
     )
 
 
-def extract_embeddings(model, loader, device, include_image_preprojection=False):
+def extract_embeddings(model, loader, device, include_image_preprojection=False,
+                       include_pcme_uncertainty=False):
     image_embeddings = []
     image_preprojection_embeddings = []
     sfh_embeddings = []
     sfh_preprojection_embeddings = []
     reconstructions = []
+    image_log_variances = []
+    sfh_log_variances = []
     seen_ids = []
     use_amp = device.type == 'cuda'
     model.eval()
@@ -120,17 +121,29 @@ def extract_embeddings(model, loader, device, include_image_preprojection=False)
             sfhs = batch['sfh'].to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=use_amp):
-                if include_image_preprojection:
+                if include_image_preprojection or include_pcme_uncertainty:
                     image_latent = model.encode_image_latent(images)
-                    image_preprojection = F.normalize(image_latent, dim=-1)
-                    image_embedding = F.normalize(
-                        model.project_image(image_latent), dim=-1,
-                    )
+                    image_projected = model.project_image(image_latent)
+                    image_embedding = F.normalize(image_projected, dim=-1)
+                    if include_image_preprojection:
+                        image_preprojection = F.normalize(image_latent, dim=-1)
                 else:
                     image_embedding = F.normalize(model.encode_image(images), dim=-1)
                 sfh_latent = model.encode_sfh_latent(sfhs)
-                sfh_embedding = F.normalize(model.project_sfh(sfh_latent), dim=-1)
+                sfh_projected = model.project_sfh(sfh_latent)
+                sfh_embedding = F.normalize(sfh_projected, dim=-1)
                 sfh_preprojection = F.normalize(sfh_latent, dim=-1)
+                if include_pcme_uncertainty:
+                    if getattr(model.hparams, 'alignment_objective', 'clip') != 'pcmepp':
+                        raise ValueError(
+                            'PCME++ uncertainty was requested from a CLIP checkpoint.'
+                        )
+                    image_log_variances.append(
+                        model.image_log_variance(image_projected).float().cpu().numpy()
+                    )
+                    sfh_log_variances.append(
+                        model.sfh_log_variance(sfh_projected).float().cpu().numpy()
+                    )
                 if model.sfh_decoder is not None:
                     reconstructions.append(
                         model.sfh_decoder(sfh_latent).float().cpu().numpy()
@@ -158,7 +171,12 @@ def extract_embeddings(model, loader, device, include_image_preprojection=False)
         reconstruction,
     )
     if include_image_preprojection:
-        return result + (np.concatenate(image_preprojection_embeddings),)
+        result = result + (np.concatenate(image_preprojection_embeddings),)
+    if include_pcme_uncertainty:
+        result = result + (
+            np.concatenate(image_log_variances),
+            np.concatenate(sfh_log_variances),
+        )
     return result
 
 
@@ -193,6 +211,45 @@ def retrieval_ranks(query, gallery, chunk_size=512):
         positive = similarity[np.arange(stop - start), np.arange(start, stop)]
         ranks[start:stop] = 1 + np.count_nonzero(
             similarity > positive[:, None], axis=1,
+        )
+    return ranks
+
+
+def probabilistic_retrieval_ranks(query_mean, query_log_variance,
+                                  gallery_mean, gallery_log_variance,
+                                  chunk_size=512):
+    """Return ranks under the PCME++ closed-form sampled distance."""
+    arrays = (
+        query_mean, query_log_variance, gallery_mean, gallery_log_variance,
+    )
+    if any(np.asarray(array).ndim != 2 for array in arrays):
+        raise ValueError('PCME++ retrieval arrays must be two-dimensional.')
+    if query_mean.shape != query_log_variance.shape:
+        raise ValueError('Query means and log variances must have equal shape.')
+    if gallery_mean.shape != gallery_log_variance.shape:
+        raise ValueError('Gallery means and log variances must have equal shape.')
+    if query_mean.shape != gallery_mean.shape:
+        raise ValueError('PCME++ query and gallery arrays must have equal shape.')
+    n_objects = len(query_mean)
+    gallery_variance = np.exp(np.clip(gallery_log_variance, -12, 8)).sum(axis=1)
+    query_variance = np.exp(np.clip(query_log_variance, -12, 8)).sum(axis=1)
+    gallery_norm = np.square(gallery_mean).sum(axis=1)
+    ranks = np.empty(n_objects, dtype=np.int32)
+    for start in range(0, n_objects, chunk_size):
+        stop = min(start + chunk_size, n_objects)
+        query = query_mean[start:stop]
+        distance = (
+            np.square(query).sum(axis=1, keepdims=True)
+            + gallery_norm[None, :]
+            - 2.0 * query @ gallery_mean.T
+            + query_variance[start:stop, None]
+            + gallery_variance[None, :]
+        )
+        positive = distance[
+            np.arange(stop - start), np.arange(start, stop)
+        ]
+        ranks[start:stop] = 1 + np.count_nonzero(
+            distance < positive[:, None], axis=1,
         )
     return ranks
 
@@ -561,6 +618,9 @@ def parse_args():
 
 
 def main():
+    # Keep ZooBot/timm optional for importing the numerical diagnostics in tests.
+    from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
+
     args = parse_args()
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
@@ -592,19 +652,36 @@ def main():
     model = CosmosWebZooBotCLIP.load_from_checkpoint(
         str(args.checkpoint), map_location='cpu',
     ).to(device)
+    is_pcmepp = getattr(model.hparams, 'alignment_objective', 'clip') == 'pcmepp'
     loader = extraction_loader(
         args.dataset, args.stamp_root, val_rows, val_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
     )
-    (image_embedding, sfh_embedding, sfh_preprojection_embedding,
-     encoded_ids, reconstruction, image_preprojection_embedding) = extract_embeddings(
+    extracted = extract_embeddings(
         model, loader, device, include_image_preprojection=True,
+        include_pcme_uncertainty=is_pcmepp,
     )
+    (image_embedding, sfh_embedding, sfh_preprojection_embedding,
+     encoded_ids, reconstruction, image_preprojection_embedding) = extracted[:6]
+    if is_pcmepp:
+        image_log_variance, sfh_log_variance = extracted[6:8]
+    else:
+        image_log_variance = sfh_log_variance = None
     if not np.array_equal(encoded_ids, val_ids):
         raise ValueError('Embedding extraction changed validation ID order.')
 
-    ranks_i2s = retrieval_ranks(image_embedding, sfh_embedding, args.chunk_size)
-    ranks_s2i = retrieval_ranks(sfh_embedding, image_embedding, args.chunk_size)
+    if is_pcmepp:
+        ranks_i2s = probabilistic_retrieval_ranks(
+            image_embedding, image_log_variance,
+            sfh_embedding, sfh_log_variance, args.chunk_size,
+        )
+        ranks_s2i = probabilistic_retrieval_ranks(
+            sfh_embedding, sfh_log_variance,
+            image_embedding, image_log_variance, args.chunk_size,
+        )
+    else:
+        ranks_i2s = retrieval_ranks(image_embedding, sfh_embedding, args.chunk_size)
+        ranks_s2i = retrieval_ranks(sfh_embedding, image_embedding, args.chunk_size)
     paired_cosine = np.sum(image_embedding * sfh_embedding, axis=1)
     with h5py.File(args.dataset, 'r') as source:
         redshifts = _read_rows(source['redshift'], val_rows).astype(np.float32)
@@ -615,6 +692,9 @@ def main():
         'dataset': str(args.dataset.resolve()),
         'split': str(args.split.resolve()),
         'device': str(device),
+        'alignment_objective': (
+            'pcmepp_closed_form_sampled_distance' if is_pcmepp else 'clip_cosine'
+        ),
         'split_integrity': {
             'n_train': len(train_rows),
             'n_validation': len(val_rows),
@@ -652,6 +732,21 @@ def main():
             redshifts, ranks_i2s, ranks_s2i, paired_cosine,
         ),
     }
+    if is_pcmepp:
+        image_uncertainty = np.exp(
+            np.clip(image_log_variance, -12, 8),
+        ).sum(axis=1)
+        sfh_uncertainty = np.exp(
+            np.clip(sfh_log_variance, -12, 8),
+        ).sum(axis=1)
+        report['pcmepp_uncertainty'] = {
+            'image_mean': float(image_uncertainty.mean()),
+            'image_median': float(np.median(image_uncertainty)),
+            'image_p90': float(np.percentile(image_uncertainty, 90)),
+            'sfh_mean': float(sfh_uncertainty.mean()),
+            'sfh_median': float(np.median(sfh_uncertainty)),
+            'sfh_p90': float(np.percentile(sfh_uncertainty, 90)),
+        }
     if not args.skip_posterior:
         report['posterior_robustness'] = posterior_robustness_test(
             model, args.dataset, val_rows, image_embedding, sfh_embedding,
@@ -671,8 +766,7 @@ def main():
         ranks_i2s, ranks_s2i, paired_cosine,
     )
     if not args.no_save_embeddings:
-        np.savez_compressed(
-            args.output_dir / 'validation_embeddings.npz',
+        embedding_arrays = dict(
             galaxy_id=val_ids,
             h5_row=val_rows,
             redshift=redshifts,
@@ -680,6 +774,16 @@ def main():
             image_preprojection_embedding=image_preprojection_embedding,
             sfh_embedding=sfh_embedding,
             sfh_preprojection_embedding=sfh_preprojection_embedding,
+        )
+        if is_pcmepp:
+            embedding_arrays.update(
+                image_log_variance=image_log_variance.astype(np.float32),
+                sfh_log_variance=sfh_log_variance.astype(np.float32),
+                image_uncertainty=image_uncertainty.astype(np.float32),
+                sfh_uncertainty=sfh_uncertainty.astype(np.float32),
+            )
+        np.savez_compressed(
+            args.output_dir / 'validation_embeddings.npz', **embedding_arrays,
         )
 
     print(json.dumps({

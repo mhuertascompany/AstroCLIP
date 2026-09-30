@@ -1003,6 +1003,62 @@ options operate within the current batch, so `k=8` means eight among 127
 possible negatives for batch size 128, not eight among the full dataset. They
 should not be described as a dataset-wide 8-nearest-neighbour calculation.
 
+#### Probabilistic alignment with PCME++
+
+PCME++ replaces one-point embeddings and exact-pair InfoNCE with a diagonal
+Gaussian for each image and SFH. The existing normalized 256-dimensional
+adapter output is the Gaussian mean, while an additional linear head predicts
+one log variance per dimension. Consequently, existing mean-embedding exports,
+UMAPs, the explorer, and diffusion conditioning remain compatible with these
+checkpoints.
+
+For an image Gaussian and an SFH Gaussian, training uses the closed-form
+expected squared distance
+
+```text
+d = ||mu_image - mu_sfh||^2 + sum(var_image + var_sfh)
+```
+
+and the learned match logit `-a*d + b`. All batch pairs enter a binary matching
+loss. PCME++ also promotes an off-diagonal pair to a pseudo-positive when it
+scores at least as highly as that anchor's paired example, in both retrieval
+directions. A variational information-bottleneck term keeps each distribution
+close to a unit Gaussian. The implemented paper defaults are pseudo-positive
+weight `0.1`, VIB weight `1e-4`, and initial `a=b=5`. The variance heads start
+with total variance `0.01` per modality. This keeps an initially coincident
+pair near match probability 0.99 while avoiding a dimension-dependent initial
+distance at 256 dimensions. It can be changed with
+`--pcme-initial-uncertainty`.
+
+PCME++ has its own false-negative treatment, so its current implementation is
+in-batch only and requires a zero queue, zero SFH soft-positive weight, and no
+AE filtering or adjacency loss. Run the smoke test first:
+
+```bash
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+
+sbatch euclid/slurm_train_zoobot_clip_bright_pcmepp_test.sh "${AE}"
+sbatch euclid/slurm_train_zoobot_clip_bright_pcmepp.sh "${AE}"
+```
+
+Both scripts freeze the ZooBot and SFH-autoencoder backbones and retain the
+unrestricted 1024-by-2 adapters. The smoke job uses 2,048 pairs for five
+epochs. The full job uses all paired bright objects, trains for at most 100
+epochs, and writes to `training_bright_frozen_pcmepp`.
+
+The image MixUp/CutMix augmentation explored by the paper is intentionally not
+enabled here: a pixel mixture of unrelated galaxies does not have a defensible
+mixed SFH target. This experiment isolates the probabilistic CSD,
+pseudo-positive, and VIB components relevant to the many-to-many scientific
+relation.
+
+Monitor `val_pcme_match_loss`, `val_pcme_pseudo_positive_loss`,
+`val_pcme_vib_loss`, `val_pcme_pseudo_positive_fraction`, both uncertainty
+metrics, match probabilities, and rank retrieval. A useful run should separate
+positive and negative match probabilities without sending either uncertainty
+to its clamp limits. The reference is [Chun, PCME++, ICLR
+2024](https://proceedings.iclr.cc/paper_files/paper/2024/file/ad9d6ab10446114cf5482d5e1f971a84-Paper-Conference.pdf).
+
 For the VIS<22 bright sample, first check whether the pretrained Euclid ZooBot
 backbone itself organizes the galaxies by morphology. The image-only exporter
 uses the raw frozen backbone output from

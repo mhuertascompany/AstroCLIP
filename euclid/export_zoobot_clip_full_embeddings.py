@@ -98,22 +98,26 @@ def main() -> None:
     model = CosmosWebZooBotCLIP.load_from_checkpoint(
         str(args.checkpoint), map_location="cpu",
     ).to(device)
+    is_pcmepp = getattr(model.hparams, "alignment_objective", "clip") == "pcmepp"
     loader = extraction_loader(
         args.dataset, args.stamp_root, rows, galaxy_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
     )
-    (image, sfh, sfh_preprojection, encoded_ids, _,
-     image_preprojection) = extract_embeddings(
+    extracted = extract_embeddings(
         model, loader, device, include_image_preprojection=True,
+        include_pcme_uncertainty=is_pcmepp,
     )
+    (image, sfh, sfh_preprojection, encoded_ids, _,
+     image_preprojection) = extracted[:6]
+    if is_pcmepp:
+        image_log_variance, sfh_log_variance = extracted[6:8]
     if not np.array_equal(encoded_ids, galaxy_ids):
         raise ValueError("Embedding extraction changed the full-sample ID order")
     with h5py.File(args.dataset, "r") as source:
         redshift = _read_rows(source["redshift"], rows).astype(np.float32)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        args.output,
+    output_arrays = dict(
         galaxy_id=galaxy_ids,
         h5_row=rows,
         redshift=redshift,
@@ -122,12 +126,27 @@ def main() -> None:
         sfh_embedding=sfh.astype(np.float32),
         sfh_preprojection_embedding=sfh_preprojection.astype(np.float32),
     )
+    if is_pcmepp:
+        output_arrays.update(
+            image_log_variance=image_log_variance.astype(np.float32),
+            sfh_log_variance=sfh_log_variance.astype(np.float32),
+            image_uncertainty=np.exp(
+                np.clip(image_log_variance, -12, 8),
+            ).sum(axis=1).astype(np.float32),
+            sfh_uncertainty=np.exp(
+                np.clip(sfh_log_variance, -12, 8),
+            ).sum(axis=1).astype(np.float32),
+        )
+    np.savez_compressed(args.output, **output_arrays)
     report = {
         "checkpoint": str(args.checkpoint.resolve()),
         "dataset": str(args.dataset.resolve()),
         "stamp_root": str(args.stamp_root.resolve()),
         "band": args.band,
         "device": str(device),
+        "alignment_objective": (
+            "pcmepp" if is_pcmepp else "clip"
+        ),
         "n_dataset_objects": int(len(inspect_sfh_file(args.dataset)[0])),
         "n_paired_objects": int(len(rows)),
         "n_sfh_bins": int(n_bins),

@@ -5,6 +5,7 @@ from euclid.evaluate_zoobot_clip import (
     embedding_diagnostics,
     extract_embeddings,
     projection_geometry_diagnostics,
+    probabilistic_retrieval_ranks,
     retrieval_ranks,
     sfh_shape_neighborhood_test,
     summarize_sfh_reconstruction,
@@ -67,6 +68,20 @@ def test_retrieval_ranks_report_known_order():
     gallery = query[[1, 0, 2]]
     ranks = retrieval_ranks(query, gallery, chunk_size=2)
     np.testing.assert_array_equal(ranks, [2, 2, 1])
+
+
+def test_probabilistic_ranks_account_for_gallery_uncertainty():
+    query = np.array([[1., 0.], [0., 1.]], dtype=np.float32)
+    gallery = query.copy()
+    logvar_query = np.full_like(query, np.log(0.01))
+    logvar_gallery = np.array([
+        [np.log(10.), np.log(10.)],
+        [np.log(0.01), np.log(0.01)],
+    ], dtype=np.float32)
+    ranks = probabilistic_retrieval_ranks(
+        query, logvar_query, gallery, logvar_gallery, chunk_size=1,
+    )
+    np.testing.assert_array_equal(ranks, [2, 1])
 
 
 def test_embedding_diagnostics_distinguish_rank():

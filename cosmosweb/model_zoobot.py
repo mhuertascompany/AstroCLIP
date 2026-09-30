@@ -52,6 +52,7 @@ from .sfh_similarity import (
     soft_cross_entropy,
     wasserstein_soft_targets,
 )
+from .pcme import pcmepp_loss
 from .zoobot_encoder import (
     FlexibleProjection,
     MultiFilterZooBotImageEncoder,
@@ -162,8 +163,24 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_projection_hidden_layers: int = 2,
         freeze_sfh_encoder: bool = False,
         freeze_sfh_decoder: bool = False,
+        alignment_objective: str = 'clip',
+        pcme_pseudo_positive_weight: float = 0.1,
+        pcme_vib_weight: float = 1e-4,
+        pcme_initial_scale: float = 5.0,
+        pcme_initial_bias: float = 5.0,
+        pcme_initial_uncertainty: float = 0.01,
     ) -> None:
         super().__init__()
+        if alignment_objective not in {'clip', 'pcmepp'}:
+            raise ValueError('alignment_objective must be clip or pcmepp.')
+        if pcme_pseudo_positive_weight < 0:
+            raise ValueError('pcme_pseudo_positive_weight cannot be negative.')
+        if pcme_vib_weight < 0:
+            raise ValueError('pcme_vib_weight cannot be negative.')
+        if pcme_initial_scale <= 0:
+            raise ValueError('pcme_initial_scale must be positive.')
+        if pcme_initial_uncertainty <= 0:
+            raise ValueError('pcme_initial_uncertainty must be positive.')
         if not 0.0 <= soft_positive_weight <= 1.0:
             raise ValueError('soft_positive_weight must lie in [0, 1].')
         if soft_positive_k < 1:
@@ -254,6 +271,21 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 'AE adjacency regularization requires freeze_sfh_encoder=True '
                 'so its reference geometry remains fixed.'
             )
+        if alignment_objective == 'pcmepp':
+            incompatible = []
+            if queue_size:
+                incompatible.append('queue_size')
+            if soft_positive_weight > 0:
+                incompatible.append('soft_positive_weight')
+            if ae_filtering:
+                incompatible.append('AE false-negative filtering')
+            if ae_adjacency_weight > 0:
+                incompatible.append('AE adjacency regularization')
+            if incompatible:
+                raise ValueError(
+                    'PCME++ uses its own in-batch pseudo-positive objective; '
+                    'disable ' + ', '.join(incompatible) + '.'
+                )
         self.save_hyperparameters()
 
         # ── main encoders (receive gradients) ────────────────────────────────
@@ -328,6 +360,28 @@ class CosmosWebZooBotCLIP(L.LightningModule):
 
         # ── learnable temperature ─────────────────────────────────────────────
         self.log_temp = nn.Parameter(torch.tensor(np.log(1.0 / temperature)))
+        if alignment_objective == 'pcmepp':
+            # The existing projections define the probabilistic means.  A
+            # separate head estimates diagonal log variance for each modality.
+            self.image_log_variance = nn.Linear(embed_dim, embed_dim)
+            self.sfh_log_variance = nn.Linear(embed_dim, embed_dim)
+            nn.init.zeros_(self.image_log_variance.weight)
+            nn.init.zeros_(self.sfh_log_variance.weight)
+            initial_log_variance = float(np.log(
+                pcme_initial_uncertainty / embed_dim,
+            ))
+            nn.init.constant_(self.image_log_variance.bias, initial_log_variance)
+            nn.init.constant_(self.sfh_log_variance.bias, initial_log_variance)
+            self.pcme_scale = nn.Parameter(
+                torch.tensor(float(pcme_initial_scale)),
+            )
+            self.pcme_bias = nn.Parameter(torch.tensor(float(pcme_initial_bias)))
+            self.log_temp.requires_grad_(False)
+        else:
+            self.image_log_variance = None
+            self.sfh_log_variance = None
+            self.pcme_scale = None
+            self.pcme_bias = None
 
         # ── circular queues (registered as buffers → saved in checkpoint) ────
         Q = queue_size
@@ -405,6 +459,45 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     def encode_sfh(self, sfh: torch.Tensor) -> torch.Tensor:
         return self.project_sfh(self.encode_sfh_latent(sfh))
 
+    def encode_image_distribution(
+        self, image: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the normalized PCME++ image mean and diagonal log variance."""
+        if self.hparams.alignment_objective != 'pcmepp':
+            raise RuntimeError('Image distributions require alignment_objective=pcmepp.')
+        projected = self.encode_image(image)
+        return F.normalize(projected, dim=-1), self.image_log_variance(projected)
+
+    def encode_sfh_distribution(
+        self, sfh: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the normalized PCME++ SFH mean and diagonal log variance."""
+        if self.hparams.alignment_objective != 'pcmepp':
+            raise RuntimeError('SFH distributions require alignment_objective=pcmepp.')
+        projected = self.encode_sfh(sfh)
+        return F.normalize(projected, dim=-1), self.sfh_log_variance(projected)
+
+    def _pcme_scale(self) -> torch.Tensor:
+        return self.pcme_scale
+
+    def _pcme_step(self, images: torch.Tensor, sfhs: torch.Tensor):
+        image_mean, image_log_variance = self.encode_image_distribution(images)
+        sfh_latent = self.encode_sfh_latent(sfhs)
+        sfh_projected = self.project_sfh(sfh_latent)
+        sfh_mean = F.normalize(sfh_projected, dim=-1)
+        sfh_log_variance = self.sfh_log_variance(sfh_projected)
+        result = pcmepp_loss(
+            image_mean,
+            image_log_variance,
+            sfh_mean,
+            sfh_log_variance,
+            scale=self._pcme_scale(),
+            bias=self.pcme_bias,
+            pseudo_positive_weight=self.hparams.pcme_pseudo_positive_weight,
+            vib_weight=self.hparams.pcme_vib_weight,
+        )
+        return result, sfh_latent, image_mean, sfh_mean, image_log_variance, sfh_log_variance
+
     def forward(
         self, image: torch.Tensor, sfh: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -431,6 +524,54 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_reference = batch.get('sfh_reference', sfhs)
         B = images.size(0)
         Q = self.hparams.queue_size
+
+        if self.hparams.alignment_objective == 'pcmepp':
+            result, sfh_latent, image_mean, sfh_mean, image_logvar, sfh_logvar = (
+                self._pcme_step(images, sfhs)
+            )
+            loss = result.loss
+            if self.sfh_decoder is not None:
+                reconstruction = self.sfh_decoder(sfh_latent)
+                reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
+                    reconstruction,
+                    sfh_reference,
+                    batch.get('sfh_p16'),
+                    batch.get('sfh_p84'),
+                    epsilon=self.hparams.sfh_log_epsilon,
+                    w1_weight=self.hparams.sfh_reconstruction_w1_weight,
+                )
+                loss = loss + self.hparams.sfh_reconstruction_weight * reconstruction_loss
+                self.log('train_reconstruction_loss', reconstruction_loss, sync_dist=True)
+                self.log('train_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
+            labels = torch.arange(B, device=images.device)
+            with torch.no_grad():
+                rank1 = (
+                    (result.logits.argmax(1) == labels).float().mean()
+                    + (result.logits.T.argmax(1) == labels).float().mean()
+                ) / 2.0
+                pseudo_fraction = 0.5 * (
+                    result.image_to_sfh_targets.mean()
+                    + result.sfh_to_image_targets.mean()
+                )
+            self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+            self.log('train_pcme_match_loss', result.match_loss, sync_dist=True)
+            self.log('train_pcme_pseudo_positive_loss', result.pseudo_positive_loss, sync_dist=True)
+            self.log('train_pcme_vib_loss', result.vib_loss, sync_dist=True)
+            self.log('train_pcme_scale', result.scale, sync_dist=True)
+            self.log('train_pcme_bias', self.pcme_bias, sync_dist=True)
+            self.log('train_pcme_pseudo_positive_fraction', pseudo_fraction, sync_dist=True)
+            self.log(
+                'train_image_uncertainty',
+                image_logvar.float().clamp(-12, 8).exp().sum(1).mean(),
+                sync_dist=True,
+            )
+            self.log(
+                'train_sfh_uncertainty',
+                sfh_logvar.float().clamp(-12, 8).exp().sum(1).mean(),
+                sync_dist=True,
+            )
+            self.log('train_rank1_batch', rank1, prog_bar=True, sync_dist=True)
+            return loss
 
         if Q and B > Q:
             raise ValueError(
@@ -602,6 +743,78 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         images, sfhs = batch['image'], batch['sfh']
         sfh_reference = batch.get('sfh_reference', sfhs)
+        if self.hparams.alignment_objective == 'pcmepp':
+            result, sfh_latent, image_mean, sfh_mean, image_logvar, sfh_logvar = (
+                self._pcme_step(images, sfhs)
+            )
+            val_loss = result.loss
+            if self.sfh_decoder is not None:
+                reconstruction = self.sfh_decoder(sfh_latent)
+                reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
+                    reconstruction,
+                    sfh_reference,
+                    batch.get('sfh_p16'),
+                    batch.get('sfh_p84'),
+                    epsilon=self.hparams.sfh_log_epsilon,
+                    w1_weight=self.hparams.sfh_reconstruction_w1_weight,
+                )
+                val_loss = val_loss + self.hparams.sfh_reconstruction_weight * reconstruction_loss
+                self.log('val_reconstruction_loss', reconstruction_loss, sync_dist=True)
+                self.log('val_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
+            labels = torch.arange(result.logits.size(0), device=result.logits.device)
+            with torch.no_grad():
+                rank1 = (
+                    (result.logits.argmax(1) == labels).float().mean()
+                    + (result.logits.T.argmax(1) == labels).float().mean()
+                ) / 2.0
+                k = min(5, result.logits.size(1))
+                rank5 = 0.5 * (
+                    (result.logits.topk(k, dim=1).indices == labels[:, None]).any(1).float().mean()
+                    + (result.logits.T.topk(k, dim=1).indices == labels[:, None]).any(1).float().mean()
+                )
+                probabilities = result.logits.sigmoid()
+                positive_probability = probabilities.diagonal().mean()
+                if probabilities.size(0) > 1:
+                    negative_probability = (
+                        probabilities.sum() - probabilities.diagonal().sum()
+                    ) / (probabilities.numel() - probabilities.size(0))
+                else:
+                    negative_probability = positive_probability.new_zeros(())
+                cosine = image_mean @ sfh_mean.T
+                positive_cosine = cosine.diagonal().mean()
+                negative_cosine = (
+                    (cosine.sum() - cosine.diagonal().sum())
+                    / max(cosine.numel() - cosine.size(0), 1)
+                )
+                pseudo_fraction = 0.5 * (
+                    result.image_to_sfh_targets.mean()
+                    + result.sfh_to_image_targets.mean()
+                )
+            self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
+            self.log('val_pcme_match_loss', result.match_loss, sync_dist=True)
+            self.log('val_pcme_pseudo_positive_loss', result.pseudo_positive_loss, sync_dist=True)
+            self.log('val_pcme_vib_loss', result.vib_loss, sync_dist=True)
+            self.log('val_pcme_scale', result.scale, sync_dist=True)
+            self.log('val_pcme_bias', self.pcme_bias, sync_dist=True)
+            self.log('val_pcme_pseudo_positive_fraction', pseudo_fraction, sync_dist=True)
+            self.log(
+                'val_image_uncertainty',
+                image_logvar.float().clamp(-12, 8).exp().sum(1).mean(),
+                sync_dist=True,
+            )
+            self.log(
+                'val_sfh_uncertainty',
+                sfh_logvar.float().clamp(-12, 8).exp().sum(1).mean(),
+                sync_dist=True,
+            )
+            self.log('val_positive_match_probability', positive_probability, sync_dist=True)
+            self.log('val_negative_match_probability', negative_probability, sync_dist=True)
+            self.log('val_positive_cosine', positive_cosine, sync_dist=True)
+            self.log('val_negative_cosine', negative_cosine, sync_dist=True)
+            self.log('val_alignment_margin', positive_cosine - negative_cosine, sync_dist=True)
+            self.log('val_rank1', rank1, prog_bar=True, sync_dist=True)
+            self.log('val_rank5', rank5, prog_bar=True, sync_dist=True)
+            return
         T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 
         img_e = F.normalize(self.encode_image(images), dim=-1)

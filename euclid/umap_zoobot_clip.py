@@ -377,6 +377,8 @@ def property_specs(properties):
         'paired_cosine': ('Matched image-SFH cosine', 'coolwarm'),
         'image_to_sfh_rank_percentile': ('Image→SFH rank percentile', 'viridis_r'),
         'sfh_to_image_rank_percentile': ('SFH→image rank percentile', 'viridis_r'),
+        'image_uncertainty': ('PCME++ image uncertainty (sum variance)', 'magma'),
+        'sfh_uncertainty': ('PCME++ SFH uncertainty (sum variance)', 'magma'),
     }
     return {
         key: Property(key, definitions[key][0], properties[key], definitions[key][1])
@@ -591,6 +593,23 @@ def main():
     properties, sources = load_properties(
         args.dataset, rows, galaxy_ids, redshift, image, sfh, args.per_object,
     )
+    with np.load(args.embeddings) as embedding_archive:
+        archive_ids = np.asarray(embedding_archive['galaxy_id'], dtype=np.int64)
+        archive_position = {
+            int(galaxy_id): index for index, galaxy_id in enumerate(archive_ids)
+        }
+        selected_positions = np.asarray(
+            [archive_position[int(galaxy_id)] for galaxy_id in galaxy_ids],
+            dtype=np.int64,
+        )
+        for key in ('image_uncertainty', 'sfh_uncertainty'):
+            if key in embedding_archive:
+                values = np.asarray(
+                    embedding_archive[key][selected_positions], dtype=np.float32,
+                )
+                if values.ndim == 1 and len(values) == len(galaxy_ids):
+                    properties[key] = values
+                    sources[key] = f'{args.embeddings.name}:{key}'
     specs = property_specs(properties)
     log.info('Loaded %d objects and properties: %s', len(galaxy_ids), ', '.join(specs))
     for key, source in sources.items():
@@ -643,7 +662,7 @@ def main():
     ]
     alignment_keys = [
         'paired_cosine', 'image_to_sfh_rank_percentile',
-        'sfh_to_image_rank_percentile',
+        'sfh_to_image_rank_percentile', 'image_uncertainty', 'sfh_uncertainty',
     ]
     morphology = [specs[key] for key in morphology_keys if key in specs]
     physical = [specs[key] for key in physical_keys if key in specs]

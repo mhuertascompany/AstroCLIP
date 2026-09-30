@@ -106,6 +106,8 @@ _PROPERTY_LABELS = {
     'zoobot_spiral_probability': 'ZooBot P(spiral arms)',
     'zoobot_bar_probability': 'ZooBot P(bar)',
     'zoobot_merger_probability': 'ZooBot P(disturbed/merger)',
+    'image_uncertainty': 'PCME++ image uncertainty (sum variance)',
+    'sfh_uncertainty': 'PCME++ SFH uncertainty (sum variance)',
     'sfh_recent_10': 'SFH fraction: recent 10%',
     'sfh_recent_20': 'SFH fraction: recent 20%',
     'sfh_old_20': 'SFH fraction: oldest 20%',

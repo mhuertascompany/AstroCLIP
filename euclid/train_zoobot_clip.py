@@ -83,6 +83,33 @@ def parse_args():
     model.add_argument('--temperature', type=float, default=0.07)
     model.add_argument('--queue-size', type=int, default=4096)
     model.add_argument('--momentum', type=float, default=0.995)
+    model.add_argument(
+        '--alignment-objective', choices=('clip', 'pcmepp'), default='clip',
+        help=(
+            'Cross-modal objective. pcmepp learns diagonal Gaussian embeddings '
+            'with closed-form distance, pseudo positives, and VIB regularization.'
+        ),
+    )
+    model.add_argument(
+        '--pcme-pseudo-positive-weight', type=float, default=0.1,
+        help='PCME++ pseudo-positive BCE weight (paper default: 0.1).',
+    )
+    model.add_argument(
+        '--pcme-vib-weight', type=float, default=1e-4,
+        help='PCME++ variational information-bottleneck weight.',
+    )
+    model.add_argument(
+        '--pcme-initial-scale', type=float, default=5.0,
+        help='Initial positive scale a in PCME++ match logit -a*d+b.',
+    )
+    model.add_argument(
+        '--pcme-initial-bias', type=float, default=5.0,
+        help='Initial bias b in PCME++ match logit -a*d+b.',
+    )
+    model.add_argument(
+        '--pcme-initial-uncertainty', type=float, default=0.01,
+        help='Initial summed diagonal variance for each modality.',
+    )
     model.add_argument('--unfreeze-blocks', type=int, default=0)
     model.add_argument('--backbone-lr-scale', type=float, default=0.1)
     model.add_argument(
@@ -211,6 +238,14 @@ def validate_args(args):
         raise ValueError('--queue-size must be zero or at least --batch-size.')
     if args.queue_size and args.queue_size % args.batch_size:
         raise ValueError('--queue-size must be divisible by --batch-size.')
+    if args.pcme_pseudo_positive_weight < 0:
+        raise ValueError('--pcme-pseudo-positive-weight cannot be negative.')
+    if args.pcme_vib_weight < 0:
+        raise ValueError('--pcme-vib-weight cannot be negative.')
+    if args.pcme_initial_scale <= 0:
+        raise ValueError('--pcme-initial-scale must be positive.')
+    if args.pcme_initial_uncertainty <= 0:
+        raise ValueError('--pcme-initial-uncertainty must be positive.')
     if not 0 <= args.soft_positive_weight <= 1:
         raise ValueError('--soft-positive-weight must lie in [0, 1].')
     if args.soft_positive_k < 1:
@@ -258,6 +293,21 @@ def validate_args(args):
         if not args.freeze_sfh_encoder:
             raise ValueError(
                 'AE adjacency regularization requires --freeze-sfh-encoder.'
+            )
+    if args.alignment_objective == 'pcmepp':
+        incompatible = []
+        if args.queue_size:
+            incompatible.append('--queue-size')
+        if args.soft_positive_weight:
+            incompatible.append('--soft-positive-weight')
+        if ae_filtering:
+            incompatible.append('--ae-false-negative-*')
+        if args.ae_adjacency_weight:
+            incompatible.append('--ae-adjacency-weight')
+        if incompatible:
+            raise ValueError(
+                'PCME++ uses its own in-batch pseudo-positive objective; disable '
+                + ', '.join(incompatible) + '.'
             )
     if args.sfh_encoder == 'transformer':
         if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
@@ -386,6 +436,12 @@ def main():
         sfh_projection_hidden_layers=args.sfh_projection_hidden_layers,
         freeze_sfh_encoder=args.freeze_sfh_encoder,
         freeze_sfh_decoder=args.freeze_sfh_decoder,
+        alignment_objective=args.alignment_objective,
+        pcme_pseudo_positive_weight=args.pcme_pseudo_positive_weight,
+        pcme_vib_weight=args.pcme_vib_weight,
+        pcme_initial_scale=args.pcme_initial_scale,
+        pcme_initial_bias=args.pcme_initial_bias,
+        pcme_initial_uncertainty=args.pcme_initial_uncertainty,
     )
     if args.sfh_pretrained_checkpoint is not None and args.resume_from is None:
         load_sfh_autoencoder_checkpoint(
@@ -443,6 +499,7 @@ def main():
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
+        f'alignment objective={args.alignment_objective}; '
         f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
         f'image projection={args.image_projection}, '
         f'hidden={args.image_projection_hidden_dim} x '
@@ -458,7 +515,12 @@ def main():
         f'max distance={args.ae_false_negative_max_distance}; '
         f'AE adjacency weight={args.ae_adjacency_weight:g}, '
         f'warmup={args.ae_adjacency_warmup_epochs}, '
-        f'temperature={args.ae_adjacency_temperature:g}',
+        f'temperature={args.ae_adjacency_temperature:g}; '
+        f'PCME++ pseudo-positive weight={args.pcme_pseudo_positive_weight:g}, '
+        f'VIB weight={args.pcme_vib_weight:g}, '
+        f'initial scale={args.pcme_initial_scale:g}, '
+        f'initial bias={args.pcme_initial_bias:g}, '
+        f'initial uncertainty={args.pcme_initial_uncertainty:g}',
         flush=True,
     )
     trainer = L.Trainer(
