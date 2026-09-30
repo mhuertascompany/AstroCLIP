@@ -45,7 +45,13 @@ from .sfh_transformer import (
     FixedGridSFHTransformerEncoder,
     SFHTransformerEncoder,
 )
-from .sfh_similarity import soft_cross_entropy, wasserstein_soft_targets
+from .sfh_similarity import (
+    adjacency_consistency_loss,
+    ae_false_negative_mask,
+    masked_cross_entropy,
+    soft_cross_entropy,
+    wasserstein_soft_targets,
+)
 from .zoobot_encoder import (
     FlexibleProjection,
     MultiFilterZooBotImageEncoder,
@@ -141,6 +147,11 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_lr_scale:     float = 1.0,
         soft_positive_weight: float = 0.0,
         soft_positive_k:  int = 8,
+        ae_false_negative_k: int = 0,
+        ae_false_negative_max_distance: float | None = None,
+        ae_adjacency_weight: float = 0.0,
+        ae_adjacency_warmup_epochs: int = 3,
+        ae_adjacency_temperature: float = 0.07,
         sfh_log_epsilon:  float = 1e-10,
         sfh_reconstruction_weight: float = 0.0,
         sfh_reconstruction_w1_weight: float = 0.5,
@@ -157,6 +168,20 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError('soft_positive_weight must lie in [0, 1].')
         if soft_positive_k < 1:
             raise ValueError('soft_positive_k must be positive.')
+        if ae_false_negative_k < 0:
+            raise ValueError('ae_false_negative_k cannot be negative.')
+        if ae_false_negative_max_distance is not None and not (
+            0.0 <= ae_false_negative_max_distance <= 2.0
+        ):
+            raise ValueError(
+                'ae_false_negative_max_distance must lie in [0, 2].'
+            )
+        if ae_adjacency_weight < 0:
+            raise ValueError('ae_adjacency_weight cannot be negative.')
+        if ae_adjacency_warmup_epochs < 0:
+            raise ValueError('ae_adjacency_warmup_epochs cannot be negative.')
+        if ae_adjacency_temperature <= 0:
+            raise ValueError('ae_adjacency_temperature must be positive.')
         if sfh_log_epsilon <= 0:
             raise ValueError('sfh_log_epsilon must be positive.')
         if sfh_reconstruction_weight < 0:
@@ -192,6 +217,42 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError(
                 'SFH soft positives currently require queue_size=0 because '
                 'the embedding queue does not store reference SFHs.'
+            )
+        ae_filtering = (
+            ae_false_negative_k > 0
+            or ae_false_negative_max_distance is not None
+        )
+        if ae_filtering and queue_size:
+            raise ValueError(
+                'AE false-negative filtering requires queue_size=0 because '
+                'the embedding queue does not store reference AE latents.'
+            )
+        if ae_filtering and soft_positive_weight > 0:
+            raise ValueError(
+                'Choose either AE false-negative filtering or SFH soft positives.'
+            )
+        if ae_filtering and not freeze_sfh_encoder:
+            raise ValueError(
+                'AE false-negative filtering requires freeze_sfh_encoder=True '
+                'so its reference geometry remains fixed.'
+            )
+        if ae_adjacency_weight > 0 and queue_size:
+            raise ValueError(
+                'AE adjacency regularization requires queue_size=0.'
+            )
+        if ae_adjacency_weight > 0 and soft_positive_weight > 0:
+            raise ValueError(
+                'Choose either AE adjacency regularization or SFH soft positives.'
+            )
+        if ae_adjacency_weight > 0 and ae_filtering:
+            raise ValueError(
+                'Choose either continuous AE adjacency regularization or hard '
+                'AE false-negative filtering.'
+            )
+        if ae_adjacency_weight > 0 and not freeze_sfh_encoder:
+            raise ValueError(
+                'AE adjacency regularization requires freeze_sfh_encoder=True '
+                'so its reference geometry remains fixed.'
             )
         self.save_hyperparameters()
 
@@ -404,7 +465,26 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             F.cross_entropy(logits_i2s, labels)
             + F.cross_entropy(logits_s2i, labels)
         ) / 2.0
-        if self.hparams.soft_positive_weight > 0:
+        ae_filtering = (
+            self.hparams.ae_false_negative_k > 0
+            or self.hparams.ae_false_negative_max_distance is not None
+        )
+        if ae_filtering:
+            with torch.no_grad():
+                reference_latent = self.encode_sfh_latent(sfh_reference)
+                valid_pairs, ae_distances = ae_false_negative_mask(
+                    reference_latent,
+                    n_neighbors=self.hparams.ae_false_negative_k,
+                    max_cosine_distance=(
+                        self.hparams.ae_false_negative_max_distance
+                    ),
+                )
+            contrastive_loss = (
+                masked_cross_entropy(logits_i2s, valid_pairs)
+                + masked_cross_entropy(logits_s2i, valid_pairs)
+            ) / 2.0
+            sfh_w1 = None
+        elif self.hparams.soft_positive_weight > 0:
             targets, sfh_w1 = wasserstein_soft_targets(
                 sfh_reference,
                 soft_weight=self.hparams.soft_positive_weight,
@@ -419,6 +499,42 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             sfh_w1 = None
             contrastive_loss = exact_loss
 
+        ae_adjacency_active = (
+            self.hparams.ae_adjacency_weight > 0
+            and self.current_epoch >= self.hparams.ae_adjacency_warmup_epochs
+        )
+        if self.hparams.ae_adjacency_weight > 0:
+            with torch.no_grad():
+                adjacency_latent = self.encode_sfh_latent(sfh_reference)
+            adjacency_scale = 1.0 / self.hparams.ae_adjacency_temperature
+            ae_adjacency_loss = (
+                adjacency_consistency_loss(
+                    adjacency_scale * (img_q @ all_sfh.T),
+                    adjacency_latent, adjacency_scale,
+                )
+                + adjacency_consistency_loss(
+                    adjacency_scale * (sfh_q @ all_img.T),
+                    adjacency_latent, adjacency_scale,
+                )
+            ) / 2.0
+            if ae_adjacency_active:
+                contrastive_objective = (
+                    contrastive_loss
+                    + self.hparams.ae_adjacency_weight * ae_adjacency_loss
+                )
+            else:
+                contrastive_objective = contrastive_loss
+            self.log(
+                'train_ae_adjacency_loss', ae_adjacency_loss, sync_dist=True,
+            )
+            self.log(
+                'train_ae_adjacency_active',
+                contrastive_loss.new_tensor(float(ae_adjacency_active)),
+                sync_dist=True,
+            )
+        else:
+            contrastive_objective = contrastive_loss
+
         if self.sfh_decoder is not None:
             reconstruction = self.sfh_decoder(sfh_latent)
             reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
@@ -430,13 +546,13 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 w1_weight=self.hparams.sfh_reconstruction_w1_weight,
             )
             loss = (
-                contrastive_loss
+                contrastive_objective
                 + self.hparams.sfh_reconstruction_weight * reconstruction_loss
             )
             self.log('train_reconstruction_loss', reconstruction_loss, sync_dist=True)
             self.log('train_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
         else:
-            loss = contrastive_loss
+            loss = contrastive_objective
 
         # ── within-batch rank-1 (cheap training-time diagnostic) ─────────────
         with torch.no_grad():
@@ -455,7 +571,10 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         self.log('train_logit_scale', T,   prog_bar=False, sync_dist=True)
         self.log(
             'train_loss_vs_random',
-            contrastive_loss - contrastive_loss.new_tensor(np.log(B + Q)),
+            contrastive_loss - (
+                valid_pairs.sum(dim=1).float().log().mean()
+                if ae_filtering else contrastive_loss.new_tensor(np.log(B + Q))
+            ),
             sync_dist=True,
         )
         if sfh_w1 is not None:
@@ -464,6 +583,18 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 'train_sfh_w1_mean', sfh_w1[off_diagonal].mean(),
                 sync_dist=True,
             )
+        if ae_filtering:
+            excluded = ~valid_pairs
+            excluded_per_anchor = excluded.sum(dim=1).float().mean()
+            self.log(
+                'train_ae_negatives_excluded', excluded_per_anchor,
+                sync_dist=True,
+            )
+            if excluded.any():
+                self.log(
+                    'train_ae_excluded_distance',
+                    ae_distances[excluded].mean(), sync_dist=True,
+                )
         return loss
 
     # ── validation step (batch-only InfoNCE, no queue) ────────────────────────
@@ -481,7 +612,35 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         labels  = torch.arange(logits.size(0), device=logits.device, dtype=torch.long)
         val_exact_loss = (F.cross_entropy(logits,   labels) +
                           F.cross_entropy(logits.T, labels)) / 2.0
-        if self.hparams.soft_positive_weight > 0:
+        ae_filtering = (
+            self.hparams.ae_false_negative_k > 0
+            or self.hparams.ae_false_negative_max_distance is not None
+        )
+        if ae_filtering:
+            with torch.no_grad():
+                reference_latent = self.encode_sfh_latent(sfh_reference)
+                valid_pairs, ae_distances = ae_false_negative_mask(
+                    reference_latent,
+                    n_neighbors=self.hparams.ae_false_negative_k,
+                    max_cosine_distance=(
+                        self.hparams.ae_false_negative_max_distance
+                    ),
+                )
+            val_contrastive_loss = (
+                masked_cross_entropy(logits, valid_pairs)
+                + masked_cross_entropy(logits.T, valid_pairs)
+            ) / 2.0
+            self.log('val_ae_filtered_loss', val_contrastive_loss, sync_dist=True)
+            self.log(
+                'val_ae_negatives_excluded',
+                (~valid_pairs).sum(dim=1).float().mean(), sync_dist=True,
+            )
+            if (~valid_pairs).any():
+                self.log(
+                    'val_ae_excluded_distance',
+                    ae_distances[~valid_pairs].mean(), sync_dist=True,
+                )
+        elif self.hparams.soft_positive_weight > 0:
             targets, _ = wasserstein_soft_targets(
                 sfh_reference,
                 soft_weight=self.hparams.soft_positive_weight,
@@ -496,6 +655,36 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         else:
             val_contrastive_loss = val_exact_loss
 
+        ae_adjacency_active = (
+            self.hparams.ae_adjacency_weight > 0
+            and self.current_epoch >= self.hparams.ae_adjacency_warmup_epochs
+        )
+        if self.hparams.ae_adjacency_weight > 0:
+            with torch.no_grad():
+                adjacency_latent = self.encode_sfh_latent(sfh_reference)
+            adjacency_scale = 1.0 / self.hparams.ae_adjacency_temperature
+            adjacency_cross = adjacency_scale * (img_e @ sfh_e.T)
+            val_ae_adjacency_loss = (
+                adjacency_consistency_loss(
+                    adjacency_cross, adjacency_latent, adjacency_scale,
+                )
+                + adjacency_consistency_loss(
+                    adjacency_cross.T, adjacency_latent, adjacency_scale,
+                )
+            ) / 2.0
+            self.log(
+                'val_ae_adjacency_loss', val_ae_adjacency_loss, sync_dist=True,
+            )
+            if ae_adjacency_active:
+                val_contrastive_objective = (
+                    val_contrastive_loss
+                    + self.hparams.ae_adjacency_weight * val_ae_adjacency_loss
+                )
+            else:
+                val_contrastive_objective = val_contrastive_loss
+        else:
+            val_contrastive_objective = val_contrastive_loss
+
         if self.sfh_decoder is not None:
             reconstruction = self.sfh_decoder(sfh_latent)
             reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
@@ -507,13 +696,13 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 w1_weight=self.hparams.sfh_reconstruction_w1_weight,
             )
             val_loss = (
-                val_contrastive_loss
+                val_contrastive_objective
                 + self.hparams.sfh_reconstruction_weight * reconstruction_loss
             )
             self.log('val_reconstruction_loss', reconstruction_loss, sync_dist=True)
             self.log('val_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
         else:
-            val_loss = val_contrastive_loss
+            val_loss = val_contrastive_objective
 
         with torch.no_grad():
             r1 = ((logits.argmax(1)   == labels).float().mean() +
@@ -531,7 +720,10 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             else:
                 negative_cosine = positive_cosine.new_zeros(())
             alignment_margin = positive_cosine - negative_cosine
-            random_loss = val_contrastive_loss.new_tensor(np.log(logits.size(0)))
+            if ae_filtering:
+                random_loss = valid_pairs.sum(dim=1).float().log().mean()
+            else:
+                random_loss = val_contrastive_loss.new_tensor(np.log(logits.size(0)))
 
         self.log('val_loss',   val_loss, prog_bar=True,  sync_dist=True)
         self.log('val_contrastive_loss', val_contrastive_loss, sync_dist=True)

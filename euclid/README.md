@@ -953,6 +953,56 @@ and uses patience 12. Compare it with the residual-adapter run using held-out
 retrieval, aligned-versus-unaligned neighbour overlap, pairwise-geometry
 correlation, and mass/redshift-matched permutation baselines.
 
+#### AE-aware false-negative experiment
+
+Exact-pair InfoNCE treats every off-diagonal image--SFH combination as a
+negative, even when two galaxies have nearly identical SFHs. The primary
+AE-aware experiment follows the False Negative Suppression idea of Sun et al.
+rather than choosing a fixed number of neighbours. For each batch, it computes
+the complete cosine-similarity adjacency matrix of the fixed pretrained SFH-AE
+latents. It applies the same temperature and row-wise softmax used by the
+cross-modal logits, then minimizes their L1 difference in both cross-modal
+directions. All batch relations contribute continuously: very similar SFHs
+receive strong adjacency probability, moderately similar histories receive a
+smaller one, and distant histories receive almost none.
+
+The implementation follows the false-negative cancellation family of methods,
+which remove likely semantic neighbours from the contrastive denominator. It
+also relates to contrastive regression methods that use distance in a
+continuous target space. Relevant primary references are
+[Huynh et al. (2022)](https://openaccess.thecvf.com/content/WACV2022/html/Huynh_Boosting_Contrastive_Self-Supervised_Learning_With_False_Negative_Cancellation_WACV_2022_paper.html),
+[Chuang et al. (2020)](https://proceedings.neurips.cc/paper/2020/hash/63c3ddcc7b23daa1e42dc41f9a44a873-Abstract.html),
+[Sun et al. (2023)](https://openaccess.thecvf.com/content/CVPR2023/html/Sun_Learning_Audio-Visual_Source_Localization_via_False_Negative_Aware_Contrastive_Learning_CVPR_2023_paper.html),
+and [Zha et al. (2023)](https://proceedings.neurips.cc/paper_files/paper/2023/hash/39e9c5913c970e3e49c2df629daff636-Abstract-Conference.html).
+
+Run the smoke test and then the complete bright sample with:
+
+```bash
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+
+sbatch euclid/slurm_train_zoobot_clip_bright_ae_false_negatives_test.sh "${AE}"
+sbatch euclid/slurm_train_zoobot_clip_bright_ae_false_negatives.sh "${AE}"
+```
+
+The jobs preserve the unrestricted 1024-by-2 adapters and all other settings
+of the preceding experiment. They use `--ae-adjacency-weight 100`, matching
+the scale used by the official FNAC implementation, and train with exact NCE
+alone for three warm-up epochs before enabling the adjacency term. The SFH
+encoder remains frozen and the queue is disabled. The full output is
+`training_bright_frozen_unrestricted_ae_fns`. Logged diagnostics include
+`train_ae_adjacency_loss`, `val_ae_adjacency_loss`, and the unchanged
+exact-pair loss and retrieval metrics. The adjacency distributions use a fixed
+temperature of 0.07, preventing the trainable CLIP temperature from flattening
+the auxiliary target to reduce its loss.
+The smoke test runs for five epochs so that epochs 4--5 exercise the adjacency
+term after the three-epoch exact-NCE warm-up.
+
+The code also retains `--ae-false-negative-k` and
+`--ae-false-negative-max-distance` for a separate hard-removal ablation. Those
+options operate within the current batch, so `k=8` means eight among 127
+possible negatives for batch size 128, not eight among the full dataset. They
+should not be described as a dataset-wide 8-nearest-neighbour calculation.
+
 For the VIS<22 bright sample, first check whether the pretrained Euclid ZooBot
 backbone itself organizes the galaxies by morphology. The image-only exporter
 uses the raw frozen backbone output from

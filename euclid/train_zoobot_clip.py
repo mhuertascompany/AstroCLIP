@@ -138,6 +138,36 @@ def parse_args():
         '--soft-positive-k', type=int, default=8,
         help='Number of within-batch W1-nearest SFHs receiving soft target mass.',
     )
+    model.add_argument(
+        '--ae-false-negative-k', type=int, default=0,
+        help=(
+            'Exclude this many nearest off-diagonal SFHs per anchor from the '
+            'InfoNCE denominator, using cosine distance in the fixed pretrained '
+            'SFH-autoencoder latent space (default: disabled).'
+        ),
+    )
+    model.add_argument(
+        '--ae-false-negative-max-distance', type=float,
+        help=(
+            'Optional maximum AE cosine distance for excluded negatives. With '
+            '--ae-false-negative-k 0, exclude every pair within this distance.'
+        ),
+    )
+    model.add_argument(
+        '--ae-adjacency-weight', type=float, default=0.0,
+        help=(
+            'Weight of the parameter-free FNAC-style L1 consistency between '
+            'cross-modal probabilities and fixed AE latent adjacency.'
+        ),
+    )
+    model.add_argument(
+        '--ae-adjacency-warmup-epochs', type=int, default=3,
+        help='Exact-InfoNCE warm-up before enabling AE adjacency regularization.',
+    )
+    model.add_argument(
+        '--ae-adjacency-temperature', type=float, default=0.07,
+        help='Fixed temperature for AE and cross-modal adjacency distributions.',
+    )
 
     optimization = parser.add_argument_group('optimization')
     optimization.add_argument('--lr', type=float, default=1e-4)
@@ -187,6 +217,48 @@ def validate_args(args):
         raise ValueError('--soft-positive-k must be positive.')
     if args.soft_positive_weight and args.queue_size:
         raise ValueError('--soft-positive-weight requires --queue-size 0.')
+    ae_filtering = (
+        args.ae_false_negative_k > 0
+        or args.ae_false_negative_max_distance is not None
+    )
+    if args.ae_false_negative_k < 0:
+        raise ValueError('--ae-false-negative-k cannot be negative.')
+    if args.ae_false_negative_max_distance is not None and not (
+        0 <= args.ae_false_negative_max_distance <= 2
+    ):
+        raise ValueError('--ae-false-negative-max-distance must lie in [0, 2].')
+    if ae_filtering and args.queue_size:
+        raise ValueError('AE false-negative filtering requires --queue-size 0.')
+    if ae_filtering and args.soft_positive_weight:
+        raise ValueError(
+            'Choose either AE false-negative filtering or soft positives.'
+        )
+    if ae_filtering and not args.freeze_sfh_encoder:
+        raise ValueError(
+            'AE false-negative filtering requires --freeze-sfh-encoder.'
+        )
+    if args.ae_adjacency_weight < 0:
+        raise ValueError('--ae-adjacency-weight cannot be negative.')
+    if args.ae_adjacency_warmup_epochs < 0:
+        raise ValueError('--ae-adjacency-warmup-epochs cannot be negative.')
+    if args.ae_adjacency_temperature <= 0:
+        raise ValueError('--ae-adjacency-temperature must be positive.')
+    if args.ae_adjacency_weight:
+        if args.queue_size:
+            raise ValueError('AE adjacency regularization requires --queue-size 0.')
+        if args.soft_positive_weight:
+            raise ValueError(
+                'Choose either AE adjacency regularization or soft positives.'
+            )
+        if ae_filtering:
+            raise ValueError(
+                'Choose either continuous AE adjacency regularization or hard '
+                'AE false-negative filtering.'
+            )
+        if not args.freeze_sfh_encoder:
+            raise ValueError(
+                'AE adjacency regularization requires --freeze-sfh-encoder.'
+            )
     if args.sfh_encoder == 'transformer':
         if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
             raise ValueError('SFH transformer dimensions must be positive.')
@@ -299,6 +371,11 @@ def main():
         sfh_lr_scale=args.sfh_lr_scale,
         soft_positive_weight=args.soft_positive_weight,
         soft_positive_k=args.soft_positive_k,
+        ae_false_negative_k=args.ae_false_negative_k,
+        ae_false_negative_max_distance=args.ae_false_negative_max_distance,
+        ae_adjacency_weight=args.ae_adjacency_weight,
+        ae_adjacency_warmup_epochs=args.ae_adjacency_warmup_epochs,
+        ae_adjacency_temperature=args.ae_adjacency_temperature,
         sfh_log_epsilon=sfh_log_epsilon,
         sfh_reconstruction_weight=args.sfh_reconstruction_weight,
         sfh_reconstruction_w1_weight=args.sfh_reconstruction_w1_weight,
@@ -376,7 +453,12 @@ def main():
         f'SFH projection {sfh_projection_details}; '
         f'SFH reconstruction weight={args.sfh_reconstruction_weight:g}; '
         f'SFH soft-positive weight={args.soft_positive_weight:g}, '
-        f'k={args.soft_positive_k}',
+        f'k={args.soft_positive_k}; '
+        f'AE false-negative k={args.ae_false_negative_k}, '
+        f'max distance={args.ae_false_negative_max_distance}; '
+        f'AE adjacency weight={args.ae_adjacency_weight:g}, '
+        f'warmup={args.ae_adjacency_warmup_epochs}, '
+        f'temperature={args.ae_adjacency_temperature:g}',
         flush=True,
     )
     trainer = L.Trainer(

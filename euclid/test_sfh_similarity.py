@@ -6,6 +6,9 @@ import torch
 import torch.nn.functional as F
 
 from cosmosweb.sfh_similarity import (
+    adjacency_consistency_loss,
+    ae_false_negative_mask,
+    masked_cross_entropy,
     pairwise_sfh_wasserstein1,
     soft_cross_entropy,
     wasserstein_soft_targets,
@@ -76,6 +79,62 @@ class SoftTargetTests(unittest.TestCase):
         )
         torch.testing.assert_close(targets, torch.ones((1, 1)))
         torch.testing.assert_close(distance, torch.zeros((1, 1)))
+
+
+class AEFalseNegativeTests(unittest.TestCase):
+    def test_nearest_latents_are_excluded_symmetrically(self):
+        latents = torch.tensor([
+            [1.0, 0.0],
+            [0.99, 0.10],
+            [-1.0, 0.0],
+            [-0.99, 0.10],
+        ])
+        valid, distance = ae_false_negative_mask(latents, n_neighbors=1)
+        self.assertTrue(torch.all(valid.diagonal()))
+        self.assertFalse(bool(valid[0, 1]))
+        self.assertFalse(bool(valid[1, 0]))
+        self.assertFalse(bool(valid[2, 3]))
+        self.assertFalse(bool(valid[3, 2]))
+        torch.testing.assert_close(distance, distance.T)
+
+    def test_distance_threshold_can_leave_distant_neighbour_valid(self):
+        latents = torch.eye(3)
+        valid, _ = ae_false_negative_mask(
+            latents, n_neighbors=1, max_cosine_distance=0.1,
+        )
+        self.assertTrue(torch.all(valid))
+
+    def test_masked_loss_removes_strong_false_negative(self):
+        logits = torch.tensor([[2.0, 8.0], [7.0, 2.0]])
+        exact = F.cross_entropy(logits, torch.arange(2))
+        valid = torch.eye(2, dtype=torch.bool)
+        filtered = masked_cross_entropy(logits, valid)
+        self.assertGreater(float(exact), 5.0)
+        self.assertAlmostEqual(float(filtered), 0.0, places=7)
+
+
+class AdjacencyConsistencyTests(unittest.TestCase):
+    def test_loss_is_zero_when_cross_modal_adjacency_matches_ae(self):
+        latents = torch.tensor([
+            [1.0, 0.0], [0.9, 0.1], [-1.0, 0.0],
+        ])
+        normalized = F.normalize(latents, dim=1)
+        scale = torch.tensor(4.0)
+        logits = scale * (normalized @ normalized.T)
+        loss = adjacency_consistency_loss(logits, latents, scale)
+        self.assertAlmostEqual(float(loss), 0.0, places=7)
+
+    def test_mismatched_adjacency_has_positive_loss_and_gradients(self):
+        latents = torch.eye(3)
+        logits = torch.tensor([
+            [1.0, 4.0, 0.0],
+            [0.0, 1.0, 4.0],
+            [4.0, 0.0, 1.0],
+        ], requires_grad=True)
+        loss = adjacency_consistency_loss(logits, latents, 2.0)
+        self.assertGreater(float(loss.detach()), 0.0)
+        loss.backward()
+        self.assertGreater(float(logits.grad.abs().sum()), 0.0)
 
 
 if __name__ == '__main__':

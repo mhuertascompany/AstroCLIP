@@ -96,3 +96,108 @@ def soft_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Ten
     if logits.shape != targets.shape:
         raise ValueError('logits and targets must have identical shapes.')
     return -(targets * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
+
+
+def ae_false_negative_mask(
+    latents: torch.Tensor,
+    n_neighbors: int = 0,
+    max_cosine_distance: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return valid contrastive pairs after removing nearby AE latents.
+
+    The diagonal (the exact image--SFH pair) is always retained. Off-diagonal
+    pairs are removed when either object selects the other among its nearest
+    neighbours in the fixed autoencoder space. When ``max_cosine_distance`` is
+    supplied, selected neighbours are removed only if they also lie within
+    that distance. With ``n_neighbors=0``, the distance threshold alone selects
+    false negatives.
+
+    Symmetrising the neighbour graph makes the same physical pair valid or
+    invalid in both directions of the CLIP objective.
+    """
+    if latents.ndim != 2:
+        raise ValueError('latents must have shape (batch, features).')
+    if n_neighbors < 0:
+        raise ValueError('n_neighbors cannot be negative.')
+    if max_cosine_distance is not None and not (
+        0.0 <= max_cosine_distance <= 2.0
+    ):
+        raise ValueError('max_cosine_distance must lie in [0, 2].')
+
+    values = F.normalize(latents.detach().to(dtype=torch.float32), dim=1)
+    distances = (1.0 - values @ values.T).clamp(min=0.0, max=2.0)
+    batch_size = distances.shape[0]
+    identity = torch.eye(batch_size, device=distances.device, dtype=torch.bool)
+    excluded = torch.zeros_like(identity)
+
+    if batch_size > 1 and n_neighbors > 0:
+        k = min(n_neighbors, batch_size - 1)
+        candidates = distances.masked_fill(identity, float('inf'))
+        nearest_index = torch.topk(
+            candidates, k=k, dim=1, largest=False, sorted=False,
+        ).indices
+        excluded.scatter_(1, nearest_index, True)
+    elif batch_size > 1 and max_cosine_distance is not None:
+        excluded = distances <= max_cosine_distance
+
+    if max_cosine_distance is not None:
+        excluded &= distances <= max_cosine_distance
+    excluded &= ~identity
+    excluded = excluded | excluded.T
+    valid = ~excluded
+    valid.fill_diagonal_(True)
+    return valid, distances
+
+
+def masked_cross_entropy(
+    logits: torch.Tensor,
+    valid_pairs: torch.Tensor,
+) -> torch.Tensor:
+    """Exact-pair cross entropy after excluding selected negatives."""
+    if logits.ndim != 2 or logits.shape != valid_pairs.shape:
+        raise ValueError('logits and valid_pairs must have identical 2D shapes.')
+    if valid_pairs.dtype != torch.bool:
+        raise ValueError('valid_pairs must be boolean.')
+    n_queries = logits.shape[0]
+    if logits.shape[1] < n_queries:
+        raise ValueError('Each exact target must exist in the key dimension.')
+    labels = torch.arange(n_queries, device=logits.device)
+    if not torch.all(valid_pairs[labels, labels]):
+        raise ValueError('The exact-pair diagonal cannot be masked.')
+    masked_logits = logits.masked_fill(~valid_pairs, -torch.inf)
+    return F.cross_entropy(masked_logits, labels)
+
+
+def adjacency_consistency_loss(
+    cross_modal_logits: torch.Tensor,
+    reference_latents: torch.Tensor,
+    logit_scale: torch.Tensor | float,
+) -> torch.Tensor:
+    """Match cross-modal probabilities to fixed unimodal AE adjacency.
+
+    This is the SFH-side analogue of the False Negative Suppression term in
+    Sun et al. (CVPR 2023): all pairwise relations contribute continuously,
+    avoiding a hard nearest-neighbour count or distance threshold.
+    """
+    if cross_modal_logits.ndim != 2:
+        raise ValueError('cross_modal_logits must be a matrix.')
+    if cross_modal_logits.shape[0] != cross_modal_logits.shape[1]:
+        raise ValueError('Adjacency consistency requires square batch logits.')
+    if reference_latents.ndim != 2:
+        raise ValueError('reference_latents must have shape (batch, features).')
+    if reference_latents.shape[0] != cross_modal_logits.shape[0]:
+        raise ValueError('Logits and reference latents must share a batch size.')
+
+    reference = F.normalize(
+        reference_latents.detach().to(dtype=torch.float32), dim=1,
+    )
+    scale = torch.as_tensor(
+        logit_scale, device=reference.device, dtype=reference.dtype,
+    ).detach()
+    reference_probability = F.softmax(
+        scale * (reference @ reference.T), dim=1,
+    )
+    cross_modal_probability = F.softmax(
+        cross_modal_logits.to(dtype=torch.float32), dim=1,
+    )
+    return F.l1_loss(cross_modal_probability, reference_probability)
