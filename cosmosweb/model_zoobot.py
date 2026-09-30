@@ -58,6 +58,7 @@ from .sfh_similarity import (
     wasserstein_soft_targets,
 )
 from .pcme import pcmepp_loss
+from .alignment_losses import cwcl_loss, cyclip_loss
 from .zoobot_encoder import (
     FlexibleProjection,
     MultiFilterZooBotImageEncoder,
@@ -174,10 +175,17 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         pcme_initial_scale: float = 5.0,
         pcme_initial_bias: float = 5.0,
         pcme_initial_uncertainty: float = 0.01,
+        cwcl_similarity_temperature: float = 0.1,
+        cwcl_reverse_exact_weight: float = 1.0,
+        cyclip_clip_weight: float = 0.25,
+        cyclip_inmodal_weight: float = 1.0,
+        cyclip_crossmodal_weight: float = 0.25,
     ) -> None:
         super().__init__()
-        if alignment_objective not in {'clip', 'pcmepp'}:
-            raise ValueError('alignment_objective must be clip or pcmepp.')
+        if alignment_objective not in {'clip', 'pcmepp', 'cwcl', 'cyclip'}:
+            raise ValueError(
+                'alignment_objective must be clip, pcmepp, cwcl, or cyclip.'
+            )
         if pcme_pseudo_positive_weight < 0:
             raise ValueError('pcme_pseudo_positive_weight cannot be negative.')
         if pcme_vib_weight < 0:
@@ -186,6 +194,22 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise ValueError('pcme_initial_scale must be positive.')
         if pcme_initial_uncertainty <= 0:
             raise ValueError('pcme_initial_uncertainty must be positive.')
+        if cwcl_similarity_temperature <= 0:
+            raise ValueError('cwcl_similarity_temperature must be positive.')
+        if cwcl_reverse_exact_weight < 0:
+            raise ValueError('cwcl_reverse_exact_weight cannot be negative.')
+        if min(
+            cyclip_clip_weight,
+            cyclip_inmodal_weight,
+            cyclip_crossmodal_weight,
+        ) < 0:
+            raise ValueError('CyCLIP weights cannot be negative.')
+        if (
+            cyclip_clip_weight
+            + cyclip_inmodal_weight
+            + cyclip_crossmodal_weight
+        ) == 0:
+            raise ValueError('At least one CyCLIP weight must be positive.')
         if not 0.0 <= soft_positive_weight <= 1.0:
             raise ValueError('soft_positive_weight must lie in [0, 1].')
         if soft_positive_k < 1:
@@ -276,7 +300,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 'AE adjacency regularization requires freeze_sfh_encoder=True '
                 'so its reference geometry remains fixed.'
             )
-        if alignment_objective == 'pcmepp':
+        if alignment_objective in {'pcmepp', 'cwcl', 'cyclip'}:
             incompatible = []
             if queue_size:
                 incompatible.append('queue_size')
@@ -288,9 +312,14 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 incompatible.append('AE adjacency regularization')
             if incompatible:
                 raise ValueError(
-                    'PCME++ uses its own in-batch pseudo-positive objective; '
+                    f'{alignment_objective} uses its own in-batch objective; '
                     'disable ' + ', '.join(incompatible) + '.'
                 )
+        if alignment_objective == 'cwcl' and not freeze_sfh_encoder:
+            raise ValueError(
+                'CWCL requires freeze_sfh_encoder=True so the SFH-AE target '
+                'geometry remains fixed.'
+            )
         self.save_hyperparameters()
 
         # ── main encoders (receive gradients) ────────────────────────────────
@@ -503,6 +532,41 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         )
         return result, sfh_latent, image_mean, sfh_mean, image_log_variance, sfh_log_variance
 
+    def _alternative_alignment_step(
+        self,
+        images: torch.Tensor,
+        sfhs: torch.Tensor,
+        sfh_reference: torch.Tensor,
+    ):
+        """Run CWCL or CyCLIP and return common deterministic embeddings."""
+        image_embedding = F.normalize(self.encode_image(images), dim=-1)
+        sfh_latent = self.encode_sfh_latent(sfhs)
+        sfh_embedding = F.normalize(self.project_sfh(sfh_latent), dim=-1)
+        logit_scale = self.log_temp.exp().clamp(min=1.0, max=100.0)
+        if self.hparams.alignment_objective == 'cwcl':
+            with torch.no_grad():
+                reference_latent = self.encode_sfh_latent(sfh_reference)
+            result = cwcl_loss(
+                image_embedding,
+                sfh_embedding,
+                reference_latent,
+                logit_scale=logit_scale,
+                similarity_temperature=self.hparams.cwcl_similarity_temperature,
+                reverse_exact_weight=self.hparams.cwcl_reverse_exact_weight,
+            )
+        elif self.hparams.alignment_objective == 'cyclip':
+            result = cyclip_loss(
+                image_embedding,
+                sfh_embedding,
+                logit_scale=logit_scale,
+                clip_weight=self.hparams.cyclip_clip_weight,
+                inmodal_weight=self.hparams.cyclip_inmodal_weight,
+                crossmodal_weight=self.hparams.cyclip_crossmodal_weight,
+            )
+        else:
+            raise RuntimeError('Alternative step requires CWCL or CyCLIP.')
+        return result, sfh_latent, image_embedding, sfh_embedding, logit_scale
+
     def forward(
         self, image: torch.Tensor, sfh: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -576,6 +640,64 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 sync_dist=True,
             )
             self.log('train_rank1_batch', rank1, prog_bar=True, sync_dist=True)
+            return loss
+
+        if self.hparams.alignment_objective in {'cwcl', 'cyclip'}:
+            result, sfh_latent, img_q, sfh_q, T = self._alternative_alignment_step(
+                images, sfhs, sfh_reference,
+            )
+            alignment_loss = result.loss
+            loss = alignment_loss
+            if self.sfh_decoder is not None:
+                reconstruction = self.sfh_decoder(sfh_latent)
+                reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
+                    reconstruction,
+                    sfh_reference,
+                    batch.get('sfh_p16'),
+                    batch.get('sfh_p84'),
+                    epsilon=self.hparams.sfh_log_epsilon,
+                    w1_weight=self.hparams.sfh_reconstruction_w1_weight,
+                )
+                loss = loss + self.hparams.sfh_reconstruction_weight * reconstruction_loss
+                self.log('train_reconstruction_loss', reconstruction_loss, sync_dist=True)
+                self.log('train_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
+            labels = torch.arange(B, device=images.device)
+            with torch.no_grad():
+                rank1 = 0.5 * (
+                    (result.logits.argmax(1) == labels).float().mean()
+                    + (result.logits.T.argmax(1) == labels).float().mean()
+                )
+            self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+            self.log('train_alignment_loss', alignment_loss, sync_dist=True)
+            self.log('train_rank1_batch', rank1, prog_bar=True, sync_dist=True)
+            self.log('train_logit_scale', T, sync_dist=True)
+            if self.hparams.alignment_objective == 'cwcl':
+                self.log(
+                    'train_cwcl_weighted_i2s_loss',
+                    result.weighted_image_to_sfh_loss, sync_dist=True,
+                )
+                self.log(
+                    'train_cwcl_exact_s2i_loss',
+                    result.exact_sfh_to_image_loss, sync_dist=True,
+                )
+                self.log(
+                    'train_cwcl_target_entropy', result.target_entropy,
+                    sync_dist=True,
+                )
+                self.log(
+                    'train_cwcl_effective_positives', result.effective_positives,
+                    sync_dist=True,
+                )
+            else:
+                self.log('train_cyclip_clip_loss', result.clip_loss, sync_dist=True)
+                self.log(
+                    'train_cyclip_inmodal_loss', result.inmodal_cyclic_loss,
+                    sync_dist=True,
+                )
+                self.log(
+                    'train_cyclip_crossmodal_loss',
+                    result.crossmodal_cyclic_loss, sync_dist=True,
+                )
             return loss
 
         if Q and B > Q:
@@ -819,6 +941,82 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             self.log('val_alignment_margin', positive_cosine - negative_cosine, sync_dist=True)
             self.log('val_rank1', rank1, prog_bar=True, sync_dist=True)
             self.log('val_rank5', rank5, prog_bar=True, sync_dist=True)
+            return
+        if self.hparams.alignment_objective in {'cwcl', 'cyclip'}:
+            result, sfh_latent, img_e, sfh_e, T = self._alternative_alignment_step(
+                images, sfhs, sfh_reference,
+            )
+            val_loss = result.loss
+            if self.sfh_decoder is not None:
+                reconstruction = self.sfh_decoder(sfh_latent)
+                reconstruction_loss, reconstruction_parts = sfh_reconstruction_loss(
+                    reconstruction,
+                    sfh_reference,
+                    batch.get('sfh_p16'),
+                    batch.get('sfh_p84'),
+                    epsilon=self.hparams.sfh_log_epsilon,
+                    w1_weight=self.hparams.sfh_reconstruction_w1_weight,
+                )
+                val_loss = val_loss + self.hparams.sfh_reconstruction_weight * reconstruction_loss
+                self.log('val_reconstruction_loss', reconstruction_loss, sync_dist=True)
+                self.log('val_reconstruction_w1', reconstruction_parts['w1'], sync_dist=True)
+            labels = torch.arange(result.logits.size(0), device=result.logits.device)
+            with torch.no_grad():
+                rank1 = 0.5 * (
+                    (result.logits.argmax(1) == labels).float().mean()
+                    + (result.logits.T.argmax(1) == labels).float().mean()
+                )
+                k = min(5, result.logits.size(1))
+                rank5 = 0.5 * (
+                    (result.logits.topk(k, 1).indices == labels[:, None]).any(1).float().mean()
+                    + (result.logits.T.topk(k, 1).indices == labels[:, None]).any(1).float().mean()
+                )
+                cosine = img_e @ sfh_e.T
+                positive_cosine = cosine.diagonal().mean()
+                if cosine.size(0) > 1:
+                    negative_cosine = (
+                        cosine.sum() - cosine.diagonal().sum()
+                    ) / (cosine.numel() - cosine.size(0))
+                else:
+                    negative_cosine = positive_cosine.new_zeros(())
+            self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
+            self.log('val_alignment_loss', result.loss, sync_dist=True)
+            self.log('val_rank1', rank1, prog_bar=True, sync_dist=True)
+            self.log('val_rank5', rank5, prog_bar=True, sync_dist=True)
+            self.log('val_positive_cosine', positive_cosine, sync_dist=True)
+            self.log('val_negative_cosine', negative_cosine, sync_dist=True)
+            self.log(
+                'val_alignment_margin', positive_cosine - negative_cosine,
+                sync_dist=True,
+            )
+            self.log('val_logit_scale', T, sync_dist=True)
+            if self.hparams.alignment_objective == 'cwcl':
+                self.log(
+                    'val_cwcl_weighted_i2s_loss',
+                    result.weighted_image_to_sfh_loss, sync_dist=True,
+                )
+                self.log(
+                    'val_cwcl_exact_s2i_loss',
+                    result.exact_sfh_to_image_loss, sync_dist=True,
+                )
+                self.log(
+                    'val_cwcl_target_entropy', result.target_entropy,
+                    sync_dist=True,
+                )
+                self.log(
+                    'val_cwcl_effective_positives', result.effective_positives,
+                    sync_dist=True,
+                )
+            else:
+                self.log('val_cyclip_clip_loss', result.clip_loss, sync_dist=True)
+                self.log(
+                    'val_cyclip_inmodal_loss', result.inmodal_cyclic_loss,
+                    sync_dist=True,
+                )
+                self.log(
+                    'val_cyclip_crossmodal_loss',
+                    result.crossmodal_cyclic_loss, sync_dist=True,
+                )
             return
         T = self.log_temp.exp().clamp(min=1.0, max=100.0)
 

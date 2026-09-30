@@ -84,10 +84,11 @@ def parse_args():
     model.add_argument('--queue-size', type=int, default=4096)
     model.add_argument('--momentum', type=float, default=0.995)
     model.add_argument(
-        '--alignment-objective', choices=('clip', 'pcmepp'), default='clip',
+        '--alignment-objective',
+        choices=('clip', 'pcmepp', 'cwcl', 'cyclip'), default='clip',
         help=(
-            'Cross-modal objective. pcmepp learns diagonal Gaussian embeddings '
-            'with closed-form distance, pseudo positives, and VIB regularization.'
+            'Cross-modal objective: exact-pair CLIP, probabilistic PCME++, '
+            'SFH-AE continuously weighted CWCL, or cyclic-consistency CyCLIP.'
         ),
     )
     model.add_argument(
@@ -109,6 +110,26 @@ def parse_args():
     model.add_argument(
         '--pcme-initial-uncertainty', type=float, default=0.01,
         help='Initial summed diagonal variance for each modality.',
+    )
+    model.add_argument(
+        '--cwcl-similarity-temperature', type=float, default=0.1,
+        help='Temperature of the continuous SFH-AE cosine kernel.',
+    )
+    model.add_argument(
+        '--cwcl-reverse-exact-weight', type=float, default=1.0,
+        help='Weight of the exact paired SFH-to-image term in CWCL.',
+    )
+    model.add_argument(
+        '--cyclip-clip-weight', type=float, default=0.25,
+        help='Weight of the paired symmetric CLIP anchor in CyCLIP.',
+    )
+    model.add_argument(
+        '--cyclip-inmodal-weight', type=float, default=1.0,
+        help='Weight matching image-image and SFH-SFH cosine geometry.',
+    )
+    model.add_argument(
+        '--cyclip-crossmodal-weight', type=float, default=0.25,
+        help='Weight enforcing symmetry of the cross-modal cosine matrix.',
     )
     model.add_argument('--unfreeze-blocks', type=int, default=0)
     model.add_argument('--backbone-lr-scale', type=float, default=0.1)
@@ -246,6 +267,22 @@ def validate_args(args):
         raise ValueError('--pcme-initial-scale must be positive.')
     if args.pcme_initial_uncertainty <= 0:
         raise ValueError('--pcme-initial-uncertainty must be positive.')
+    if args.cwcl_similarity_temperature <= 0:
+        raise ValueError('--cwcl-similarity-temperature must be positive.')
+    if args.cwcl_reverse_exact_weight < 0:
+        raise ValueError('--cwcl-reverse-exact-weight cannot be negative.')
+    if min(
+        args.cyclip_clip_weight,
+        args.cyclip_inmodal_weight,
+        args.cyclip_crossmodal_weight,
+    ) < 0:
+        raise ValueError('CyCLIP weights cannot be negative.')
+    if (
+        args.cyclip_clip_weight
+        + args.cyclip_inmodal_weight
+        + args.cyclip_crossmodal_weight
+    ) == 0:
+        raise ValueError('At least one CyCLIP weight must be positive.')
     if not 0 <= args.soft_positive_weight <= 1:
         raise ValueError('--soft-positive-weight must lie in [0, 1].')
     if args.soft_positive_k < 1:
@@ -294,7 +331,7 @@ def validate_args(args):
             raise ValueError(
                 'AE adjacency regularization requires --freeze-sfh-encoder.'
             )
-    if args.alignment_objective == 'pcmepp':
+    if args.alignment_objective in {'pcmepp', 'cwcl', 'cyclip'}:
         incompatible = []
         if args.queue_size:
             incompatible.append('--queue-size')
@@ -306,9 +343,13 @@ def validate_args(args):
             incompatible.append('--ae-adjacency-weight')
         if incompatible:
             raise ValueError(
-                'PCME++ uses its own in-batch pseudo-positive objective; disable '
+                f'{args.alignment_objective} uses its own in-batch objective; disable '
                 + ', '.join(incompatible) + '.'
             )
+    if args.alignment_objective == 'cwcl' and not args.freeze_sfh_encoder:
+        raise ValueError(
+            'CWCL requires --freeze-sfh-encoder so its SFH-AE targets are fixed.'
+        )
     if args.sfh_encoder == 'transformer':
         if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
             raise ValueError('SFH transformer dimensions must be positive.')
@@ -442,6 +483,11 @@ def main():
         pcme_initial_scale=args.pcme_initial_scale,
         pcme_initial_bias=args.pcme_initial_bias,
         pcme_initial_uncertainty=args.pcme_initial_uncertainty,
+        cwcl_similarity_temperature=args.cwcl_similarity_temperature,
+        cwcl_reverse_exact_weight=args.cwcl_reverse_exact_weight,
+        cyclip_clip_weight=args.cyclip_clip_weight,
+        cyclip_inmodal_weight=args.cyclip_inmodal_weight,
+        cyclip_crossmodal_weight=args.cyclip_crossmodal_weight,
     )
     if args.sfh_pretrained_checkpoint is not None and args.resume_from is None:
         load_sfh_autoencoder_checkpoint(
@@ -520,7 +566,12 @@ def main():
         f'VIB weight={args.pcme_vib_weight:g}, '
         f'initial scale={args.pcme_initial_scale:g}, '
         f'initial bias={args.pcme_initial_bias:g}, '
-        f'initial uncertainty={args.pcme_initial_uncertainty:g}',
+        f'initial uncertainty={args.pcme_initial_uncertainty:g}; '
+        f'CWCL similarity temperature={args.cwcl_similarity_temperature:g}, '
+        f'reverse exact weight={args.cwcl_reverse_exact_weight:g}; '
+        f'CyCLIP weights clip/in-modal/cross-modal='
+        f'{args.cyclip_clip_weight:g}/{args.cyclip_inmodal_weight:g}/'
+        f'{args.cyclip_crossmodal_weight:g}',
         flush=True,
     )
     trainer = L.Trainer(

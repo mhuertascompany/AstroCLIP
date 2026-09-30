@@ -1066,6 +1066,69 @@ positive and negative match probabilities without sending either uncertainty
 to its clamp limits. The reference is [Chun, PCME++, ICLR
 2024](https://proceedings.iclr.cc/paper_files/paper/2024/file/ad9d6ab10446114cf5482d5e1f971a84-Paper-Conference.pdf).
 
+#### Simpler geometry-aware objectives: CWCL and CyCLIP
+
+Two deterministic alternatives retain one 256-dimensional vector per modality
+and need no uncertainty heads or pseudo-positive mining. Both use the same
+frozen ZooBot and SFH-autoencoder backbones and the same unrestricted
+1024-by-2 MLP adapters as the preceding experiments.
+
+CWCL transfers the fixed SFH-AE geometry into the image representation. For a
+batch of normalized frozen AE latents `a`, it constructs continuous weights
+
+```text
+w_ij = exp((cosine(a_i, a_j) - 1) / tau)
+q_ij = w_ij / sum_j w_ij
+```
+
+with the diagonal forced to one. Image-to-SFH cross entropy uses `q` instead of
+a one-hot target. The reverse SFH-to-image direction remains exact-pair CLIP,
+following the cross-modal transfer form in [CWCL (NeurIPS
+2023)](https://papers.nips.cc/paper_files/paper/2023/hash/f7b77476d89d5fb58aeb77691d2f40f5-Abstract-Conference.html).
+The default `tau=0.1` is fully continuous; decreasing
+`--cwcl-similarity-temperature` sharpens the distribution without imposing a
+hard neighbour count. Monitor `val_cwcl_effective_positives`: if it is close
+to the batch size, the AE cosine weights are too diffuse to provide a useful
+target; if it is nearly one, the experiment has reverted to exact-pair CLIP.
+
+CyCLIP combines three separately logged terms:
+
+```text
+0.25 * paired CLIP
++ 1.00 * B * MSE(image-image Gram, SFH-SFH Gram)
++ 0.25 * B * MSE(image-SFH matrix, its transpose)
+```
+
+The factor `B` follows the [official CyCLIP
+implementation](https://github.com/goel-shashank/CyCLIP/blob/main/src/train.py).
+The paired term is deliberately weaker than the in-modal geometry term, but it
+remains nonzero to prevent an unconstrained common collapse. The three weights
+are configurable with `--cyclip-clip-weight`, `--cyclip-inmodal-weight`, and
+`--cyclip-crossmodal-weight`.
+
+Run the five-epoch smoke tests first:
+
+```bash
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+
+sbatch euclid/slurm_train_zoobot_clip_bright_cwcl_test.sh "${AE}"
+sbatch euclid/slurm_train_zoobot_clip_bright_cyclip_test.sh "${AE}"
+```
+
+If their validation geometry and retrieval diagnostics remain healthy, launch
+the complete runs with:
+
+```bash
+sbatch euclid/slurm_train_zoobot_clip_bright_cwcl.sh "${AE}"
+sbatch euclid/slurm_train_zoobot_clip_bright_cyclip.sh "${AE}"
+```
+
+These objectives are in-batch and require `--queue-size 0`. CWCL additionally
+requires a frozen SFH encoder because its continuous target geometry must not
+move during training. Both are intentionally incompatible with the older soft
+positive, hard false-negative, and AE-adjacency options, so each run tests one
+well-defined loss.
+
 For the VIS<22 bright sample, first check whether the pretrained Euclid ZooBot
 backbone itself organizes the galaxies by morphology. The image-only exporter
 uses the raw frozen backbone output from
