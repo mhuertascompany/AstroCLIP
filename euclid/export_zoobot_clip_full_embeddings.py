@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     # Keep the heavy ZooBot/timm dependency out of metadata-only imports and tests.
-    from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
+    from .model_zoobot import EuclidZooBotCLIP
     from .evaluate_zoobot_clip import extract_embeddings, extraction_loader
 
     args = parse_args()
@@ -95,7 +95,7 @@ def main() -> None:
         "Encoding full paired sample: %d objects, %d SFH bins, %d realizations",
         len(rows), n_bins, n_realizations,
     )
-    model = CosmosWebZooBotCLIP.load_from_checkpoint(
+    model = EuclidZooBotCLIP.load_from_checkpoint(
         str(args.checkpoint), map_location="cpu",
     ).to(device)
     is_pcmepp = getattr(model.hparams, "alignment_objective", "clip") == "pcmepp"

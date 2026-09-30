@@ -20,7 +20,7 @@ def sha256(path):
 
 def prepare(checkpoint, dataset, split, stamps, output, device='cuda', batch_size=256):
     from .evaluate_zoobot_clip import validate_saved_split, _read_rows
-    from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
+    from .model_zoobot import EuclidZooBotCLIP
     if Path(output).exists():
         raise FileExistsError(f'Refusing to overwrite {output}')
     train_rows, train_ids, val_rows, val_ids, _, _ = validate_saved_split(dataset, split, stamps)
@@ -29,7 +29,9 @@ def prepare(checkpoint, dataset, split, stamps, output, device='cuda', batch_siz
             path = Path(stamps) / 'VIS' / f'VIS_{int(gid)}.jpg'
             if not path.is_file():
                 raise FileNotFoundError(path)
-    model = CosmosWebZooBotCLIP.load_from_checkpoint(str(checkpoint), map_location='cpu')
+    model = EuclidZooBotCLIP.load_from_checkpoint(
+        str(checkpoint), map_location='cpu',
+    )
     model.eval().requires_grad_(False).to(device)
     arrays = {}
     with h5py.File(dataset, 'r') as source, torch.inference_mode():

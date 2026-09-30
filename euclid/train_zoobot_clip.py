@@ -18,10 +18,10 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import CSVLogger
 
-from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
 from cosmosweb.sfh_autoencoder import load_sfh_autoencoder_checkpoint
 
 from .dataset_zoobot import EuclidZooBotDataModule
+from .model_zoobot import EuclidZooBotCLIP
 from .training_index import inspect_sfh_file
 
 
@@ -397,7 +397,7 @@ def main():
             selection_id_column=np.asarray(args.selection_id_column),
         )
     np.savez_compressed(args.output_dir / 'pair_split.npz', **split_data)
-    model = CosmosWebZooBotCLIP(
+    model = EuclidZooBotCLIP(
         zoobot_ckpt=str(args.zoobot_ckpt) if args.zoobot_ckpt else None,
         zoobot_model_name=args.zoobot_model_name,
         embed_dim=args.embed_dim,

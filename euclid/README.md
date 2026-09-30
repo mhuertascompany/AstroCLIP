@@ -1005,6 +1005,13 @@ should not be described as a dataset-wide 8-nearest-neighbour calculation.
 
 #### Probabilistic alignment with PCME++
 
+Euclid training, evaluation, embedding export, and diffusion-condition export
+load `EuclidZooBotCLIP` from `euclid.model_zoobot`. Its neural alignment engine
+is shared with the earlier COSMOS-Web implementation, but the dataset,
+selection, VIS stamps, posterior SFHs, and splits are all Euclid-specific. The
+historical `CosmosWebZooBotCLIP` entry point remains available so existing
+COSMOS-Web scripts and older checkpoint state dictionaries continue to work.
+
 PCME++ replaces one-point embeddings and exact-pair InfoNCE with a diagonal
 Gaussian for each image and SFH. The existing normalized 256-dimensional
 adapter output is the Gaussian mean, while an additional linear head predicts

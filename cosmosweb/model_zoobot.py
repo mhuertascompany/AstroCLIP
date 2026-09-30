@@ -1,6 +1,11 @@
-"""
-CosmosWebZooBotCLIP: contrastive alignment of COSMOS-Web images and CIGALE SFHs
-using a frozen ZooBOT ConvNeXt backbone as the image encoder.
+"""Shared ZooBot--SFH alignment models.
+
+``CosmosWebZooBotCLIP`` was introduced for COSMOS-Web images and CIGALE SFHs,
+then reused as the survey-agnostic alignment engine for Euclid VIS. New Euclid
+code should use :class:`euclid.model_zoobot.EuclidZooBotCLIP`; the historical
+class remains here for COSMOS-Web scripts and checkpoint compatibility.
+
+The primary model uses a frozen ZooBOT ConvNeXt backbone as the image encoder.
 
 v2 adds a MoCo-style momentum encoder queue for both modalities.  The queue
 extends the effective number of negatives per step from batch_size-1 to

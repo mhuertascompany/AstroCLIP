@@ -33,7 +33,8 @@ class SFHProjectionTests(unittest.TestCase):
         with mock.patch.object(
             clip_module, 'ZooBotImageEncoder', FakeImageEncoder,
         ):
-            model = clip_module.CosmosWebZooBotCLIP(
+            from euclid.model_zoobot import EuclidZooBotCLIP
+            model = EuclidZooBotCLIP(
                 zoobot_model_name='fake', embed_dim=8, sfh_input_dim=12,
                 sfh_encoder_type='mlp', sfh_projection_type='mlp',
                 sfh_projection_hidden_dim=16, queue_size=0,
@@ -64,7 +65,7 @@ class SFHProjectionTests(unittest.TestCase):
     def test_linear_projection_starts_as_identity_and_receives_gradients(self):
         import torch
 
-        from cosmosweb.model_zoobot import make_sfh_projection
+        from euclid.model_zoobot import make_sfh_projection
 
         projection = make_sfh_projection('linear', 8)
         latent = torch.randn(4, 8)
@@ -75,7 +76,7 @@ class SFHProjectionTests(unittest.TestCase):
     def test_identity_projection_has_no_parameters(self):
         import torch
 
-        from cosmosweb.model_zoobot import make_sfh_projection
+        from euclid.model_zoobot import make_sfh_projection
 
         projection = make_sfh_projection('identity', 8)
         latent = torch.randn(2, 8)
@@ -85,7 +86,7 @@ class SFHProjectionTests(unittest.TestCase):
     def test_residual_mlp_starts_as_identity_and_can_depart_from_it(self):
         import torch
 
-        from cosmosweb.model_zoobot import make_sfh_projection
+        from euclid.model_zoobot import make_sfh_projection
 
         projection = make_sfh_projection(
             'residual_mlp', 8, hidden_dim=16, residual_scale=0.1,
@@ -103,7 +104,7 @@ class SFHProjectionTests(unittest.TestCase):
     def test_unrestricted_mlp_can_replace_original_sfh_geometry(self):
         import torch
 
-        from cosmosweb.model_zoobot import make_sfh_projection
+        from euclid.model_zoobot import make_sfh_projection
 
         projection = make_sfh_projection(
             'mlp', 8, hidden_dim=32, hidden_layers=2,
@@ -139,7 +140,8 @@ class SFHProjectionTests(unittest.TestCase):
         with mock.patch.object(
             clip_module, 'ZooBotImageEncoder', FakeImageEncoder,
         ):
-            model = clip_module.CosmosWebZooBotCLIP(
+            from euclid.model_zoobot import EuclidZooBotCLIP
+            model = EuclidZooBotCLIP(
                 zoobot_model_name='fake', embed_dim=8, sfh_input_dim=12,
                 sfh_encoder_type='transformer', sfh_d_model=16,
                 sfh_n_heads=4, sfh_n_layers=1, sfh_decoder_layers=1,

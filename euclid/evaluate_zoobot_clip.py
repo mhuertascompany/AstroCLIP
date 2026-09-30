@@ -619,7 +619,7 @@ def parse_args():
 
 def main():
     # Keep ZooBot/timm optional for importing the numerical diagnostics in tests.
-    from cosmosweb.model_zoobot import CosmosWebZooBotCLIP
+    from .model_zoobot import EuclidZooBotCLIP
 
     args = parse_args()
     logging.basicConfig(
@@ -649,7 +649,7 @@ def main():
     log.info('Validated saved split: train=%d, validation=%d',
              len(train_rows), len(val_rows))
 
-    model = CosmosWebZooBotCLIP.load_from_checkpoint(
+    model = EuclidZooBotCLIP.load_from_checkpoint(
         str(args.checkpoint), map_location='cpu',
     ).to(device)
     is_pcmepp = getattr(model.hparams, 'alignment_objective', 'clip') == 'pcmepp'
