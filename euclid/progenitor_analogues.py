@@ -23,6 +23,7 @@ from astropy.table import Table
 
 from .cosmic_sfh import COSMOLOGY
 from .main_sequence_sfh import main_sequence_along_sfh
+from .literature_main_sequence import literature_main_sequence
 from .recent_ms import recent_offset
 from .sfh_shape import sfh_recent_activity
 
@@ -975,6 +976,7 @@ def make_report(
 
         sfr_mass_ax = fig.add_subplot(right[2])
         sfr_mass_centroids = []
+        plotted_sfr_mass_values = []
         for stage_number, (stage, color) in enumerate(zip(stages, colors), start=1):
             selected = candidates[candidates.stage == stage_number]
             if selected.empty:
@@ -988,6 +990,9 @@ def make_report(
             finite = np.isfinite(candidate_mass + candidate_sfr)
             if not finite.any():
                 continue
+            plotted_sfr_mass_values.append(
+                np.column_stack((candidate_mass[finite], candidate_sfr[finite]))
+            )
             sfr_mass_ax.scatter(
                 candidate_mass[finite], candidate_sfr[finite], s=29,
                 color=[color], alpha=0.55, linewidths=0, zorder=2,
@@ -1010,6 +1015,9 @@ def make_report(
             np.asarray(data["catalog_log_mass"])[descendant_index]
         )
         if np.isfinite(descendant_mass + descendant_sfr):
+            plotted_sfr_mass_values.append(
+                np.array([[descendant_mass, descendant_sfr]], dtype=float)
+            )
             if sfr_mass_centroids:
                 ordered_centroids = [
                     centroid for _, centroid in sorted(
@@ -1028,13 +1036,74 @@ def make_report(
                 color="#d73027", edgecolor="white", linewidth=0.7,
                 label="descendant", zorder=5,
             )
+        # Show a small set of descendant-frame epochs so the panel remains
+        # legible. Literature curves are restricted to their fitted mass and
+        # redshift domains and shifted onto our reconstructed-SFH SFR scale.
+        epoch_lookbacks = np.r_[0.0, lookbacks]
+        epoch_redshifts = np.r_[descendant_redshift, checkpoint_redshifts]
+        epoch_labels = np.array(["D"] + [str(i) for i in range(1, len(stages) + 1)])
+        n_reference_epochs = min(5, len(epoch_lookbacks))
+        reference_indices = np.unique(
+            np.linspace(0, len(epoch_lookbacks) - 1, n_reference_epochs)
+            .round().astype(int)
+        )
+        if plotted_sfr_mass_values:
+            plotted_values = np.vstack(plotted_sfr_mass_values)
+            visible_mass_min = float(np.nanmin(plotted_values[:, 0]) - 0.12)
+            visible_mass_max = float(np.nanmax(plotted_values[:, 0]) + 0.12)
+        else:
+            visible_mass_min, visible_mass_max = 8.7, 11.3
+        relation_names = set()
+        for epoch_index in reference_indices:
+            epoch_redshift = float(epoch_redshifts[epoch_index])
+            probe, relation_name, formal_mass_range = literature_main_sequence(
+                np.array([10.0]), epoch_redshift,
+                sfr_offset_dex=float(data["ms_sfr_offset"]),
+            )
+            if not np.isfinite(probe).any():
+                continue
+            curve_mass_min = max(visible_mass_min, formal_mass_range[0])
+            curve_mass_max = min(visible_mass_max, formal_mass_range[1])
+            if curve_mass_max <= curve_mass_min:
+                continue
+            curve_mass = np.linspace(curve_mass_min, curve_mass_max, 100)
+            curve_sfr, relation_name, _ = literature_main_sequence(
+                curve_mass, epoch_redshift,
+                sfr_offset_dex=float(data["ms_sfr_offset"]),
+            )
+            epoch_color = time_cmap(time_color_norm(epoch_lookbacks[epoch_index]))
+            line_style = "-" if relation_name == "Popesso+23" else ":"
+            sfr_mass_ax.plot(
+                curve_mass, curve_sfr, color=epoch_color, ls=line_style,
+                lw=1.25, alpha=0.9, zorder=0,
+            )
+            sfr_mass_ax.annotate(
+                f"{epoch_labels[epoch_index]}: z={epoch_redshift:.1f}",
+                xy=(curve_mass[-1], curve_sfr[-1]), xytext=(-2, 1),
+                textcoords="offset points", color=epoch_color, fontsize=5.4,
+                ha="right", va="bottom", clip_on=True,
+            )
+            relation_names.add(relation_name)
         sfr_mass_ax.set(
             xlabel="PHZ log stellar mass",
             ylabel="SFH log SFR100 [M$_\\odot$ yr$^{-1}$]",
             title="Progenitor evolution in the SFR-mass plane",
         )
         sfr_mass_ax.grid(alpha=0.15)
-        sfr_mass_ax.legend(fontsize=6.5, loc="best")
+        sfr_mass_handles = [
+            Line2D([], [], marker="*", color="none", markerfacecolor="#d73027",
+                   markeredgecolor="white", markersize=9, label="descendant")
+        ]
+        if "Popesso+23" in relation_names:
+            sfr_mass_handles.append(
+                Line2D([], [], color="0.3", lw=1.25, ls="-", label="Popesso+23")
+            )
+        if "JADES 2025 (100 Myr)" in relation_names:
+            sfr_mass_handles.append(
+                Line2D([], [], color="0.3", lw=1.25, ls=":",
+                       label="JADES 2025, 100 Myr")
+            )
+        sfr_mass_ax.legend(handles=sfr_mass_handles, fontsize=5.8, loc="best")
 
         morphology_ax = fig.add_subplot(right[3])
         morphology_fields = [
@@ -1102,7 +1171,9 @@ def make_report(
             "outcomes, not selection variables. The\n"
             "dashed UMAP and SFR-mass paths join\n"
             "ensemble medians, not one galaxy's orbit.\n"
-            "SFR-mass uses reconstructed 100 Myr SFR, R=0."
+            "SFR-mass uses reconstructed 100 Myr SFR, R=0.\n"
+            f"Literature MS: Popesso+23 (z<3), JADES 2025 (3<=z<=9);\n"
+            f"shifted {float(data['ms_sfr_offset']):+.2f} dex to the SFH-SFR100 scale."
         )
         notes_ax.text(
             0, 1, notes_text,
