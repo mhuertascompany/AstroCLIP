@@ -36,6 +36,7 @@ def main() -> None:
     )
     parser.add_argument("--minimum-progenitor-mass", type=float, default=9.0)
     parser.add_argument("--ms-sfr-offset", type=float, default=-0.93)
+    parser.add_argument("--sfr-mass-source", choices=("sfh", "phz"), default="sfh")
     parser.add_argument("--global-shape-weight", type=float, default=0.0)
     parser.add_argument("--continuity-weight", type=float, default=0.0)
     parser.add_argument("--continuity-pool", type=int, default=40)
@@ -78,7 +79,10 @@ def main() -> None:
         candidates.to_csv(destination / "analogue_candidates.csv", index=False)
         census.to_csv(destination / "checkpoint_census.csv", index=False)
         pdf = args.output / f"mass_q{quantile:.2f}_{galaxy_id}.pdf"
-        make_report(data, index, candidates, census, stages, stamps, pdf, destination)
+        make_report(
+            data, index, candidates, census, stages, stamps, pdf, destination,
+            sfr_mass_source=args.sfr_mass_source,
+        )
         records.append(
             {
                 "mass_quantile": quantile,
@@ -100,6 +104,7 @@ def main() -> None:
                 "selection_mass_cut": None,
                 "minimum_progenitor_mass": args.minimum_progenitor_mass,
                 "ms_sfr_offset_dex": args.ms_sfr_offset,
+                "sfr_mass_panel_source": args.sfr_mass_source,
                 "global_shape_weight": args.global_shape_weight,
                 "continuity_weight": args.continuity_weight,
                 "continuity_pool": args.continuity_pool,

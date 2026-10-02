@@ -785,7 +785,10 @@ def make_report(
     stamps: Path,
     pdf_path: Path,
     output: Path,
+    sfr_mass_source: str = "sfh",
 ) -> None:
+    if sfr_mass_source not in {"sfh", "phz"}:
+        raise ValueError("sfr_mass_source must be 'sfh' or 'phz'")
     output.mkdir(parents=True, exist_ok=True)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     ids = np.asarray(data["ids"])
@@ -983,10 +986,13 @@ def make_report(
                 continue
             indices = selected.bundle_index.to_numpy(dtype=int)
             candidate_mass = np.asarray(data["catalog_log_mass"])[indices]
-            candidate_sfr = np.array(
-                [_sfh_log_sfr_100myr_r0(data, index) for index in indices],
-                dtype=float,
-            )
+            if sfr_mass_source == "phz":
+                candidate_sfr = np.asarray(data["catalog_log_sfr"])[indices]
+            else:
+                candidate_sfr = np.array(
+                    [_sfh_log_sfr_100myr_r0(data, index) for index in indices],
+                    dtype=float,
+                )
             finite = np.isfinite(candidate_mass + candidate_sfr)
             if not finite.any():
                 continue
@@ -1010,7 +1016,11 @@ def make_report(
                 textcoords="offset points", fontsize=6.2, fontweight="bold",
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.72, pad=0.6),
             )
-        descendant_sfr = _sfh_log_sfr_100myr_r0(data, descendant_index)
+        descendant_sfr = (
+            float(np.asarray(data["catalog_log_sfr"])[descendant_index])
+            if sfr_mass_source == "phz"
+            else _sfh_log_sfr_100myr_r0(data, descendant_index)
+        )
         descendant_mass = float(
             np.asarray(data["catalog_log_mass"])[descendant_index]
         )
@@ -1038,7 +1048,11 @@ def make_report(
             )
         # Show a small set of descendant-frame epochs so the panel remains
         # legible. Literature curves are restricted to their fitted mass and
-        # redshift domains and shifted onto our reconstructed-SFH SFR scale.
+        # redshift domains. The empirical SFH correction is only appropriate
+        # when the plotted points are reconstructed SFH SFRs.
+        literature_sfr_offset = (
+            float(data["ms_sfr_offset"]) if sfr_mass_source == "sfh" else 0.0
+        )
         epoch_lookbacks = np.r_[0.0, lookbacks]
         epoch_redshifts = np.r_[descendant_redshift, checkpoint_redshifts]
         epoch_labels = np.array(["D"] + [str(i) for i in range(1, len(stages) + 1)])
@@ -1058,7 +1072,7 @@ def make_report(
             epoch_redshift = float(epoch_redshifts[epoch_index])
             probe, relation_name, formal_mass_range = literature_main_sequence(
                 np.array([10.0]), epoch_redshift,
-                sfr_offset_dex=float(data["ms_sfr_offset"]),
+                sfr_offset_dex=literature_sfr_offset,
             )
             if not np.isfinite(probe).any():
                 continue
@@ -1069,7 +1083,7 @@ def make_report(
             curve_mass = np.linspace(curve_mass_min, curve_mass_max, 100)
             curve_sfr, relation_name, _ = literature_main_sequence(
                 curve_mass, epoch_redshift,
-                sfr_offset_dex=float(data["ms_sfr_offset"]),
+                sfr_offset_dex=literature_sfr_offset,
             )
             epoch_color = time_cmap(time_color_norm(epoch_lookbacks[epoch_index]))
             line_style = "-" if relation_name == "Popesso+23" else ":"
@@ -1086,7 +1100,11 @@ def make_report(
             relation_names.add(relation_name)
         sfr_mass_ax.set(
             xlabel="PHZ log stellar mass",
-            ylabel="SFH log SFR100 [M$_\\odot$ yr$^{-1}$]",
+            ylabel=(
+                "PHZ log SFR100 [M$_\\odot$ yr$^{-1}$]"
+                if sfr_mass_source == "phz"
+                else "SFH log SFR100 [M$_\\odot$ yr$^{-1}$]"
+            ),
             title="Progenitor evolution in the SFR-mass plane",
         )
         sfr_mass_ax.grid(alpha=0.15)
@@ -1171,9 +1189,17 @@ def make_report(
             "outcomes, not selection variables. The\n"
             "dashed UMAP and SFR-mass paths join\n"
             "ensemble medians, not one galaxy's orbit.\n"
-            "SFR-mass uses reconstructed 100 Myr SFR, R=0.\n"
-            f"Literature MS: Popesso+23 (z<3), JADES 2025 (3<=z<=9);\n"
-            f"shifted {float(data['ms_sfr_offset']):+.2f} dex to the SFH-SFR100 scale."
+            + (
+                "SFR-mass uses PHZ catalog SFR averaged over 100 Myr.\n"
+                if sfr_mass_source == "phz"
+                else "SFR-mass uses reconstructed 100 Myr SFR, R=0.\n"
+            )
+            + f"Literature MS: Popesso+23 (z<3), JADES 2025 (3<=z<=9);\n"
+            + (
+                "shown on its published SFR scale (no empirical shift)."
+                if sfr_mass_source == "phz"
+                else f"shifted {float(data['ms_sfr_offset']):+.2f} dex to the SFH-SFR100 scale."
+            )
         )
         notes_ax.text(
             0, 1, notes_text,
@@ -1287,6 +1313,10 @@ def main() -> None:
     parser.add_argument("--main-sequence-descendant", action="store_true")
     parser.add_argument("--main-sequence-delta-max", type=float, default=0.3)
     parser.add_argument("--ms-sfr-offset", type=float, default=-0.93)
+    parser.add_argument(
+        "--sfr-mass-source", choices=("sfh", "phz"), default="sfh",
+        help="SFR estimator used in the SFR-mass evolution panel.",
+    )
     parser.add_argument("--minimum-progenitor-mass", type=float, default=9.0)
     parser.add_argument("--mass-tolerance", type=float, default=0.15)
     parser.add_argument("--history-gyr", type=float, default=2.0)
@@ -1388,6 +1418,7 @@ def main() -> None:
         "track_visualization_space": "xy_joint (normalized average of aligned image and SFH embeddings)",
         "formed_mass_return_fraction": 0.0,
         "ms_sfr_offset_dex": args.ms_sfr_offset,
+        "sfr_mass_panel_source": args.sfr_mass_source,
         "catalog": str(args.catalog),
         "bundle": str(args.bundle),
         "archive": str(args.archive),
@@ -1395,7 +1426,8 @@ def main() -> None:
     }
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     make_report(
-        data, descendant_index, candidates, census, stages, stamps, args.pdf, args.output
+        data, descendant_index, candidates, census, stages, stamps, args.pdf, args.output,
+        sfr_mass_source=args.sfr_mass_source,
     )
     print(json.dumps(manifest, indent=2))
 
