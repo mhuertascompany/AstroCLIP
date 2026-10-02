@@ -1,4 +1,4 @@
-"""Train image--SFH CLIP on Euclid ZooBot JPEG stamps.
+"""Train image--SFH alignment on Euclid VIS JPEG stamps.
 
 The SFH dimension is read from the preprocessed HDF5 file. During training the
 data loader can draw a valid posterior SFH realization for each galaxy; the
@@ -27,13 +27,18 @@ from .training_index import inspect_sfh_file
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Train a ZooBot--SFH contrastive model on Euclid data.',
+        description='Train an image--SFH contrastive model on Euclid data.',
     )
     data = parser.add_argument_group('data')
     data.add_argument('--dataset', type=Path, required=True,
                       help='Preprocessed Euclid SFH HDF5 file.')
-    data.add_argument('--stamp-root', type=Path, required=True,
-                      help='Directory containing BAND/BAND_object_id.jpg.')
+    data.add_argument('--stamp-root', type=Path,
+                      help='Directory containing BAND/BAND_object_id.jpg for ZooBot.')
+    data.add_argument('--fits-root', type=Path,
+                      help='Native cutout run containing cutouts/VIS/object_id.fits.')
+    data.add_argument('--image-stats', type=Path,
+                      help='GalaxyTikTok-style global VIS percentile JSON.')
+    data.add_argument('--asinh-scale', type=float, default=20.0)
     data.add_argument('--band', default='VIS')
     data.add_argument('--image-size', type=int, default=224)
     data.add_argument('--val-fraction', type=float, default=0.1)
@@ -74,6 +79,15 @@ def parse_args():
         '--zoobot-model-name',
         help='Timm/Hugging Face encoder name, e.g. hf_hub:mwalmsley/zoobot-encoder-euclid.',
     )
+    encoder_source.add_argument(
+        '--galactiktok-checkpoint',
+        type=Path,
+        help='GalaxyTikTok save_pretrained directory (config.json + model.safetensors).',
+    )
+    model.add_argument('--galactiktok-band', default='euclid-vis')
+    model.add_argument('--token-pool-hidden-dim', type=int, default=256)
+    model.add_argument('--token-pool-heads', type=int, default=4)
+    model.add_argument('--token-pool-layers', type=int, default=2)
     encoder_source.add_argument(
         '--zoobot-ckpt',
         type=Path,
@@ -237,11 +251,49 @@ def parse_args():
 def validate_args(args):
     if not args.dataset.is_file():
         raise FileNotFoundError(f'SFH dataset not found: {args.dataset}')
-    stamp_dir = args.stamp_root / args.band
-    if not stamp_dir.is_dir():
-        raise FileNotFoundError(f'JPEG directory not found: {stamp_dir}')
+    if args.galactiktok_checkpoint is None:
+        if args.stamp_root is None:
+            raise ValueError('ZooBot training requires --stamp-root.')
+        stamp_dir = args.stamp_root / args.band
+        if not stamp_dir.is_dir():
+            raise FileNotFoundError(f'JPEG directory not found: {stamp_dir}')
+        if args.fits_root is not None or args.image_stats is not None:
+            raise ValueError('FITS inputs are only used with GalaxyTikTok.')
+    else:
+        if args.fits_root is None or args.image_stats is None:
+            raise ValueError(
+                'GalaxyTikTok training requires --fits-root and --image-stats.'
+            )
+        from .vis_fits import load_image_stats, resolve_fits_directory
+        resolve_fits_directory(args.fits_root, args.band)
+        if not args.image_stats.is_file():
+            raise FileNotFoundError(f'Image statistics not found: {args.image_stats}')
+        load_image_stats(args.image_stats, args.galactiktok_band)
+        if args.stamp_root is not None:
+            raise ValueError('Use --fits-root, not --stamp-root, with GalaxyTikTok.')
     if args.zoobot_ckpt is not None and not args.zoobot_ckpt.is_file():
         raise FileNotFoundError(f'ZooBot checkpoint not found: {args.zoobot_ckpt}')
+    if (args.galactiktok_checkpoint is not None
+            and not args.galactiktok_checkpoint.is_dir()):
+        raise FileNotFoundError(
+            f'GalaxyTikTok checkpoint not found: {args.galactiktok_checkpoint}'
+        )
+    if args.galactiktok_checkpoint is not None:
+        required = ('config.json', 'model.safetensors')
+        missing = [name for name in required
+                   if not (args.galactiktok_checkpoint / name).is_file()]
+        if missing:
+            raise FileNotFoundError(
+                f'GalaxyTikTok checkpoint is missing {missing}: '
+                f'{args.galactiktok_checkpoint}'
+            )
+        if args.unfreeze_blocks:
+            raise ValueError('--unfreeze-blocks is only supported for ZooBot.')
+    if min(args.token_pool_hidden_dim, args.token_pool_heads,
+           args.token_pool_layers) < 1:
+        raise ValueError('Token-pooler dimensions must be positive.')
+    if args.token_pool_hidden_dim % args.token_pool_heads:
+        raise ValueError('--token-pool-hidden-dim must divide by --token-pool-heads.')
     if args.resume_from is not None and not args.resume_from.is_file():
         raise FileNotFoundError(f'Resume checkpoint not found: {args.resume_from}')
     if (args.sfh_pretrained_checkpoint is not None
@@ -251,6 +303,8 @@ def validate_args(args):
         )
     if args.batch_size < 2:
         raise ValueError('--batch-size must be at least 2.')
+    if not np.isfinite(args.asinh_scale) or args.asinh_scale <= 0:
+        raise ValueError('--asinh-scale must be finite and positive.')
     if args.max_vis_mag is not None and not np.isfinite(args.max_vis_mag):
         raise ValueError('--max-vis-mag must be finite.')
     if args.queue_size < 0:
@@ -401,7 +455,10 @@ def main():
 
     datamodule = EuclidZooBotDataModule(
         sfh_path=args.dataset,
-        stamp_root=args.stamp_root,
+        stamp_root=(
+            args.fits_root
+            if args.galactiktok_checkpoint is not None else args.stamp_root
+        ),
         band=args.band,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -416,6 +473,11 @@ def main():
         require_vis_detection=args.require_vis_detection,
         selection_catalog=args.selection_catalog,
         selection_id_column=args.selection_id_column,
+        image_format=(
+            'fits' if args.galactiktok_checkpoint is not None else 'jpg'
+        ),
+        image_stats=args.image_stats,
+        asinh_scale=args.asinh_scale,
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -441,6 +503,17 @@ def main():
     model = EuclidZooBotCLIP(
         zoobot_ckpt=str(args.zoobot_ckpt) if args.zoobot_ckpt else None,
         zoobot_model_name=args.zoobot_model_name,
+        image_encoder_type=(
+            'galactiktok' if args.galactiktok_checkpoint is not None else 'zoobot'
+        ),
+        galactiktok_checkpoint=(
+            str(args.galactiktok_checkpoint)
+            if args.galactiktok_checkpoint is not None else None
+        ),
+        galactiktok_band=args.galactiktok_band,
+        token_pool_hidden_dim=args.token_pool_hidden_dim,
+        token_pool_heads=args.token_pool_heads,
+        token_pool_layers=args.token_pool_layers,
         embed_dim=args.embed_dim,
         sfh_input_dim=n_bins,
         temperature=args.temperature,
@@ -542,14 +615,19 @@ def main():
         sfh_projection_details += (
             f', residual scale={args.sfh_projection_residual_scale:g}'
         )
+    image_encoder_description = (
+        f'GalaxyTikTok {args.galactiktok_checkpoint}; attention pooler '
+        f'{args.token_pool_hidden_dim}d x {args.token_pool_layers}'
+        if args.galactiktok_checkpoint is not None else
+        f'ZooBot {args.zoobot_model_name or args.zoobot_ckpt}; image projection '
+        f'{args.image_projection}, hidden={args.image_projection_hidden_dim} x '
+        f'{args.image_projection_hidden_layers}'
+    )
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
         f'alignment objective={args.alignment_objective}; '
-        f'image encoder={args.zoobot_model_name or args.zoobot_ckpt}; '
-        f'image projection={args.image_projection}, '
-        f'hidden={args.image_projection_hidden_dim} x '
-        f'{args.image_projection_hidden_layers}; '
+        f'image encoder={image_encoder_description}; '
         f'SFH encoder={args.sfh_encoder}; '
         f'SFH encoder frozen={args.freeze_sfh_encoder}; '
         f'SFH projection={args.sfh_projection}; '

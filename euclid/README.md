@@ -953,6 +953,81 @@ and uses patience 12. Compare it with the residual-adapter run using held-out
 retrieval, aligned-versus-unaligned neighbour overlap, pairwise-geometry
 correlation, and mass/redshift-matched permutation baselines.
 
+#### GalaxyTikTok image-tokenizer experiment
+
+ZooBot is pretrained to retain Galaxy Zoo decision-tree information. To test
+whether that supervised morphology prior constrains the alignment, the same
+VIS sample can instead pretrain a label-free GalaxyTikTok transformer
+tokenizer using image reconstruction alone. This is agnostic to Galaxy Zoo
+labels, although it is not invariant to inclination, size, signal-to-noise, or
+other visually dominant factors.
+
+The first controlled experiment uses the original native-flux VIS FITS cutouts
+from `cutouts_run/cutouts/VIS`, rather than the stretched ZooBot JPEGs. The
+download requested a 10-arcsecond square at native sampling; the exact pixel
+dimensions are read from each FITS file and may be checked with:
+
+```bash
+sbatch euclid/slurm_inspect_vis_cutouts.sh
+```
+
+Before training, 4,096 randomly selected training cutouts estimate global VIS
+p1 and p99 pixel values. Every image then uses the GalaxyTikTok Euclid transform
+`asinh(20 * (flux - p1)/(p99 - p1)) / asinh(20)`. The statistics are saved as
+`image_stats.json` and reused unchanged during alignment. The normalized images
+are resized to 96 pixels, divided into 8-pixel patches, and represented by a
+12-by-12 grid of eight-dimensional continuous tokens.
+The 96-pixel pilot is intentional: applying 8-pixel patches directly to the
+224-pixel images would increase self-attention from 144 to 784 tokens. During
+alignment the tokenizer is frozen. A two-layer attention pooler with a learned
+CLS token converts the spatial grid into the 256-dimensional image embedding;
+the SFH autoencoder also remains frozen and keeps its unrestricted MLP
+adapter. The GalaxyTikTok reconstruction decoder is discarded when the
+alignment model loads, so it is not duplicated in the query and momentum
+encoders or saved in every alignment checkpoint.
+
+GalaxyTikTok must be checked out on Candide. The scripts default to
+`/n03data/huertas/python/galactiktok`; pass its actual path as the final
+argument if it lives elsewhere. First run the small reconstruction test:
+
+```bash
+sbatch euclid/slurm_pretrain_galactiktok_vis_test.sh
+```
+
+Its alignment-ready output is
+`pretraining_galactiktok_vis_test/tokenizer`, containing `config.json` and
+`model.safetensors`. The run also writes `image_stats.json`. Inspect both the validation reconstruction loss and
+`reconstruction_examples.png` (first row: inputs; second row: reconstructions)
+before running the complete pretraining:
+
+```bash
+sbatch euclid/slurm_pretrain_galactiktok_vis.sh
+```
+
+The full tokenizer is written to
+`pretraining_galactiktok_vis/tokenizer`. Test the complete frozen-tokenizer
+alignment path, then launch the full comparison against the unrestricted
+ZooBot run:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+TOKENIZER=${BASE}/pretraining_galactiktok_vis/tokenizer
+
+sbatch euclid/slurm_train_galactiktok_clip_bright_test.sh "${TOKENIZER}" "${AE}"
+sbatch euclid/slurm_train_galactiktok_clip_bright.sh "${TOKENIZER}" "${AE}"
+```
+
+This first run uses the exact-pair CLIP objective, the same split, fixed SFH
+encoder, batch size, optimizer scale, and SFH adapter as the unrestricted
+ZooBot experiment. Compare held-out retrieval and geometry diagnostics, then
+measure how well edge-on probability, apparent and physical size, spiral-arm
+probability, redshift, and S/N can be predicted from each frozen backbone and
+aligned image embedding. If the reconstruction tokenizer reduces Galaxy Zoo
+label predictability but also loses fine spiral structure, the next useful
+ablation is a 224-pixel tokenizer with 16-pixel patches (196 tokens), rather
+than a 224-pixel/8-pixel model.
+
 #### AE-aware false-negative experiment
 
 Exact-pair InfoNCE treats every off-diagonal image--SFH combination as a

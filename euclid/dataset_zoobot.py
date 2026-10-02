@@ -12,6 +12,12 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 from .training_index import build_pair_index
+from .vis_fits import (
+    VISFitsTransform,
+    load_image_stats,
+    resolve_fits_directory,
+    vis_fits_path,
+)
 
 
 def _inference_transform(image_size, num_output_channels=3):
@@ -42,18 +48,33 @@ class EuclidZooBotDataset(Dataset):
     """Lazy HDF5 dataset with posterior sampling for the training split."""
 
     def __init__(self, sfh_path, stamp_root, rows, galaxy_ids, band='VIS',
-                 training=True, sample_posterior=True, image_size=224):
+                 training=True, sample_posterior=True, image_size=224,
+                 image_format='jpg', image_stats=None, asinh_scale=20.0):
         self.sfh_path = str(Path(sfh_path))
-        self.stamp_dir = Path(stamp_root) / band
+        self.image_format = image_format
+        if image_format == 'jpg':
+            self.stamp_dir = Path(stamp_root) / band
+        elif image_format == 'fits':
+            self.stamp_dir = resolve_fits_directory(stamp_root, band)
+        else:
+            raise ValueError("image_format must be 'jpg' or 'fits'.")
         self.band = band
         self.rows = np.asarray(rows, dtype=np.int64)
         self.galaxy_ids = np.asarray(galaxy_ids, dtype=np.int64)
         self.training = training
         self.sample_posterior = sample_posterior
-        self.transform = (
-            _training_transform(image_size) if training
-            else _inference_transform(image_size)
-        )
+        if image_format == 'jpg':
+            self.transform = (
+                _training_transform(image_size) if training
+                else _inference_transform(image_size)
+            )
+        else:
+            if image_stats is None:
+                raise ValueError('FITS image loading requires image_stats.')
+            p_lo, p_hi = load_image_stats(image_stats, 'euclid-vis')
+            self.transform = VISFitsTransform(
+                image_size, p_lo, p_hi, asinh_scale, training,
+            )
         self._h5 = None
         self._h5_pid = None
         if len(self.rows) != len(self.galaxy_ids):
@@ -109,9 +130,13 @@ class EuclidZooBotDataset(Dataset):
         else:
             sfh_reference = sfh
 
-        path = self.stamp_dir / f'{self.band}_{galaxy_id}.jpg'
-        with Image.open(path) as image:
-            image_tensor = self.transform(image.convert('L'))
+        if self.image_format == 'jpg':
+            path = self.stamp_dir / f'{self.band}_{galaxy_id}.jpg'
+            with Image.open(path) as image:
+                image_tensor = self.transform(image.convert('L'))
+        else:
+            path = vis_fits_path(self.stamp_dir, galaxy_id, self.band)
+            image_tensor = self.transform(path)
         return {
             'image': image_tensor,
             'sfh': torch.from_numpy(sfh.copy()),
@@ -134,7 +159,8 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                  vis_flux_column='flux_detection_total',
                  vis_detection_column='vis_det',
                  require_vis_detection=True, selection_catalog=None,
-                 selection_id_column='object_id'):
+                 selection_id_column='object_id', image_format='jpg',
+                 image_stats=None, asinh_scale=20.0):
         super().__init__()
         self.sfh_path = sfh_path
         self.stamp_root = stamp_root
@@ -152,6 +178,9 @@ class EuclidZooBotDataModule(L.LightningDataModule):
         self.require_vis_detection = require_vis_detection
         self.selection_catalog = selection_catalog
         self.selection_id_column = selection_id_column
+        self.image_format = image_format
+        self.image_stats = image_stats
+        self.asinh_scale = asinh_scale
         self.pair_index = None
 
     def setup(self, stage=None):
@@ -162,6 +191,7 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                 self.max_vis_mag, self.vis_flux_column,
                 self.vis_detection_column, self.require_vis_detection,
                 self.selection_catalog, self.selection_id_column,
+                self.image_format,
             )
             index = self.pair_index
             selection = (
@@ -169,7 +199,8 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                 if self.max_vis_mag is not None else ''
             )
             print(
-                f'[EuclidZooBot] stamps={index.n_stamp_paired:,}/{index.n_sfh:,}; '
+                f'[EuclidImageSFH:{self.image_format}] '
+                f'images={index.n_stamp_paired:,}/{index.n_sfh:,}; '
                 f'paired after selection={index.n_paired:,}{selection}; '
                 f'train={len(index.train_rows):,}, val={len(index.val_rows):,}; '
                 f'{index.n_bins} bins, {index.n_realizations} realizations',
@@ -181,6 +212,9 @@ class EuclidZooBotDataModule(L.LightningDataModule):
             band=self.band,
             sample_posterior=self.sample_posterior,
             image_size=self.image_size,
+            image_format=self.image_format,
+            image_stats=self.image_stats,
+            asinh_scale=self.asinh_scale,
         )
         self.train_ds = EuclidZooBotDataset(
             rows=self.pair_index.train_rows,

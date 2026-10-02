@@ -4,6 +4,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from astropy.io import fits
 from PIL import Image
 
 from euclid.training_index import build_pair_index, inspect_sfh_file
@@ -97,6 +98,23 @@ class EuclidTrainingIndexTest(unittest.TestCase):
         )
         self.assertEqual(len(index.train_rows), 6)
         self.assertEqual(len(index.val_rows), 2)
+
+    def test_native_fits_pairing(self):
+        fits_dir = self.root / 'cutouts_run' / 'cutouts' / 'VIS'
+        fits_dir.mkdir(parents=True)
+        for object_id in self.available:
+            fits.PrimaryHDU(np.zeros((10, 10), dtype=np.float32)).writeto(
+                fits_dir / f'{int(object_id)}.fits',
+            )
+        index = build_pair_index(
+            self.sfh_path,
+            self.root / 'cutouts_run',
+            val_fraction=0.25,
+            seed=7,
+            image_format='fits',
+        )
+        combined = np.concatenate((index.train_ids, index.val_ids))
+        self.assertSetEqual(set(combined), set(self.available))
 
     def test_duplicate_ids_are_rejected(self):
         duplicate_path = self.root / 'duplicate.h5'

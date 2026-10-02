@@ -82,7 +82,10 @@ _PROPERTY_LABELS = {
     'log_stellar_mass': 'log M★',
     'sersic_index': 'Sérsic index n',
     'sersic_radius': 'VIS Sérsic radius [arcsec]',
+    'log_sersic_radius': 'log10 VIS Sérsic radius [arcsec]',
     'sersic_radius_kpc': 'VIS Sérsic radius [proper kpc]',
+    'log_sersic_radius_kpc': 'log10 VIS Sérsic radius [proper kpc]',
+    'log_sersic_radius_over_fwhm': 'log10(VIS Sérsic radius / FWHM)',
     'axis_ratio': 'Sérsic axis ratio b/a',
     'fwhm': 'FWHM',
     'kron_radius': 'Kron radius',
@@ -140,6 +143,9 @@ _PROPERTY_PALETTES = {
     'Redshift z': 'plasma',
     'VIS total magnitude (AB)': 'viridis',
     'log M★': 'inferno',
+    'log10 VIS Sérsic radius [arcsec]': 'inferno',
+    'log10 VIS Sérsic radius [proper kpc]': 'inferno',
+    'log10(VIS Sérsic radius / FWHM)': 'inferno',
     'Matched image–SFH cosine': 'coolwarm',
     'Image→SFH rank percentile': 'viridis',
     'SFH→image rank percentile': 'viridis',
@@ -350,13 +356,36 @@ def load_data(h5_path, archive_paths, labels=None):
         redshift = np.full(len(galaxy_ids), np.nan)
     redshift = np.asarray(redshift, dtype=float)
     angular_label = _PROPERTY_LABELS['sersic_radius']
+    log_angular_label = _PROPERTY_LABELS['log_sersic_radius']
     physical_label = _PROPERTY_LABELS['sersic_radius_kpc']
+    log_physical_label = _PROPERTY_LABELS['log_sersic_radius_kpc']
+    resolution_label = _PROPERTY_LABELS['log_sersic_radius_over_fwhm']
+    fwhm_label = _PROPERTY_LABELS['fwhm']
     for run in runs.values():
         angular_radius = run['properties'].get(angular_label)
         if angular_radius is not None:
-            run['properties'][physical_label] = angular_radius_to_proper_kpc(
-                angular_radius, redshift,
-            )
+            angular_radius = np.asarray(angular_radius, dtype=float)
+            physical_radius = angular_radius_to_proper_kpc(angular_radius, redshift)
+            log_angular = np.full(angular_radius.shape, np.nan, dtype=float)
+            log_physical = np.full(physical_radius.shape, np.nan, dtype=float)
+            valid_angular = np.isfinite(angular_radius) & (angular_radius > 0)
+            valid_physical = np.isfinite(physical_radius) & (physical_radius > 0)
+            log_angular[valid_angular] = np.log10(angular_radius[valid_angular])
+            log_physical[valid_physical] = np.log10(physical_radius[valid_physical])
+            run['properties'][log_angular_label] = log_angular
+            run['properties'][physical_label] = physical_radius
+            run['properties'][log_physical_label] = log_physical
+            fwhm = run['properties'].get(fwhm_label)
+            if fwhm is not None:
+                fwhm = np.asarray(fwhm, dtype=float)
+                log_resolution = np.full(angular_radius.shape, np.nan, dtype=float)
+                valid_resolution = (
+                    valid_angular & np.isfinite(fwhm) & (fwhm > 0)
+                )
+                log_resolution[valid_resolution] = np.log10(
+                    angular_radius[valid_resolution] / fwhm[valid_resolution]
+                )
+                run['properties'][resolution_label] = log_resolution
     return {
         'galaxy_ids': galaxy_ids,
         'h5_rows': h5_rows,

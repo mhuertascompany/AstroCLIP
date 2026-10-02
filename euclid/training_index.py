@@ -7,6 +7,7 @@ import h5py
 import numpy as np
 
 from .vis_selection import bright_row_mask
+from .vis_fits import resolve_fits_directory, vis_fits_path
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
                      vis_flux_column='flux_detection_total',
                      vis_detection_column='vis_det',
                      require_vis_detection=True, selection_catalog=None,
-                     selection_id_column='object_id'):
+                     selection_id_column='object_id', image_format='jpg'):
     """Match IDs by filename and make a deterministic random train/val split."""
     if not 0 < val_fraction < 1:
         raise ValueError('val_fraction must lie strictly between zero and one.')
@@ -70,11 +71,20 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
         raise ValueError('max_pairs must be at least two.')
 
     ids, n_bins, n_realizations = inspect_sfh_file(sfh_path)
-    stamp_dir = Path(stamp_root) / band
+    if image_format not in {'jpg', 'fits'}:
+        raise ValueError("image_format must be 'jpg' or 'fits'.")
+    stamp_dir = (
+        Path(stamp_root) / band if image_format == 'jpg'
+        else resolve_fits_directory(stamp_root, band)
+    )
     if not stamp_dir.is_dir():
         raise FileNotFoundError(f'Stamp directory not found: {stamp_dir}')
     paired = np.array([
-        (stamp_dir / f'{band}_{int(object_id)}.jpg').is_file()
+        (
+            stamp_dir / f'{band}_{int(object_id)}.jpg'
+            if image_format == 'jpg'
+            else vis_fits_path(stamp_dir, object_id, band)
+        ).is_file()
         for object_id in ids
     ], dtype=bool)
     n_stamp_paired = int(np.count_nonzero(paired))

@@ -64,6 +64,7 @@ from .zoobot_encoder import (
     MultiFilterZooBotImageEncoder,
     ZooBotImageEncoder,
 )
+from .galactiktok_encoder import GalactikTokImageEncoder
 
 
 class ResidualSFHProjection(nn.Module):
@@ -180,12 +181,43 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         cyclip_clip_weight: float = 0.25,
         cyclip_inmodal_weight: float = 1.0,
         cyclip_crossmodal_weight: float = 0.25,
+        image_encoder_type: str = 'zoobot',
+        galactiktok_checkpoint: str | None = None,
+        galactiktok_band: str = 'euclid-vis',
+        token_pool_hidden_dim: int = 256,
+        token_pool_heads: int = 4,
+        token_pool_layers: int = 2,
     ) -> None:
         super().__init__()
         if alignment_objective not in {'clip', 'pcmepp', 'cwcl', 'cyclip'}:
             raise ValueError(
                 'alignment_objective must be clip, pcmepp, cwcl, or cyclip.'
             )
+        if image_encoder_type not in {'zoobot', 'galactiktok'}:
+            raise ValueError('image_encoder_type must be zoobot or galactiktok.')
+        if image_encoder_type == 'zoobot':
+            if (zoobot_ckpt is None) == (zoobot_model_name is None):
+                raise ValueError(
+                    'ZooBot requires exactly one of zoobot_ckpt or '
+                    'zoobot_model_name.'
+                )
+            if galactiktok_checkpoint is not None:
+                raise ValueError('Do not combine ZooBot and GalaxyTikTok checkpoints.')
+        else:
+            if galactiktok_checkpoint is None:
+                raise ValueError('GalaxyTikTok requires galactiktok_checkpoint.')
+            if zoobot_ckpt is not None or zoobot_model_name is not None:
+                raise ValueError('Do not combine GalaxyTikTok and ZooBot checkpoints.')
+            if unfreeze_blocks:
+                raise ValueError(
+                    'GalaxyTikTok is frozen in this experiment; use unfreeze_blocks=0.'
+                )
+            if min(token_pool_hidden_dim, token_pool_heads, token_pool_layers) < 1:
+                raise ValueError('Token-pooler dimensions must be positive.')
+            if token_pool_hidden_dim % token_pool_heads:
+                raise ValueError(
+                    'token_pool_hidden_dim must be divisible by token_pool_heads.'
+                )
         if pcme_pseudo_positive_weight < 0:
             raise ValueError('pcme_pseudo_positive_weight cannot be negative.')
         if pcme_vib_weight < 0:
@@ -323,15 +355,25 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         self.save_hyperparameters()
 
         # ── main encoders (receive gradients) ────────────────────────────────
-        self.image_encoder = ZooBotImageEncoder(
-            ckpt_path=zoobot_ckpt,
-            model_name=zoobot_model_name,
-            embed_dim=embed_dim,
-            unfreeze_blocks=unfreeze_blocks,
-            projection_type=image_projection_type,
-            projection_hidden_dim=image_projection_hidden_dim,
-            projection_hidden_layers=image_projection_hidden_layers,
-        )
+        if image_encoder_type == 'zoobot':
+            self.image_encoder = ZooBotImageEncoder(
+                ckpt_path=zoobot_ckpt,
+                model_name=zoobot_model_name,
+                embed_dim=embed_dim,
+                unfreeze_blocks=unfreeze_blocks,
+                projection_type=image_projection_type,
+                projection_hidden_dim=image_projection_hidden_dim,
+                projection_hidden_layers=image_projection_hidden_layers,
+            )
+        else:
+            self.image_encoder = GalactikTokImageEncoder(
+                checkpoint=galactiktok_checkpoint,
+                embed_dim=embed_dim,
+                band=galactiktok_band,
+                pool_hidden_dim=token_pool_hidden_dim,
+                pool_heads=token_pool_heads,
+                pool_layers=token_pool_layers,
+            )
         if sfh_encoder_type == 'mlp':
             self.sfh_encoder = SFHEncoder(
                 input_dim=sfh_input_dim,
@@ -477,7 +519,7 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         return self.project_image(self.encode_image_latent(image))
 
     def encode_image_latent(self, image: torch.Tensor) -> torch.Tensor:
-        """Return frozen ZooBot features before the trainable CLIP adapter."""
+        """Return frozen image features before the trainable alignment adapter."""
         return self.image_encoder.encode_backbone(image)
 
     def project_image(self, latent: torch.Tensor) -> torch.Tensor:
