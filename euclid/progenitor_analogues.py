@@ -24,6 +24,7 @@ from astropy.table import Table
 from .cosmic_sfh import COSMOLOGY
 from .main_sequence_sfh import main_sequence_along_sfh
 from .recent_ms import recent_offset
+from .sfh_shape import sfh_recent_activity
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -714,6 +715,27 @@ def _sfh_delta_ms_100myr(
     return float(recent_offset(track, 1.0e8, floor=-np.inf))
 
 
+def _sfh_log_sfr_100myr_r0(
+    data: dict[str, np.ndarray | float], index: int
+) -> float:
+    """Return reconstructed log SFR averaged over the last 100 Myr, with R=0."""
+    sfh = np.asarray(data["sfh"])[index]
+    epsilon = float(data["epsilon"])
+    activity = sfh_recent_activity(
+        np.log10(sfh[None, :] + epsilon),
+        np.asarray(data["time_grid"]),
+        epsilon=epsilon,
+        age_myr=np.array(
+            [float(np.asarray(data["time_norm_gyr"])[index]) * 1000.0]
+        ),
+    )
+    log_specific_sfr = float(
+        activity["sfh_log_sfr_per_stellar_mass_100myr_r0"][0]
+    )
+    log_mass = float(np.asarray(data["catalog_log_mass"])[index])
+    return log_mass + log_specific_sfr
+
+
 def _format_delta_ms(value: float) -> str:
     """Format a finite offset or identify an exactly zero recent SFH rate."""
     if np.isneginf(value):
@@ -804,7 +826,7 @@ def make_report(
     )
 
     with PdfPages(pdf_path) as pdf:
-        fig = plt.figure(figsize=(18, 9.5), layout="constrained")
+        fig = plt.figure(figsize=(18, 11.5), layout="constrained")
         grid = fig.add_gridspec(2, 3, width_ratios=(1.05, 1.50, 1.65))
         image_ax = fig.add_subplot(grid[0, 0])
         with Image.open(stamps / f"VIS_{descendant_id}.jpg") as image:
@@ -883,7 +905,9 @@ def make_report(
             title="Numbered analogue track in the joint embedding",
         )
 
-        right = grid[:, 2].subgridspec(4, 1, height_ratios=(1.45, 0.78, 0.78, 0.62))
+        right = grid[:, 2].subgridspec(
+            5, 1, height_ratios=(1.45, 0.78, 0.88, 0.78, 0.62)
+        )
         table_ax = fig.add_subplot(right[0])
         table_ax.axis("off")
         display = census.copy()
@@ -949,7 +973,70 @@ def make_report(
             fontsize=7, loc="best",
         )
 
-        morphology_ax = fig.add_subplot(right[2])
+        sfr_mass_ax = fig.add_subplot(right[2])
+        sfr_mass_centroids = []
+        for stage_number, (stage, color) in enumerate(zip(stages, colors), start=1):
+            selected = candidates[candidates.stage == stage_number]
+            if selected.empty:
+                continue
+            indices = selected.bundle_index.to_numpy(dtype=int)
+            candidate_mass = np.asarray(data["catalog_log_mass"])[indices]
+            candidate_sfr = np.array(
+                [_sfh_log_sfr_100myr_r0(data, index) for index in indices],
+                dtype=float,
+            )
+            finite = np.isfinite(candidate_mass + candidate_sfr)
+            if not finite.any():
+                continue
+            sfr_mass_ax.scatter(
+                candidate_mass[finite], candidate_sfr[finite], s=29,
+                color=[color], alpha=0.55, linewidths=0, zorder=2,
+            )
+            centroid = np.array(
+                [np.median(candidate_mass[finite]), np.median(candidate_sfr[finite])]
+            )
+            sfr_mass_centroids.append((float(stage["state_lookback_gyr"]), centroid))
+            sfr_mass_ax.scatter(
+                *centroid, s=58, color=[color], edgecolor="white",
+                linewidth=0.7, zorder=4,
+            )
+            sfr_mass_ax.annotate(
+                str(stage_number), xy=centroid, xytext=(4, 3),
+                textcoords="offset points", fontsize=6.2, fontweight="bold",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.72, pad=0.6),
+            )
+        descendant_sfr = _sfh_log_sfr_100myr_r0(data, descendant_index)
+        descendant_mass = float(
+            np.asarray(data["catalog_log_mass"])[descendant_index]
+        )
+        if np.isfinite(descendant_mass + descendant_sfr):
+            if sfr_mass_centroids:
+                ordered_centroids = [
+                    centroid for _, centroid in sorted(
+                        sfr_mass_centroids, key=lambda item: item[0], reverse=True
+                    )
+                ]
+                sfr_mass_path = np.vstack(
+                    ordered_centroids + [np.array([descendant_mass, descendant_sfr])]
+                )
+                sfr_mass_ax.plot(
+                    sfr_mass_path[:, 0], sfr_mass_path[:, 1], "k--",
+                    lw=1.0, alpha=0.72, zorder=1,
+                )
+            sfr_mass_ax.scatter(
+                descendant_mass, descendant_sfr, marker="*", s=120,
+                color="#d73027", edgecolor="white", linewidth=0.7,
+                label="descendant", zorder=5,
+            )
+        sfr_mass_ax.set(
+            xlabel="PHZ log stellar mass",
+            ylabel="SFH log SFR100 [M$_\\odot$ yr$^{-1}$]",
+            title="Progenitor evolution in the SFR-mass plane",
+        )
+        sfr_mass_ax.grid(alpha=0.15)
+        sfr_mass_ax.legend(fontsize=6.5, loc="best")
+
+        morphology_ax = fig.add_subplot(right[3])
         morphology_fields = [
             ("zoobot_smooth_conditional_fraction", "P(smooth)", "#3B6FB6", "o"),
             ("zoobot_spiral_probability", "P(spiral arms)", "#2A9D5B", "s"),
@@ -996,7 +1083,7 @@ def make_report(
         redshift_ax.set_xlabel("Descendant-frame redshift", fontsize=7, labelpad=1)
         redshift_ax.tick_params(axis="x", labelsize=6.5, pad=1)
 
-        notes_ax = fig.add_subplot(right[3])
+        notes_ax = fig.add_subplot(right[4])
         notes_ax.axis("off")
         global_note = (
             f"- complete fractional-history shape (weight={inferred_global_weight:.2g})\n\n"
@@ -1013,8 +1100,9 @@ def make_report(
             + "Candidate redshift, morphology, deltaMS,\n"
             "image embedding, and UMAP position are\n"
             "outcomes, not selection variables. The\n"
-            "dashed path joins ensemble medians, not\n"
-            "one galaxy's orbit."
+            "dashed UMAP and SFR-mass paths join\n"
+            "ensemble medians, not one galaxy's orbit.\n"
+            "SFR-mass uses reconstructed 100 Myr SFR, R=0."
         )
         notes_ax.text(
             0, 1, notes_text,
