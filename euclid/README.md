@@ -1034,20 +1034,20 @@ Its preview follows GalaxyTikTok's MAE evaluation: observed input, smoothed
 target, masked target, and a composition containing model predictions only at
 the masked locations. Decoding an entirely unmasked image puts an MAE decoder
 in a regime it never saw during training and is not a valid reconstruction
-diagnostic. Regenerate a preview from an existing tokenizer without retraining:
+diagnostic. Regenerate a preview from the original masked tokenizer without
+retraining:
+
+```bash
+sbatch euclid/slurm_preview_galactiktok_vis.sh
+```
+
+To preview the smaller smoothed-target ablation instead, pass its tokenizer
+and target sigma:
 
 ```bash
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
-GALACTIKTOK=/n03data/huertas/python/galactiktok/galactiktok
-export PYTHONPATH=${GALACTIKTOK}/src:${PYTHONPATH:-}
-
-python -m euclid.preview_galactiktok_vis \
-    --tokenizer ${BASE}/pretraining_galactiktok_vis_denoised_small/tokenizer \
-    --dataset ${BASE}/sfh_clip_150k.h5 \
-    --fits-root ${BASE}/cutouts_run \
-    --image-stats ${BASE}/pretraining_galactiktok_vis/image_stats.json \
-    --target-gaussian-sigma 0.7 \
-    --output ${BASE}/pretraining_galactiktok_vis_denoised_small/reconstruction_examples_mae.png
+sbatch euclid/slurm_preview_galactiktok_vis.sh \
+    ${BASE}/pretraining_galactiktok_vis_denoised_small/tokenizer 0.7
 ```
 
 The smoothed target is only a signal proxy, so compare the representation with
