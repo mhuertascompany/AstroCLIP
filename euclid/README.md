@@ -1030,10 +1030,29 @@ with:
 sbatch euclid/slurm_pretrain_galactiktok_vis_denoised_small.sh
 ```
 
-Its preview has three rows: observed input, smoothed training target, and
-reconstruction. The smoothed target is only a signal proxy, so compare the
-resulting representation with the unmasked model using noise-perturbation
-invariance and morphology/size probes rather than reconstruction loss alone.
+Its preview follows GalaxyTikTok's MAE evaluation: observed input, smoothed
+target, masked target, and a composition containing model predictions only at
+the masked locations. Decoding an entirely unmasked image puts an MAE decoder
+in a regime it never saw during training and is not a valid reconstruction
+diagnostic. Regenerate a preview from an existing tokenizer without retraining:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+GALACTIKTOK=/n03data/huertas/python/galactiktok/galactiktok
+export PYTHONPATH=${GALACTIKTOK}/src:${PYTHONPATH:-}
+
+python -m euclid.preview_galactiktok_vis \
+    --tokenizer ${BASE}/pretraining_galactiktok_vis_denoised_small/tokenizer \
+    --dataset ${BASE}/sfh_clip_150k.h5 \
+    --fits-root ${BASE}/cutouts_run \
+    --image-stats ${BASE}/pretraining_galactiktok_vis/image_stats.json \
+    --target-gaussian-sigma 0.7 \
+    --output ${BASE}/pretraining_galactiktok_vis_denoised_small/reconstruction_examples_mae.png
+```
+
+The smoothed target is only a signal proxy, so compare the representation with
+the unmasked model using noise-perturbation invariance and morphology/size
+probes rather than reconstruction loss alone.
 
 This first run uses the exact-pair CLIP objective, the same split, fixed SFH
 encoder, batch size, optimizer scale, and SFH adapter as the unrestricted

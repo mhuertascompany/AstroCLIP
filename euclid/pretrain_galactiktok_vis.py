@@ -362,22 +362,52 @@ def main():
         num_workers=0,
     )
     preview, _ = next(iter(preview_loader))
-    preview_target = model._gaussian_target(
-        preview, model.target_gaussian_sigma,
-    )
+    preview_target = model._gaussian_target(preview, model.target_gaussian_sigma)
     with torch.no_grad():
-        reconstruction = model.tokenizer(
+        tokens = model.tokenizer.encode(
             Image(flux=preview, bands=[args.tokenizer_band]),
-        ).flux
+            mask_fraction=model.tokenizer.encoder_mask_fraction,
+        )
+        reconstruction = model.tokenizer.decode(tokens).flux
+    from galactiktok.models.image_transformer.modeling_image_transformer import (
+        patchify,
+        unpatchify,
+    )
+    patch_size = (model.tokenizer.patch_size, model.tokenizer.patch_size)
+    target_patches = patchify(preview_target, patch_size)
+    reconstruction_patches = patchify(reconstruction, patch_size)
+    image_shape = tuple(preview.shape[-2:])
+    if tokens.mask_idx is None:
+        masked_preview = preview_target
+        composed_preview = reconstruction
+    else:
+        masked_patches = target_patches.clone()
+        composed_patches = target_patches.clone()
+        batch_index = torch.arange(preview.size(0)).unsqueeze(-1)
+        masked_patches[batch_index, tokens.mask_idx] = 0.0
+        composed_patches[batch_index, tokens.mask_idx] = reconstruction_patches[
+            batch_index, tokens.mask_idx
+        ]
+        masked_preview = unpatchify(
+            masked_patches, patch_size, original_size=image_shape,
+        )
+        composed_preview = unpatchify(
+            composed_patches, patch_size, original_size=image_shape,
+        )
     save_image(
-        torch.cat((preview, preview_target, reconstruction.clamp(0, 1)), dim=0),
+        torch.cat((
+            preview,
+            preview_target,
+            masked_preview,
+            composed_preview.clamp(0, 1),
+        ), dim=0),
         args.output_dir / 'reconstruction_examples.png',
         nrow=len(preview),
     )
     print(f'Best checkpoint: {callback.best_model_path}', flush=True)
     print(f'Alignment-ready tokenizer: {tokenizer_dir}', flush=True)
     print(
-        'Reconstruction preview (input / target / reconstruction): '
+        'MAE preview (input / target / masked target / composed prediction): '
         f'{args.output_dir / "reconstruction_examples.png"}',
         flush=True,
     )
