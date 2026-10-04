@@ -36,6 +36,13 @@ def parse_args():
                       help='Directory containing BAND/BAND_object_id.jpg for ZooBot.')
     data.add_argument('--fits-root', type=Path,
                       help='Native cutout run containing cutouts/VIS/object_id.fits.')
+    data.add_argument(
+        '--eligibility-stamp-root', type=Path,
+        help=(
+            'Optional BAND/BAND_object_id.jpg root used only to restrict the '
+            'training population while images are read from --fits-root.'
+        ),
+    )
     data.add_argument('--image-stats', type=Path,
                       help='GalaxyTikTok-style global VIS percentile JSON.')
     data.add_argument('--asinh-scale', type=float, default=20.0)
@@ -259,6 +266,10 @@ def validate_args(args):
             raise FileNotFoundError(f'JPEG directory not found: {stamp_dir}')
         if args.fits_root is not None or args.image_stats is not None:
             raise ValueError('FITS inputs are only used with GalaxyTikTok.')
+        if args.eligibility_stamp_root is not None:
+            raise ValueError(
+                '--eligibility-stamp-root is only needed with GalaxyTikTok.'
+            )
     else:
         if args.fits_root is None or args.image_stats is None:
             raise ValueError(
@@ -478,6 +489,7 @@ def main():
         ),
         image_stats=args.image_stats,
         asinh_scale=args.asinh_scale,
+        eligibility_stamp_root=args.eligibility_stamp_root,
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)

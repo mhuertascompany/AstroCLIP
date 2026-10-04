@@ -63,7 +63,8 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
                      vis_flux_column='flux_detection_total',
                      vis_detection_column='vis_det',
                      require_vis_detection=True, selection_catalog=None,
-                     selection_id_column='object_id', image_format='jpg'):
+                     selection_id_column='object_id', image_format='jpg',
+                     eligibility_stamp_root=None):
     """Match IDs by filename and make a deterministic random train/val split."""
     if not 0 < val_fraction < 1:
         raise ValueError('val_fraction must lie strictly between zero and one.')
@@ -88,6 +89,16 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
         for object_id in ids
     ], dtype=bool)
     n_stamp_paired = int(np.count_nonzero(paired))
+    if eligibility_stamp_root is not None:
+        eligibility_dir = Path(eligibility_stamp_root) / band
+        if not eligibility_dir.is_dir():
+            raise FileNotFoundError(
+                f'Eligibility stamp directory not found: {eligibility_dir}'
+            )
+        paired &= np.array([
+            (eligibility_dir / f'{band}_{int(object_id)}.jpg').is_file()
+            for object_id in ids
+        ], dtype=bool)
     if max_vis_mag is not None:
         bright, _ = bright_row_mask(
             sfh_path, max_vis_mag, vis_flux_column,

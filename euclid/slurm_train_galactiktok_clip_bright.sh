@@ -26,7 +26,7 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 BASE_DIR=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
 TOKENIZER_DIR=$1
 AUTOENCODER_CKPT=$2
-GALACTIKTOK_ROOT=${3:-/n03data/huertas/python/galactiktok}
+GALACTIKTOK_ROOT=${3:-/n03data/huertas/python/galactiktok/galactiktok}
 RESUME_FROM=${4:-}
 OUTPUT_DIR=${BASE_DIR}/training_bright_galactiktok_clip
 
@@ -48,6 +48,7 @@ mkdir -p "${OUTPUT_DIR}"
 python -u -m euclid.train_zoobot_clip \
     --dataset "${BASE_DIR}/sfh_clip_150k.h5" \
     --fits-root "${BASE_DIR}/cutouts_run" \
+    --eligibility-stamp-root "${BASE_DIR}/zoobot_stamps_rmax" \
     --image-stats "${TOKENIZER_DIR}/../image_stats.json" \
     --band VIS \
     --galactiktok-checkpoint "${TOKENIZER_DIR}" \

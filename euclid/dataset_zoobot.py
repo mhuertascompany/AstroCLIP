@@ -160,7 +160,8 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                  vis_detection_column='vis_det',
                  require_vis_detection=True, selection_catalog=None,
                  selection_id_column='object_id', image_format='jpg',
-                 image_stats=None, asinh_scale=20.0):
+                 image_stats=None, asinh_scale=20.0,
+                 eligibility_stamp_root=None):
         super().__init__()
         self.sfh_path = sfh_path
         self.stamp_root = stamp_root
@@ -181,6 +182,7 @@ class EuclidZooBotDataModule(L.LightningDataModule):
         self.image_format = image_format
         self.image_stats = image_stats
         self.asinh_scale = asinh_scale
+        self.eligibility_stamp_root = eligibility_stamp_root
         self.pair_index = None
 
     def setup(self, stage=None):
@@ -192,6 +194,7 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                 self.vis_detection_column, self.require_vis_detection,
                 self.selection_catalog, self.selection_id_column,
                 self.image_format,
+                self.eligibility_stamp_root,
             )
             index = self.pair_index
             selection = (

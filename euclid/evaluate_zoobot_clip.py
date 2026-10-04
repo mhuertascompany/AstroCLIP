@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 
 from .dataset_zoobot import EuclidZooBotDataset
 from .training_index import inspect_sfh_file
+from .vis_fits import resolve_fits_directory, vis_fits_path
 
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,8 @@ def _read_rows(dataset, rows):
     return np.asarray(dataset[rows[order]])[inverse]
 
 
-def validate_saved_split(dataset_path, split_path, stamp_root, band='VIS'):
+def validate_saved_split(dataset_path, split_path, stamp_root, band='VIS',
+                         image_format='jpg'):
     """Validate IDs, row assignments, train/validation separation, and stamps."""
     all_ids, n_bins, n_realizations = inspect_sfh_file(dataset_path)
     split = np.load(split_path)
@@ -68,10 +70,19 @@ def validate_saved_split(dataset_path, split_path, stamp_root, band='VIS'):
     if np.intersect1d(train_ids, val_ids).size:
         raise ValueError('Training and validation galaxy IDs overlap.')
 
-    stamp_dir = Path(stamp_root) / band
+    if image_format == 'jpg':
+        stamp_dir = Path(stamp_root) / band
+    elif image_format == 'fits':
+        stamp_dir = resolve_fits_directory(stamp_root, band)
+    else:
+        raise ValueError("image_format must be 'jpg' or 'fits'.")
     missing_stamps = [
         int(galaxy_id) for galaxy_id in val_ids
-        if not (stamp_dir / f'{band}_{int(galaxy_id)}.jpg').is_file()
+        if not (
+            stamp_dir / f'{band}_{int(galaxy_id)}.jpg'
+            if image_format == 'jpg'
+            else vis_fits_path(stamp_dir, galaxy_id, band)
+        ).is_file()
     ]
     if missing_stamps:
         preview = ', '.join(map(str, missing_stamps[:5]))
@@ -82,7 +93,9 @@ def validate_saved_split(dataset_path, split_path, stamp_root, band='VIS'):
 
 
 def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
-                      image_size, batch_size, num_workers):
+                      image_size, batch_size, num_workers,
+                      image_format='jpg', image_stats=None,
+                      asinh_scale=20.0):
     dataset = EuclidZooBotDataset(
         sfh_path=dataset_path,
         stamp_root=stamp_root,
@@ -92,6 +105,9 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
         training=False,
         sample_posterior=False,
         image_size=image_size,
+        image_format=image_format,
+        image_stats=image_stats,
+        asinh_scale=asinh_scale,
     )
     return DataLoader(
         dataset,
@@ -597,6 +613,15 @@ def parse_args():
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--stamp-root', type=Path, required=True)
+    parser.add_argument(
+        '--image-format', choices=('jpg', 'fits'), default='jpg',
+        help='Input image format. Use fits for GalaxyTikTok checkpoints.',
+    )
+    parser.add_argument(
+        '--image-stats', type=Path,
+        help='Required global normalization JSON when --image-format=fits.',
+    )
+    parser.add_argument('--asinh-scale', type=float, default=20.0)
     parser.add_argument('--split', type=Path, required=True,
                         help='pair_split.npz written by the training run.')
     parser.add_argument('--output-dir', type=Path, required=True)
@@ -628,6 +653,13 @@ def main():
     for path in (args.checkpoint, args.dataset, args.split):
         if not path.is_file():
             raise FileNotFoundError(path)
+    if args.image_format == 'fits':
+        if args.image_stats is None or not args.image_stats.is_file():
+            raise FileNotFoundError(
+                f'FITS evaluation requires --image-stats: {args.image_stats}'
+            )
+    elif args.image_stats is not None:
+        raise ValueError('--image-stats is only used with --image-format=fits.')
     if args.device == 'auto':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
@@ -645,6 +677,7 @@ def main():
     (train_rows, train_ids, val_rows, val_ids,
      n_bins, n_realizations) = validate_saved_split(
         args.dataset, args.split, args.stamp_root, args.band,
+        args.image_format,
     )
     log.info('Validated saved split: train=%d, validation=%d',
              len(train_rows), len(val_rows))
@@ -656,6 +689,7 @@ def main():
     loader = extraction_loader(
         args.dataset, args.stamp_root, val_rows, val_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
+        args.image_format, args.image_stats, args.asinh_scale,
     )
     extracted = extract_embeddings(
         model, loader, device, include_image_preprojection=True,

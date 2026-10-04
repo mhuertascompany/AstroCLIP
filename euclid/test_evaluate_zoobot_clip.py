@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import h5py
 
 from euclid.evaluate_zoobot_clip import (
     embedding_diagnostics,
@@ -10,7 +11,34 @@ from euclid.evaluate_zoobot_clip import (
     sfh_shape_neighborhood_test,
     summarize_sfh_reconstruction,
     summarize_ranks,
+    validate_saved_split,
 )
+
+
+def test_validate_saved_split_accepts_native_fits(tmp_path):
+    dataset = tmp_path / 'sfh.h5'
+    ids = np.array([10, 20, 30], dtype=np.int64)
+    with h5py.File(dataset, 'w') as target:
+        target.attrs['n_galaxies'] = len(ids)
+        target['galaxy_id'] = ids
+        target['sfh_time_grid'] = np.linspace(0, 1, 4)
+        target['sfh'] = np.zeros((3, 4), dtype=np.float32)
+        target['sfh_realizations'] = np.zeros((3, 2, 4), dtype=np.float32)
+        target['sfh_realization_valid'] = np.ones((3, 2), dtype=bool)
+    split = tmp_path / 'split.npz'
+    np.savez(
+        split,
+        train_rows=np.array([0, 1]), train_ids=ids[:2],
+        val_rows=np.array([2]), val_ids=ids[2:],
+    )
+    fits_dir = tmp_path / 'cutouts' / 'VIS'
+    fits_dir.mkdir(parents=True)
+    (fits_dir / '30.fits').touch()
+    result = validate_saved_split(
+        dataset, split, tmp_path, image_format='fits',
+    )
+    np.testing.assert_array_equal(result[2], [2])
+    np.testing.assert_array_equal(result[3], [30])
 
 
 def test_extract_embeddings_can_return_both_preprojection_spaces():

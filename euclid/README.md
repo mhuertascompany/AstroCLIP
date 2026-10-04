@@ -1018,6 +1018,50 @@ sbatch euclid/slurm_train_galactiktok_clip_bright_test.sh "${TOKENIZER}" "${AE}"
 sbatch euclid/slurm_train_galactiktok_clip_bright.sh "${TOKENIZER}" "${AE}"
 ```
 
+The full run freezes both pretrained backbones and trains the GalaxyTikTok
+spatial attention pooler plus the unrestricted SFH MLP adapter with the same
+exact-pair CLIP objective, batch size, temperature, and optimizer scale as the
+unrestricted ZooBot experiment. Images are read from the native FITS, while an
+eligibility filter restricts training to the exact 136,983 IDs with ZooBot
+JPEGs. The train/validation assignment, galaxies, and SFHs therefore match the
+unrestricted ZooBot run; only the image input, frozen backbone, and its
+trainable image adapter differ.
+
+After training, choose the lowest-validation-loss GalaxyTikTok checkpoint and
+build a strictly matched comparison against the unrestricted-adapter ZooBot
+run:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+ls -1 "${BASE}"/training_bright_galactiktok_clip/checkpoints/*val_loss=*.ckpt
+
+sbatch euclid/slurm_export_galactiktok_vs_zoobot_aligned.sh \
+  "${BASE}/training_bright_galactiktok_clip/checkpoints/CHOSEN_CHECKPOINT.ckpt"
+```
+
+The export job first verifies that all common IDs were excluded from the
+GalaxyTikTok training split. It then evaluates both checkpoints on the exact
+ZooBot validation IDs, using native FITS for GalaxyTikTok and the existing
+JPEGs for ZooBot. It fits aligned image, SFH, and joint-average UMAPs with the
+same settings and writes a two-run explorer archive at:
+
+```text
+${BASE}/explorer_galactiktok_vs_zoobot_aligned/explorer_bundle.tar
+```
+
+After downloading and extracting it, compare the spaces interactively:
+
+```bash
+LOCAL=/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_galactiktok_vs_zoobot_aligned/explorer_bundle
+python -m euclid.explore_embeddings \
+  --h5 "${LOCAL}/euclid_explorer.h5" \
+  --stamps "${LOCAL}/VIS" \
+  --umap "${LOCAL}/00_galactiktok_euclid_clip_umap_diagnostics.npz" \
+  --umap "${LOCAL}/01_zoobot_euclid_clip_umap_diagnostics.npz" \
+  --label "GalaxyTikTok + CLIP" \
+  --label "Frozen ZooBot + CLIP"
+```
+
 An exact unmasked pixel-reconstruction model can spend its capacity copying
 the particular VIS background-noise realization. The lower-capacity denoising
 ablation instead uses a 256-dimensional transformer with four encoder and four

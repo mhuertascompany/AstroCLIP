@@ -116,6 +116,26 @@ class EuclidTrainingIndexTest(unittest.TestCase):
         combined = np.concatenate((index.train_ids, index.val_ids))
         self.assertSetEqual(set(combined), set(self.available))
 
+    def test_native_fits_can_use_jpeg_population_eligibility(self):
+        fits_dir = self.root / 'all_fits' / 'cutouts' / 'VIS'
+        fits_dir.mkdir(parents=True)
+        for object_id in self.ids:
+            fits.PrimaryHDU(np.zeros((10, 10), dtype=np.float32)).writeto(
+                fits_dir / f'{int(object_id)}.fits',
+            )
+        index = build_pair_index(
+            self.sfh_path,
+            self.root / 'all_fits',
+            val_fraction=0.25,
+            seed=7,
+            image_format='fits',
+            eligibility_stamp_root=self.root / 'stamps',
+        )
+        combined = np.concatenate((index.train_ids, index.val_ids))
+        self.assertEqual(index.n_stamp_paired, len(self.ids))
+        self.assertEqual(index.n_paired, len(self.available))
+        self.assertSetEqual(set(combined), set(self.available))
+
     def test_duplicate_ids_are_rejected(self):
         duplicate_path = self.root / 'duplicate.h5'
         write_sfh_file(duplicate_path, [1, 1])
