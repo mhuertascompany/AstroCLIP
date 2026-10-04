@@ -1018,6 +1018,23 @@ sbatch euclid/slurm_train_galactiktok_clip_bright_test.sh "${TOKENIZER}" "${AE}"
 sbatch euclid/slurm_train_galactiktok_clip_bright.sh "${TOKENIZER}" "${AE}"
 ```
 
+An exact unmasked pixel-reconstruction model can spend its capacity copying
+the particular VIS background-noise realization. The lower-capacity denoising
+ablation instead uses a 256-dimensional transformer with four encoder and four
+decoder blocks, eight values per 8-by-8 patch, and 25% random patch masking.
+Its target is Gaussian-smoothed with sigma 0.7 normalized-image pixels, so
+high-frequency noise is not rewarded by the reconstruction loss. Launch it
+with:
+
+```bash
+sbatch euclid/slurm_pretrain_galactiktok_vis_denoised_small.sh
+```
+
+Its preview has three rows: observed input, smoothed training target, and
+reconstruction. The smoothed target is only a signal proxy, so compare the
+resulting representation with the unmasked model using noise-perturbation
+invariance and morphology/size probes rather than reconstruction loss alone.
+
 This first run uses the exact-pair CLIP objective, the same split, fixed SFH
 encoder, batch size, optimizer scale, and SFH adapter as the unrestricted
 ZooBot experiment. Compare held-out retrieval and geometry diagnostics, then

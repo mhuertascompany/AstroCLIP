@@ -9,6 +9,7 @@ from pathlib import Path
 import lightning as L
 import numpy as np
 import torch
+import torch.nn.functional as F
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader, Dataset
@@ -49,7 +50,8 @@ class VISFitsDataset(Dataset):
 
 class GalaxyTikTokVISPretrainer(L.LightningModule):
     def __init__(self, tokenizer, band: str, lr: float,
-                 weight_decay: float, epochs: int, warmup_epochs: int) -> None:
+                 weight_decay: float, epochs: int, warmup_epochs: int,
+                 target_gaussian_sigma: float = 0.0) -> None:
         super().__init__()
         self.tokenizer = tokenizer
         self.band = band
@@ -57,6 +59,23 @@ class GalaxyTikTokVISPretrainer(L.LightningModule):
         self.weight_decay = float(weight_decay)
         self.epochs = int(epochs)
         self.warmup_epochs = int(warmup_epochs)
+        self.target_gaussian_sigma = float(target_gaussian_sigma)
+
+    @staticmethod
+    def _gaussian_target(flux: torch.Tensor, sigma: float) -> torch.Tensor:
+        """Return a fixed low-pass target without smoothing across channels."""
+        if sigma <= 0:
+            return flux
+        radius = max(1, int(math.ceil(3.0 * sigma)))
+        coordinates = torch.arange(
+            -radius, radius + 1, device=flux.device, dtype=flux.dtype,
+        )
+        kernel_1d = torch.exp(-0.5 * (coordinates / sigma) ** 2)
+        kernel_1d = kernel_1d / kernel_1d.sum()
+        kernel_2d = torch.outer(kernel_1d, kernel_1d)
+        kernel = kernel_2d.expand(flux.size(1), 1, -1, -1)
+        padded = F.pad(flux, (radius, radius, radius, radius), mode='reflect')
+        return F.conv2d(padded, kernel, groups=flux.size(1))
 
     def _loss(self, batch, prefix: str):
         try:
@@ -64,9 +83,42 @@ class GalaxyTikTokVISPretrainer(L.LightningModule):
         except ImportError as exc:
             raise ImportError('GalaxyTikTok is not importable.') from exc
         flux, _ = batch
-        loss, metrics = self.tokenizer.loss_fn(
-            Image(flux=flux, bands=[self.band]),
-        )
+        image = Image(flux=flux, bands=[self.band])
+        if self.target_gaussian_sigma <= 0:
+            loss, _ = self.tokenizer.loss_fn(image)
+        else:
+            # Masking prevents the encoder from directly observing the patch
+            # whose loss is evaluated. The smoothed target additionally stops
+            # exact high-frequency background noise from being rewarded.
+            mask_fraction = (
+                self.tokenizer.encoder_mask_fraction if self.training else 0.0
+            )
+            tokens = self.tokenizer.encode(image, mask_fraction=mask_fraction)
+            reconstruction = self.tokenizer.decode(tokens).flux
+            target = self._gaussian_target(
+                flux, self.target_gaussian_sigma,
+            ).detach()
+            if tokens.mask_idx is None:
+                loss = F.mse_loss(reconstruction, target)
+            else:
+                from galactiktok.models.image_transformer.modeling_image_transformer import (
+                    patchify,
+                )
+                predicted_patches = patchify(
+                    reconstruction,
+                    (self.tokenizer.patch_size, self.tokenizer.patch_size),
+                )
+                target_patches = patchify(
+                    target,
+                    (self.tokenizer.patch_size, self.tokenizer.patch_size),
+                )
+                batch_index = torch.arange(
+                    flux.size(0), device=flux.device,
+                ).unsqueeze(-1)
+                loss = F.mse_loss(
+                    predicted_patches[batch_index, tokens.mask_idx],
+                    target_patches[batch_index, tokens.mask_idx],
+                )
         self.log(
             f'{prefix}_recon_loss', loss,
             prog_bar=True,
@@ -125,6 +177,13 @@ def parse_args():
     parser.add_argument('--num-decoder-blocks', type=int, default=6)
     parser.add_argument('--bottleneck-dim', type=int, default=8)
     parser.add_argument('--mask-fraction', type=float, default=0.5)
+    parser.add_argument(
+        '--target-gaussian-sigma', type=float, default=0.0,
+        help=(
+            'Gaussian sigma in normalized-image pixels for the reconstruction '
+            'target. Zero retains exact noisy-pixel reconstruction.'
+        ),
+    )
     parser.add_argument('--image-stats', type=Path,
                         help='Existing GalaxyTikTok-style VIS percentile JSON.')
     parser.add_argument('--stats-images', type=int, default=4096)
@@ -166,6 +225,9 @@ def main():
         raise ValueError('Image-statistics sample sizes must be positive.')
     if not np.isfinite(args.asinh_scale) or args.asinh_scale <= 0:
         raise ValueError('--asinh-scale must be finite and positive.')
+    if (not np.isfinite(args.target_gaussian_sigma)
+            or args.target_gaussian_sigma < 0):
+        raise ValueError('--target-gaussian-sigma must be finite and non-negative.')
     if args.embed_dim % args.num_heads:
         raise ValueError('--embed-dim must be divisible by --num-heads.')
 
@@ -248,6 +310,7 @@ def main():
         weight_decay=args.weight_decay,
         epochs=args.max_epochs,
         warmup_epochs=args.warmup_epochs,
+        target_gaussian_sigma=args.target_gaussian_sigma,
     )
 
     checkpoint_dir = args.output_dir / 'checkpoints'
@@ -281,7 +344,8 @@ def main():
         f'[GalaxyTikTok VIS] train={len(train_dataset):,}, '
         f'val={len(val_dataset):,}; image={args.image_size}, '
         f'patch={args.patch_size}, grid={args.image_size // args.patch_size}x'
-        f'{args.image_size // args.patch_size}, bottleneck={args.bottleneck_dim}',
+        f'{args.image_size // args.patch_size}, bottleneck={args.bottleneck_dim}, '
+        f'mask={args.mask_fraction:g}, target_sigma={args.target_gaussian_sigma:g}',
         flush=True,
     )
     trainer.fit(model, train_loader, val_loader, ckpt_path=args.resume_from)
@@ -298,19 +362,23 @@ def main():
         num_workers=0,
     )
     preview, _ = next(iter(preview_loader))
+    preview_target = model._gaussian_target(
+        preview, model.target_gaussian_sigma,
+    )
     with torch.no_grad():
         reconstruction = model.tokenizer(
             Image(flux=preview, bands=[args.tokenizer_band]),
         ).flux
     save_image(
-        torch.cat((preview, reconstruction.clamp(0, 1)), dim=0),
+        torch.cat((preview, preview_target, reconstruction.clamp(0, 1)), dim=0),
         args.output_dir / 'reconstruction_examples.png',
         nrow=len(preview),
     )
     print(f'Best checkpoint: {callback.best_model_path}', flush=True)
     print(f'Alignment-ready tokenizer: {tokenizer_dir}', flush=True)
     print(
-        f'Reconstruction preview: {args.output_dir / "reconstruction_examples.png"}',
+        'Reconstruction preview (input / target / reconstruction): '
+        f'{args.output_dir / "reconstruction_examples.png"}',
         flush=True,
     )
 
