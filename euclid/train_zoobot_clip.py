@@ -67,6 +67,14 @@ def parse_args():
     )
     data.add_argument('--selection-id-column', default='object_id')
     data.add_argument(
+        '--exclude-edge-on-axis-ratio-below', type=float,
+        help='Exclude only when Sérsic b/a is strictly below this value.',
+    )
+    data.add_argument(
+        '--exclude-edge-on-probability-above', type=float,
+        help='Exclude only when conditional ZooBot P(edge-on) is above this value.',
+    )
+    data.add_argument(
         '--require-vis-detection', action=argparse.BooleanOptionalAction,
         default=True,
         help='Require VIS_DET=1 when applying a VIS magnitude cut.',
@@ -318,6 +326,16 @@ def validate_args(args):
         raise ValueError('--asinh-scale must be finite and positive.')
     if args.max_vis_mag is not None and not np.isfinite(args.max_vis_mag):
         raise ValueError('--max-vis-mag must be finite.')
+    edge_thresholds = (
+        args.exclude_edge_on_axis_ratio_below,
+        args.exclude_edge_on_probability_above,
+    )
+    if (edge_thresholds[0] is None) != (edge_thresholds[1] is None):
+        raise ValueError('Both edge-on exclusion thresholds must be provided.')
+    if edge_thresholds[0] is not None and not (
+        0 < edge_thresholds[0] <= 1 and 0 <= edge_thresholds[1] <= 1
+    ):
+        raise ValueError('Edge-on exclusion thresholds are outside [0, 1].')
     if args.queue_size < 0:
         raise ValueError('--queue-size cannot be negative.')
     if args.queue_size and args.queue_size < args.batch_size:
@@ -490,6 +508,12 @@ def main():
         image_stats=args.image_stats,
         asinh_scale=args.asinh_scale,
         eligibility_stamp_root=args.eligibility_stamp_root,
+        exclude_edge_on_axis_ratio_below=(
+            args.exclude_edge_on_axis_ratio_below
+        ),
+        exclude_edge_on_probability_above=(
+            args.exclude_edge_on_probability_above
+        ),
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -510,6 +534,16 @@ def main():
                 str(args.selection_catalog) if args.selection_catalog else ''
             ),
             selection_id_column=np.asarray(args.selection_id_column),
+        )
+    if args.exclude_edge_on_axis_ratio_below is not None:
+        split_data.update(
+            exclude_edge_on_axis_ratio_below=np.float32(
+                args.exclude_edge_on_axis_ratio_below
+            ),
+            exclude_edge_on_probability_above=np.float32(
+                args.exclude_edge_on_probability_above
+            ),
+            n_edge_on_excluded=np.int64(pair_index.n_edge_on_excluded),
         )
     np.savez_compressed(args.output_dir / 'pair_split.npz', **split_data)
     model = EuclidZooBotCLIP(

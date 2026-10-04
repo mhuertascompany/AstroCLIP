@@ -136,6 +136,40 @@ class EuclidTrainingIndexTest(unittest.TestCase):
         self.assertEqual(index.n_paired, len(self.available))
         self.assertSetEqual(set(combined), set(self.available))
 
+    def test_edge_on_filter_requires_both_axis_ratio_and_probability(self):
+        with h5py.File(self.sfh_path, 'a') as target:
+            axis_ratio = np.full(len(self.ids), 0.8, dtype=np.float32)
+            yes = np.full(len(self.ids), 1.0, dtype=np.float32)
+            no = np.full(len(self.ids), 1.0, dtype=np.float32)
+            axis_ratio[:3] = [0.4, 0.6, 0.4]
+            yes[:3] = [9.0, 9.0, 7.0]
+            no[:3] = [1.0, 1.0, 3.0]
+            target['sersic_sersic_vis_axis_ratio'] = axis_ratio
+            target['disk_edge_on_yes'] = yes
+            target['disk_edge_on_no'] = no
+        unfiltered = build_pair_index(
+            self.sfh_path, self.root / 'stamps', val_fraction=0.25, seed=7,
+        )
+        filtered = build_pair_index(
+            self.sfh_path,
+            self.root / 'stamps',
+            val_fraction=0.25,
+            seed=7,
+            exclude_edge_on_axis_ratio_below=0.5,
+            exclude_edge_on_probability_above=0.8,
+        )
+        selected = set(np.concatenate((filtered.train_ids, filtered.val_ids)))
+        self.assertEqual(filtered.n_edge_on_excluded, 1)
+        self.assertNotIn(int(self.ids[0]), selected)
+        self.assertIn(int(self.ids[1]), selected)
+        self.assertIn(int(self.ids[2]), selected)
+        self.assertSetEqual(
+            set(filtered.train_ids), set(unfiltered.train_ids) - {int(self.ids[0])},
+        )
+        self.assertSetEqual(
+            set(filtered.val_ids), set(unfiltered.val_ids) - {int(self.ids[0])},
+        )
+
     def test_duplicate_ids_are_rejected(self):
         duplicate_path = self.root / 'duplicate.h5'
         write_sfh_file(duplicate_path, [1, 1])

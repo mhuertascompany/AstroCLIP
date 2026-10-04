@@ -1202,6 +1202,47 @@ the auxiliary target to reduce its loss.
 The smoke test runs for five epochs so that epochs 4--5 exercise the adjacency
 term after the three-epoch exact-NCE warm-up.
 
+To measure whether the edge-on sequence drives the learned image geometry,
+repeat the same AE-adjacency run after excluding the conservative intersection
+
+```text
+Sérsic b/a < 0.5  AND  ZooBot P(edge-on) > 0.8.
+```
+
+Here `P(edge-on)` is the same conditional quantity shown in the explorer,
+`disk_edge_on_yes / (disk_edge_on_yes + disk_edge_on_no)`. Objects with a
+missing Sérsic fit or missing ZooBot answer remain in the sample. In the local
+136,983-object full archive, this intersection removes 12,040 objects (8.79%).
+Run the controlled smoke test and full training with:
+
+```bash
+AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
+
+sbatch euclid/slurm_train_zoobot_clip_bright_ae_no_edgeon_test.sh "${AE}"
+sbatch euclid/slurm_train_zoobot_clip_bright_ae_no_edgeon.sh "${AE}"
+```
+
+The filtered run writes its thresholds and excluded count into `pair_split.npz`
+and otherwise retains the original backbone, adapters, seed, batch size,
+optimizer, exact-NCE term, and AE-adjacency settings. After it finishes, compare
+both `last.ckpt` files on the exact filtered validation set:
+
+```bash
+sbatch euclid/slurm_export_ae_edgeon_ablation.sh
+```
+
+The export verifies that the filtered train and validation IDs are clean
+subsets of their original counterparts before evaluating either model. Its
+local explorer bundle is written to:
+
+```text
+${BASE}/explorer_ae_adjacency_edgeon_ablation/explorer_bundle.tar
+```
+
+After downloading and extracting it, launch the two-run comparison with the
+archives `00_original_euclid_clip_umap_diagnostics.npz` and
+`01_edgeon_filtered_euclid_clip_umap_diagnostics.npz`.
+
 The code also retains `--ae-false-negative-k` and
 `--ae-false-negative-max-distance` for a separate hard-removal ablation. Those
 options operate within the current batch, so `k=8` means eight among 127

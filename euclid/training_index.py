@@ -21,6 +21,36 @@ class EuclidPairIndex:
     n_sfh: int
     n_paired: int
     n_stamp_paired: int
+    n_edge_on_excluded: int
+
+
+def edge_on_exclusion_mask(path, axis_ratio_below, probability_above):
+    """Return the conservative Sérsic-and-ZooBot edge-on exclusion mask."""
+    required = (
+        'sersic_sersic_vis_axis_ratio',
+        'disk_edge_on_yes',
+        'disk_edge_on_no',
+    )
+    with h5py.File(path, 'r') as source:
+        missing = [name for name in required if name not in source]
+        if missing:
+            raise ValueError(
+                f'Edge-on filtering requires HDF5 datasets: {missing}'
+            )
+        axis_ratio = np.asarray(source[required[0]], dtype=np.float64)
+        yes = np.asarray(source[required[1]], dtype=np.float64)
+        no = np.asarray(source[required[2]], dtype=np.float64)
+    total = yes + no
+    probability = np.full_like(total, np.nan)
+    valid_probability = np.isfinite(total) & np.isfinite(yes) & (total > 0)
+    probability[valid_probability] = yes[valid_probability] / total[valid_probability]
+    return (
+        np.isfinite(axis_ratio)
+        & (axis_ratio > 0)
+        & (axis_ratio < axis_ratio_below)
+        & np.isfinite(probability)
+        & (probability > probability_above)
+    )
 
 
 def inspect_sfh_file(path):
@@ -64,12 +94,24 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
                      vis_detection_column='vis_det',
                      require_vis_detection=True, selection_catalog=None,
                      selection_id_column='object_id', image_format='jpg',
-                     eligibility_stamp_root=None):
+                     eligibility_stamp_root=None,
+                     exclude_edge_on_axis_ratio_below=None,
+                     exclude_edge_on_probability_above=None):
     """Match IDs by filename and make a deterministic random train/val split."""
     if not 0 < val_fraction < 1:
         raise ValueError('val_fraction must lie strictly between zero and one.')
     if max_pairs is not None and max_pairs < 2:
         raise ValueError('max_pairs must be at least two.')
+    edge_thresholds = (
+        exclude_edge_on_axis_ratio_below,
+        exclude_edge_on_probability_above,
+    )
+    if (edge_thresholds[0] is None) != (edge_thresholds[1] is None):
+        raise ValueError('Both edge-on exclusion thresholds must be provided.')
+    if edge_thresholds[0] is not None and not (
+        0 < edge_thresholds[0] <= 1 and 0 <= edge_thresholds[1] <= 1
+    ):
+        raise ValueError('Edge-on exclusion thresholds are outside [0, 1].')
 
     ids, n_bins, n_realizations = inspect_sfh_file(sfh_path)
     if image_format not in {'jpg', 'fits'}:
@@ -106,6 +148,13 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
             selection_catalog, selection_id_column,
         )
         paired &= bright
+    n_edge_on_excluded = 0
+    if edge_thresholds[0] is not None:
+        excluded = edge_on_exclusion_mask(
+            sfh_path, edge_thresholds[0], edge_thresholds[1],
+        )
+        n_edge_on_excluded = int(np.count_nonzero(paired & excluded))
+        paired &= ~excluded
     paired_rows = np.flatnonzero(paired)
     if len(paired_rows) < 2:
         raise ValueError(f'Only {len(paired_rows)} SFH/image pairs were found.')
@@ -138,4 +187,5 @@ def build_pair_index(sfh_path, stamp_root, band='VIS', val_fraction=0.1,
         n_sfh=len(ids),
         n_paired=len(paired_rows),
         n_stamp_paired=n_stamp_paired,
+        n_edge_on_excluded=n_edge_on_excluded,
     )

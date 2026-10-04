@@ -161,7 +161,9 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                  require_vis_detection=True, selection_catalog=None,
                  selection_id_column='object_id', image_format='jpg',
                  image_stats=None, asinh_scale=20.0,
-                 eligibility_stamp_root=None):
+                 eligibility_stamp_root=None,
+                 exclude_edge_on_axis_ratio_below=None,
+                 exclude_edge_on_probability_above=None):
         super().__init__()
         self.sfh_path = sfh_path
         self.stamp_root = stamp_root
@@ -183,6 +185,8 @@ class EuclidZooBotDataModule(L.LightningDataModule):
         self.image_stats = image_stats
         self.asinh_scale = asinh_scale
         self.eligibility_stamp_root = eligibility_stamp_root
+        self.exclude_edge_on_axis_ratio_below = exclude_edge_on_axis_ratio_below
+        self.exclude_edge_on_probability_above = exclude_edge_on_probability_above
         self.pair_index = None
 
     def setup(self, stage=None):
@@ -195,12 +199,20 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                 self.selection_catalog, self.selection_id_column,
                 self.image_format,
                 self.eligibility_stamp_root,
+                self.exclude_edge_on_axis_ratio_below,
+                self.exclude_edge_on_probability_above,
             )
             index = self.pair_index
             selection = (
                 f'; VIS<={self.max_vis_mag:g} AB'
                 if self.max_vis_mag is not None else ''
             )
+            if self.exclude_edge_on_axis_ratio_below is not None:
+                selection += (
+                    f'; removed {index.n_edge_on_excluded:,} with '
+                    f'b/a<{self.exclude_edge_on_axis_ratio_below:g} and '
+                    f'P(edge-on)>{self.exclude_edge_on_probability_above:g}'
+                )
             print(
                 f'[EuclidImageSFH:{self.image_format}] '
                 f'images={index.n_stamp_paired:,}/{index.n_sfh:,}; '
