@@ -509,9 +509,16 @@ def shared_manifold_page(pdf, image_xy, sfh_xy, rng, n_lines=500, run_label=None
 
 
 def comparison_page(pdf, coordinate_sets, props, run_label=None):
+    n_columns = len(coordinate_sets)
+    if n_columns < 1:
+        raise ValueError('coordinate_sets cannot be empty.')
     for page_start in range(0, len(props), 4):
         page = props[page_start:page_start + 4]
-        fig, axes = plt.subplots(len(page), 3, figsize=(12, 3.0 * len(page)), squeeze=False)
+        fig, axes = plt.subplots(
+            len(page), n_columns,
+            figsize=(4.0 * n_columns, 3.0 * len(page)),
+            squeeze=False,
+        )
         for row, prop in enumerate(page):
             for column, (name, coordinates) in enumerate(coordinate_sets):
                 scatter_property(axes[row, column], coordinates, prop, point_size=1.8)

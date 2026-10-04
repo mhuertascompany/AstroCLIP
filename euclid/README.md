@@ -1064,6 +1064,50 @@ The smoothed target is only a signal proxy, so compare the representation with
 the unmasked model using noise-perturbation invariance and morphology/size
 probes rather than reconstruction loss alone.
 
+Compare a frozen tokenizer directly with the frozen Euclid ZooBot backbone on
+the exact same 30,000 galaxies with:
+
+```bash
+sbatch euclid/slurm_compare_frozen_image_encoders.sh
+```
+
+The job reads the IDs and ZooBot coordinates from the existing 30k archive,
+encodes those IDs from the native VIS FITS with the tokenizer, flattens and
+L2-normalizes the complete spatial bottleneck grid, and fits a second cosine
+UMAP with the same random seed and hyperparameters. It writes a side-by-side
+property-colored PDF, two compact explorer NPZ files, the raw frozen
+embeddings, and `galactiktok_vs_zoobot_compact.tar.gz` under
+`galactiktok_vs_zoobot_30k`. The UMAP coordinate systems are independently
+fitted and can rotate or reflect; compare neighbourhoods and property gradients
+rather than absolute x/y positions.
+
+To compare the smaller denoising tokenizer instead, pass it as the first job
+argument and choose a distinct output directory:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+sbatch euclid/slurm_compare_frozen_image_encoders.sh \
+  "${BASE}/pretraining_galactiktok_vis_denoised_small/tokenizer" \
+  "${BASE}/zoobot_image_embedding_30k_with_morphology_verified/zoobot_image_umap.npz" \
+  "${BASE}/galactiktok_denoised_small_vs_zoobot_30k"
+```
+
+After copying and extracting the compact tar locally, open both maps against
+the existing full-sample explorer data:
+
+```bash
+FULL=/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_bright_full/full_sample_explorer_bundle
+COMPARE=/Users/marchuertascompany/Documents/data/EUCLID/DR1/galactiktok_vs_zoobot_30k
+
+python -m euclid.explore_embeddings \
+  --h5 "${FULL}/euclid_explorer.h5" \
+  --stamps "${FULL}/VIS" \
+  --umap "${COMPARE}/galactiktok_image_umap.npz" \
+  --umap "${COMPARE}/zoobot_image_umap_compact.npz" \
+  --label "Frozen GalaxyTikTok tokenizer" \
+  --label "Frozen Euclid ZooBot"
+```
+
 This first run uses the exact-pair CLIP objective, the same split, fixed SFH
 encoder, batch size, optimizer scale, and SFH adapter as the unrestricted
 ZooBot experiment. Compare held-out retrieval and geometry diagnostics, then
