@@ -1041,6 +1041,16 @@ retraining:
 sbatch euclid/slurm_preview_galactiktok_vis.sh
 ```
 
+The preview also constructs a complete blind reconstruction by running several
+independent masks and averaging each patch only over passes in which that patch
+was hidden. Its six rows are observed image, target, one masked input, the
+corresponding single-mask composition, complete cross-masked reconstruction,
+and the signed target-minus-reconstruction residual. This last residual covers
+the whole image without using the invalid zero-mask decoder regime. A JSON file
+beside the PNG records background residual variance, input-residual
+correlation, one-pixel residual autocorrelation, low-frequency power, and
+central residual amplitude for each displayed galaxy and their medians.
+
 To preview the smaller smoothed-target ablation instead, pass its tokenizer
 and target sigma:
 

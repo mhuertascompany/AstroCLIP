@@ -47,5 +47,6 @@ python -u -m euclid.preview_galactiktok_vis \
     --dataset "${DATASET}" \
     --fits-root "${FITS_ROOT}" \
     --image-stats "${IMAGE_STATS}" \
+    --mask-ensembles 16 \
     --target-gaussian-sigma "${TARGET_SIGMA}" \
     --output "${OUTPUT}"
