@@ -14,13 +14,9 @@
 
 set -euo pipefail
 
-# Evaluate GalaxyTikTok and unrestricted-adapter ZooBot CLIP checkpoints on
-# the exact same held-out IDs, fit aligned UMAPs, and package one explorer.
-# Usage: sbatch $0 GALACTIKTOK_CKPT [ZOOBOT_CKPT] [OUTPUT_DIR] [GALACTIKTOK_ROOT]
-if [[ $# -lt 1 ]]; then
-    echo "Usage: sbatch $0 GALACTIKTOK_CKPT [ZOOBOT_CKPT] [OUTPUT_DIR] [GALACTIKTOK_ROOT]" >&2
-    exit 2
-fi
+# Evaluate GalaxyTikTok and ZooBot AE-adjacency checkpoints on the exact same
+# held-out IDs, fit aligned UMAPs, and package one explorer.
+# Usage: sbatch $0 [GALACTIKTOK_CKPT] [ZOOBOT_CKPT] [OUTPUT_DIR] [GALACTIKTOK_ROOT]
 
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
@@ -28,11 +24,13 @@ export HF_HOME=${HF_HOME:-/n03data/huertas/.cache/huggingface}
 
 REPO=/n03data/huertas/python/AstroCLIP
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
-GTT_TRAINING=${BASE}/training_bright_galactiktok_clip
-ZOO_TRAINING=${BASE}/training_bright_frozen_unrestricted_adapters
-GTT_CKPT=$1
-ZOO_CKPT=${2:-${ZOO_TRAINING}/checkpoints/euclid_bright_unrestricted_adapters_150k-epoch=024-val_loss=4.2556.ckpt}
-OUTPUT=${3:-${BASE}/explorer_galactiktok_vs_zoobot_aligned}
+GTT_TRAINING=${BASE}/training_bright_galactiktok_ae_adjacency
+ZOO_TRAINING=${BASE}/training_bright_frozen_unrestricted_ae_fns
+# Use last.ckpt deliberately. Early best checkpoints can precede activation of
+# the adjacency term after its three-epoch warm-up.
+GTT_CKPT=${1:-${GTT_TRAINING}/checkpoints/last.ckpt}
+ZOO_CKPT=${2:-${ZOO_TRAINING}/checkpoints/last.ckpt}
+OUTPUT=${3:-${BASE}/explorer_galactiktok_vs_zoobot_ae_adjacency}
 GALACTIKTOK_ROOT=${4:-/n03data/huertas/python/galactiktok/galactiktok}
 
 DATASET=${BASE}/sfh_clip_150k.h5
@@ -58,9 +56,8 @@ export NUMBA_CACHE_DIR=${SLURM_TMPDIR:-/tmp}/numba_${SLURM_JOB_ID}
 mkdir -p "${GTT_EVAL}" "${ZOO_EVAL}" "${MPLCONFIGDIR}" "${NUMBA_CACHE_DIR}"
 cd "${REPO}"
 
-# The global row-based seed split is shared, although GalaxyTikTok has more
-# available images. Explicitly verify that every common validation ID is also
-# held out from GalaxyTikTok training before evaluating it.
+# GalaxyTikTok reads native FITS but was eligibility-filtered to the ZooBot
+# JPEG population. Require exact train and validation equality before comparing.
 python - "${GTT_SPLIT}" "${COMMON_SPLIT}" <<'PY'
 import sys
 import numpy as np
@@ -146,8 +143,8 @@ make_umap() {
 
 evaluate_galactiktok
 evaluate_zoobot
-make_umap "${GTT_EVAL}" "GalaxyTikTok tokenizer + CLIP"
-make_umap "${ZOO_EVAL}" "Frozen ZooBot + unrestricted CLIP adapters"
+make_umap "${GTT_EVAL}" "GalaxyTikTok + AE-adjacency CLIP"
+make_umap "${ZOO_EVAL}" "Frozen ZooBot + AE-adjacency CLIP"
 
 if [[ ! -f "${BUNDLE}/manifest.json" ]]; then
     python -u -m euclid.export_explorer_bundle \

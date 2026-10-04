@@ -1014,29 +1014,25 @@ BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
 AE=/n03data/huertas/euclid/sfh_clip/edfn_100k/sfh_autoencoder_v1/checkpoints/euclid_sfh_autoencoder_v1-epoch=001-val_loss=0.02222.ckpt
 TOKENIZER=${BASE}/pretraining_galactiktok_vis/tokenizer
 
-sbatch euclid/slurm_train_galactiktok_clip_bright_test.sh "${TOKENIZER}" "${AE}"
-sbatch euclid/slurm_train_galactiktok_clip_bright.sh "${TOKENIZER}" "${AE}"
+sbatch euclid/slurm_train_galactiktok_clip_bright_ae_adjacency_test.sh "${TOKENIZER}" "${AE}"
+sbatch euclid/slurm_train_galactiktok_clip_bright_ae_adjacency.sh "${TOKENIZER}" "${AE}"
 ```
 
 The full run freezes both pretrained backbones and trains the GalaxyTikTok
-spatial attention pooler plus the unrestricted SFH MLP adapter with the same
-exact-pair CLIP objective, batch size, temperature, and optimizer scale as the
-unrestricted ZooBot experiment. Images are read from the native FITS, while an
+spatial attention pooler plus the unrestricted SFH MLP adapter. It uses the
+same exact-pair CLIP term and continuous SFH-AE adjacency regularizer as the
+geometry-preserving ZooBot experiment: adjacency weight 100, three exact-CLIP
+warm-up epochs, and fixed adjacency temperature 0.07. Images are read from the native FITS, while an
 eligibility filter restricts training to the exact 136,983 IDs with ZooBot
 JPEGs. The train/validation assignment, galaxies, and SFHs therefore match the
 unrestricted ZooBot run; only the image input, frozen backbone, and its
 trainable image adapter differ.
 
-After training, choose the lowest-validation-loss GalaxyTikTok checkpoint and
-build a strictly matched comparison against the unrestricted-adapter ZooBot
-run:
+After training, build a strictly matched comparison against the ZooBot
+AE-adjacency run:
 
 ```bash
-BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
-ls -1 "${BASE}"/training_bright_galactiktok_clip/checkpoints/*val_loss=*.ckpt
-
-sbatch euclid/slurm_export_galactiktok_vs_zoobot_aligned.sh \
-  "${BASE}/training_bright_galactiktok_clip/checkpoints/CHOSEN_CHECKPOINT.ckpt"
+sbatch euclid/slurm_export_galactiktok_vs_zoobot_aligned.sh
 ```
 
 The export job first verifies that all common IDs were excluded from the
@@ -1046,20 +1042,20 @@ JPEGs for ZooBot. It fits aligned image, SFH, and joint-average UMAPs with the
 same settings and writes a two-run explorer archive at:
 
 ```text
-${BASE}/explorer_galactiktok_vs_zoobot_aligned/explorer_bundle.tar
+${BASE}/explorer_galactiktok_vs_zoobot_ae_adjacency/explorer_bundle.tar
 ```
 
 After downloading and extracting it, compare the spaces interactively:
 
 ```bash
-LOCAL=/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_galactiktok_vs_zoobot_aligned/explorer_bundle
+LOCAL=/Users/marchuertascompany/Documents/data/EUCLID/DR1/explorer_galactiktok_vs_zoobot_ae_adjacency/explorer_bundle
 python -m euclid.explore_embeddings \
   --h5 "${LOCAL}/euclid_explorer.h5" \
   --stamps "${LOCAL}/VIS" \
   --umap "${LOCAL}/00_galactiktok_euclid_clip_umap_diagnostics.npz" \
   --umap "${LOCAL}/01_zoobot_euclid_clip_umap_diagnostics.npz" \
-  --label "GalaxyTikTok + CLIP" \
-  --label "Frozen ZooBot + CLIP"
+  --label "GalaxyTikTok + AE adjacency" \
+  --label "Frozen ZooBot + AE adjacency"
 ```
 
 An exact unmasked pixel-reconstruction model can spend its capacity copying
