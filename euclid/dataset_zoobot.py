@@ -20,6 +20,42 @@ from .vis_fits import (
 )
 
 
+def validate_sfh_override(source_path, override_path):
+    """Require a compact SFH override to be exactly row-aligned and normalized."""
+    source_path = Path(source_path)
+    override_path = Path(override_path)
+    with h5py.File(source_path, 'r') as source, h5py.File(override_path, 'r') as override:
+        missing = [name for name in ('galaxy_id', 'sfh', 'sfh_time_grid')
+                   if name not in override]
+        if missing:
+            raise ValueError(f'Missing SFH override datasets: {missing}')
+        source_ids = np.asarray(source['galaxy_id'])
+        override_ids = np.asarray(override['galaxy_id'])
+        if not np.array_equal(source_ids, override_ids):
+            raise ValueError('SFH override galaxy IDs are not row-aligned with the source.')
+        if override['sfh'].shape != source['sfh'].shape:
+            raise ValueError('SFH override shape differs from the source SFHs.')
+        if not np.allclose(
+            np.asarray(override['sfh_time_grid']),
+            np.asarray(source['sfh_time_grid']), atol=1e-7, rtol=0,
+        ):
+            raise ValueError('SFH override uses a different fractional time grid.')
+        maximum_error = override.attrs.get(
+            'maximum_absolute_stored_integral_error', None,
+        )
+        tolerance = float(override.attrs.get('integral_tolerance', 2e-6))
+        if maximum_error is None:
+            raise ValueError(
+                'SFH override does not record its stored-integral validation.'
+            )
+        if float(maximum_error) > tolerance:
+            raise ValueError(
+                f'SFH override normalization error {float(maximum_error):.3g} '
+                f'exceeds tolerance {tolerance:.3g}.'
+            )
+    return tolerance, float(maximum_error)
+
+
 def _inference_transform(image_size, num_output_channels=3):
     return transforms.Compose([
         transforms.Grayscale(num_output_channels=num_output_channels),
@@ -49,8 +85,14 @@ class EuclidZooBotDataset(Dataset):
 
     def __init__(self, sfh_path, stamp_root, rows, galaxy_ids, band='VIS',
                  training=True, sample_posterior=True, image_size=224,
-                 image_format='jpg', image_stats=None, asinh_scale=20.0):
+                 image_format='jpg', image_stats=None, asinh_scale=20.0,
+                 sfh_override_path=None):
         self.sfh_path = str(Path(sfh_path))
+        self.sfh_override_path = (
+            str(Path(sfh_override_path)) if sfh_override_path is not None else None
+        )
+        if self.sfh_override_path is not None and sample_posterior:
+            raise ValueError('SFH overrides require sample_posterior=False.')
         self.image_format = image_format
         if image_format == 'jpg':
             self.stamp_dir = Path(stamp_root) / band
@@ -77,6 +119,8 @@ class EuclidZooBotDataset(Dataset):
             )
         self._h5 = None
         self._h5_pid = None
+        self._sfh_override = None
+        self._sfh_override_pid = None
         if len(self.rows) != len(self.galaxy_ids):
             raise ValueError('rows and galaxy_ids must have equal length.')
 
@@ -96,17 +140,34 @@ class EuclidZooBotDataset(Dataset):
         state = self.__dict__.copy()
         state['_h5'] = None
         state['_h5_pid'] = None
+        state['_sfh_override'] = None
+        state['_sfh_override_pid'] = None
         return state
 
     def __del__(self):
         source = getattr(self, '_h5', None)
         if source is not None:
             source.close()
+        override = getattr(self, '_sfh_override', None)
+        if override is not None:
+            override.close()
+
+    def _sfh_source(self):
+        if self.sfh_override_path is None:
+            return self._source()
+        pid = os.getpid()
+        if self._sfh_override is None or self._sfh_override_pid != pid:
+            if self._sfh_override is not None:
+                self._sfh_override.close()
+            self._sfh_override = h5py.File(self.sfh_override_path, 'r')
+            self._sfh_override_pid = pid
+        return self._sfh_override
 
     def __getitem__(self, index):
         row = int(self.rows[index])
         galaxy_id = int(self.galaxy_ids[index])
         source = self._source()
+        sfh_source = self._sfh_source()
         realization_index = -1
         if self.training and self.sample_posterior:
             valid = np.flatnonzero(source['sfh_realization_valid'][row])
@@ -119,16 +180,22 @@ class EuclidZooBotDataset(Dataset):
                 dtype=np.float32,
             )
         else:
-            sfh = np.asarray(source['sfh'][row], dtype=np.float32)
+            sfh = np.asarray(sfh_source['sfh'][row], dtype=np.float32)
         if not np.all(np.isfinite(sfh)):
             raise ValueError(f'Nonfinite SFH for galaxy_id={galaxy_id}.')
 
         # A deterministic reference is used to define SFH-neighbour targets,
         # even when a posterior realization is sampled as encoder input.
         if realization_index >= 0:
-            sfh_reference = np.asarray(source['sfh'][row], dtype=np.float32)
+            sfh_reference = np.asarray(sfh_source['sfh'][row], dtype=np.float32)
         else:
             sfh_reference = sfh
+
+        if self.sfh_override_path is not None:
+            p16 = p84 = sfh
+        else:
+            p16 = np.asarray(source['sfh_p16'][row], dtype=np.float32)
+            p84 = np.asarray(source['sfh_p84'][row], dtype=np.float32)
 
         if self.image_format == 'jpg':
             path = self.stamp_dir / f'{self.band}_{galaxy_id}.jpg'
@@ -142,10 +209,10 @@ class EuclidZooBotDataset(Dataset):
             'sfh': torch.from_numpy(sfh.copy()),
             'sfh_reference': torch.from_numpy(sfh_reference.copy()),
             'sfh_p16': torch.from_numpy(
-                np.asarray(source['sfh_p16'][row], dtype=np.float32).copy(),
+                p16.copy(),
             ),
             'sfh_p84': torch.from_numpy(
-                np.asarray(source['sfh_p84'][row], dtype=np.float32).copy(),
+                p84.copy(),
             ),
             'galaxy_id': torch.tensor(galaxy_id, dtype=torch.int64),
             'sfh_realization': torch.tensor(realization_index, dtype=torch.int64),
@@ -163,7 +230,8 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                  image_stats=None, asinh_scale=20.0,
                  eligibility_stamp_root=None,
                  exclude_edge_on_axis_ratio_below=None,
-                 exclude_edge_on_probability_above=None):
+                 exclude_edge_on_probability_above=None,
+                 sfh_override_path=None):
         super().__init__()
         self.sfh_path = sfh_path
         self.stamp_root = stamp_root
@@ -187,10 +255,20 @@ class EuclidZooBotDataModule(L.LightningDataModule):
         self.eligibility_stamp_root = eligibility_stamp_root
         self.exclude_edge_on_axis_ratio_below = exclude_edge_on_axis_ratio_below
         self.exclude_edge_on_probability_above = exclude_edge_on_probability_above
+        self.sfh_override_path = sfh_override_path
         self.pair_index = None
 
     def setup(self, stage=None):
         if self.pair_index is None:
+            if self.sfh_override_path is not None:
+                tolerance, error = validate_sfh_override(
+                    self.sfh_path, self.sfh_override_path,
+                )
+                print(
+                    f'[EuclidImageSFH] override={self.sfh_override_path}; '
+                    f'max |integral-1|={error:.3g} <= {tolerance:.3g}',
+                    flush=True,
+                )
             self.pair_index = build_pair_index(
                 self.sfh_path, self.stamp_root, self.band,
                 self.val_fraction, self.seed, self.max_pairs,
@@ -230,6 +308,7 @@ class EuclidZooBotDataModule(L.LightningDataModule):
             image_format=self.image_format,
             image_stats=self.image_stats,
             asinh_scale=self.asinh_scale,
+            sfh_override_path=self.sfh_override_path,
         )
         self.train_ds = EuclidZooBotDataset(
             rows=self.pair_index.train_rows,

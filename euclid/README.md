@@ -764,6 +764,28 @@ The default outputs are `sfh_autoencoder_median_control_150k` and
 likewise feed original SFHs to the control encoder and IAAFT SFHs to the IAAFT
 encoder; swapping only the checkpoints would be an inconsistent input domain.
 
+After both encoder runs finish, launch the matched AE-adjacency alignment. The
+control receives the original HDF5 medians, while the IAAFT run receives the
+compact row-aligned override. Both retain the original 150k HDF5 for image
+matching, catalog selection, and the conservative edge-on exclusion:
+
+```bash
+CONTROL_AE=/path/to/sfh_autoencoder_median_control_150k/checkpoints/BEST.ckpt
+IAAFT_AE=/path/to/sfh_autoencoder_iaaft_recent10_150k/checkpoints/BEST.ckpt
+
+sbatch euclid/slurm_train_zoobot_clip_bright_iaaft_ablation.sh \
+  control "${CONTROL_AE}"
+
+sbatch euclid/slurm_train_zoobot_clip_bright_iaaft_ablation.sh \
+  iaaft "${IAAFT_AE}"
+```
+
+The IAAFT loader requires `--no-sample-posterior`, checks exact galaxy-ID and
+time-grid alignment against the source HDF5, and refuses an override whose
+recorded float32 round-trip normalization error exceeds its tolerance. The
+default CLIP outputs are `training_bright_ae_recent10_control` and
+`training_bright_ae_iaaft_recent10`.
+
 #### Frozen SFH autoencoder with a linear CLIP projection
 
 Full fine-tuning can return the pretrained SFH transformer to the same optimum

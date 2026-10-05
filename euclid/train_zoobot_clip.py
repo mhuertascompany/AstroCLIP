@@ -32,6 +32,13 @@ def parse_args():
     data = parser.add_argument_group('data')
     data.add_argument('--dataset', type=Path, required=True,
                       help='Preprocessed Euclid SFH HDF5 file.')
+    data.add_argument(
+        '--sfh-override', type=Path,
+        help=(
+            'Optional row-aligned compact HDF5 whose median SFHs replace the '
+            'source SFHs; requires --no-sample-posterior.'
+        ),
+    )
     data.add_argument('--stamp-root', type=Path,
                       help='Directory containing BAND/BAND_object_id.jpg for ZooBot.')
     data.add_argument('--fits-root', type=Path,
@@ -266,6 +273,11 @@ def parse_args():
 def validate_args(args):
     if not args.dataset.is_file():
         raise FileNotFoundError(f'SFH dataset not found: {args.dataset}')
+    if args.sfh_override is not None:
+        if not args.sfh_override.is_file():
+            raise FileNotFoundError(f'SFH override not found: {args.sfh_override}')
+        if args.sample_posterior:
+            raise ValueError('--sfh-override requires --no-sample-posterior.')
     if args.galactiktok_checkpoint is None:
         if args.stamp_root is None:
             raise ValueError('ZooBot training requires --stamp-root.')
@@ -478,7 +490,8 @@ def main():
     args = parse_args()
     validate_args(args)
     _, n_bins, n_realizations = inspect_sfh_file(args.dataset)
-    with h5py.File(args.dataset, 'r') as source:
+    sfh_value_path = args.sfh_override or args.dataset
+    with h5py.File(sfh_value_path, 'r') as source:
         sfh_log_epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
     L.seed_everything(args.seed, workers=True)
 
@@ -514,6 +527,7 @@ def main():
         exclude_edge_on_probability_above=(
             args.exclude_edge_on_probability_above
         ),
+        sfh_override_path=args.sfh_override,
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -523,6 +537,9 @@ def main():
         train_ids=pair_index.train_ids,
         val_rows=pair_index.val_rows,
         val_ids=pair_index.val_ids,
+        sfh_override=np.asarray(
+            str(args.sfh_override) if args.sfh_override is not None else ''
+        ),
     )
     if args.max_vis_mag is not None:
         split_data.update(
@@ -672,6 +689,7 @@ def main():
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
+        f'SFH override={args.sfh_override}; '
         f'alignment objective={args.alignment_objective}; '
         f'image encoder={image_encoder_description}; '
         f'SFH encoder={args.sfh_encoder}; '
