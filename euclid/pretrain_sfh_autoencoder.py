@@ -1,9 +1,10 @@
 """Pretrain the Euclid SFH transformer as a denoising autoencoder.
 
-Training inputs are random valid posterior realizations.  The target is the
-posterior-median SFH, so the global latent learns the stable history rather
-than realization-specific fluctuations.  A contiguous interval is masked
-before encoding, and a time-query decoder reconstructs the full 250-bin SFH.
+By default, training inputs are random valid posterior realizations and the
+target is the posterior median. ``--input-mode median`` instead uses the median
+as both input and target, enabling matched original-versus-surrogate ablations.
+A contiguous interval is masked before encoding, and a time-query decoder
+reconstructs the full 250-bin SFH.
 """
 
 from __future__ import annotations
@@ -34,10 +35,13 @@ from .training_index import inspect_sfh_file
 class EuclidSFHAutoencoderDataset(Dataset):
     """Lazy HDF5 dataset returning noisy inputs and median targets."""
 
-    def __init__(self, path, rows, training=True):
+    def __init__(self, path, rows, training=True, input_mode='posterior'):
         self.path = str(Path(path))
         self.rows = np.asarray(rows, dtype=np.int64)
         self.training = training
+        self.input_mode = input_mode
+        if input_mode not in {'posterior', 'median'}:
+            raise ValueError("input_mode must be 'posterior' or 'median'")
         self._h5 = None
         self._h5_pid = None
 
@@ -68,6 +72,19 @@ class EuclidSFHAutoencoderDataset(Dataset):
         source = self._source()
         row = int(self.rows[index])
         target = np.asarray(source['sfh'][row], dtype=np.float32)
+        if self.input_mode == 'median':
+            if not np.all(np.isfinite(target)):
+                raise ValueError(f'Nonfinite median SFH data at HDF5 row {row}.')
+            return {
+                'sfh': torch.from_numpy(target.copy()),
+                'target': torch.from_numpy(target.copy()),
+                # Equal bounds make the pointwise reconstruction weighting
+                # uniform for both original and IAAFT median-only controls.
+                'p16': torch.from_numpy(target.copy()),
+                'p84': torch.from_numpy(target.copy()),
+                'row': torch.tensor(row, dtype=torch.int64),
+                'realization': torch.tensor(-1, dtype=torch.int64),
+            }
         valid = np.flatnonzero(source['sfh_realization_valid'][row])
         if not len(valid):
             raise ValueError(f'No valid SFH realization at HDF5 row {row}.')
@@ -93,9 +110,31 @@ class EuclidSFHAutoencoderDataset(Dataset):
         }
 
 
+def inspect_pretraining_file(path, input_mode='posterior'):
+    """Validate either the full posterior file or a compact median-only file."""
+    if input_mode == 'posterior':
+        return inspect_sfh_file(path)
+    with h5py.File(path, 'r') as source:
+        required = ('galaxy_id', 'sfh', 'sfh_time_grid')
+        missing = [name for name in required if name not in source]
+        if missing:
+            raise ValueError(f'Missing median SFH datasets: {missing}')
+        ids = np.asarray(source['galaxy_id'])
+        sfh_shape = source['sfh'].shape
+        time_shape = source['sfh_time_grid'].shape
+        declared_n = int(source.attrs.get('n_galaxies', len(ids)))
+    if ids.ndim != 1 or ids.dtype.kind not in 'iu' or len(np.unique(ids)) != len(ids):
+        raise ValueError('galaxy_id must contain unique integer IDs.')
+    if len(time_shape) != 1 or sfh_shape != (len(ids), time_shape[0]):
+        raise ValueError('sfh and sfh_time_grid shapes are inconsistent.')
+    if declared_n != len(ids):
+        raise ValueError('n_galaxies does not match galaxy_id.')
+    return ids, sfh_shape[1], 0
+
+
 def split_rows(dataset_path, split_path=None, val_fraction=0.1, seed=42,
-               max_objects=None):
-    ids, _, _ = inspect_sfh_file(dataset_path)
+               max_objects=None, input_mode='posterior'):
+    ids, _, _ = inspect_pretraining_file(dataset_path, input_mode)
     if split_path is not None:
         with np.load(split_path) as split:
             required = {'train_rows', 'train_ids', 'val_rows', 'val_ids'}
@@ -132,7 +171,8 @@ def split_rows(dataset_path, split_path=None, val_fraction=0.1, seed=42,
 
 class EuclidSFHAutoencoderDataModule(L.LightningDataModule):
     def __init__(self, dataset, split=None, batch_size=256, num_workers=8,
-                 val_fraction=0.1, seed=42, max_objects=None):
+                 val_fraction=0.1, seed=42, max_objects=None,
+                 input_mode='posterior'):
         super().__init__()
         self.dataset = Path(dataset)
         self.split = Path(split) if split is not None else None
@@ -141,17 +181,23 @@ class EuclidSFHAutoencoderDataModule(L.LightningDataModule):
         self.val_fraction = val_fraction
         self.seed = seed
         self.max_objects = max_objects
+        self.input_mode = input_mode
 
     def setup(self, stage=None):
         train_rows, val_rows = split_rows(
             self.dataset, self.split, self.val_fraction, self.seed, self.max_objects,
+            self.input_mode,
         )
         self.train_rows, self.val_rows = train_rows, val_rows
-        self.train_ds = EuclidSFHAutoencoderDataset(self.dataset, train_rows, True)
-        self.val_ds = EuclidSFHAutoencoderDataset(self.dataset, val_rows, False)
+        self.train_ds = EuclidSFHAutoencoderDataset(
+            self.dataset, train_rows, True, self.input_mode,
+        )
+        self.val_ds = EuclidSFHAutoencoderDataset(
+            self.dataset, val_rows, False, self.input_mode,
+        )
         print(
             f'[EuclidSFHAutoencoder] train={len(train_rows):,}, '
-            f'val={len(val_rows):,}', flush=True,
+            f'val={len(val_rows):,}; input={self.input_mode}', flush=True,
         )
 
     def train_dataloader(self):
@@ -267,6 +313,10 @@ def parse_args():
                         help='Optional CLIP pair_split.npz for leakage-free comparison.')
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--run-name', default='euclid_sfh_autoencoder')
+    parser.add_argument(
+        '--input-mode', choices=('posterior', 'median'), default='posterior',
+        help='Use posterior draws or deterministic median SFHs as inputs.',
+    )
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--val-fraction', type=float, default=0.1)
@@ -300,16 +350,19 @@ def main():
         raise ValueError('Invalid batch size or worker count.')
     if not 0 <= args.w1_weight <= 1:
         raise ValueError('--w1-weight must lie in [0, 1].')
-    _, n_bins, n_realizations = inspect_sfh_file(args.dataset)
+    _, n_bins, n_realizations = inspect_pretraining_file(
+        args.dataset, args.input_mode,
+    )
     with h5py.File(args.dataset, 'r') as source:
-        missing = [name for name in ('sfh_p16', 'sfh_p84') if name not in source]
-        if missing:
-            raise ValueError(f'Missing uncertainty datasets: {missing}')
+        if args.input_mode == 'posterior':
+            missing = [name for name in ('sfh_p16', 'sfh_p84') if name not in source]
+            if missing:
+                raise ValueError(f'Missing uncertainty datasets: {missing}')
         epsilon = float(source.attrs.get('sfh_log_epsilon', 1e-10))
     L.seed_everything(args.seed, workers=True)
     datamodule = EuclidSFHAutoencoderDataModule(
         args.dataset, args.split, args.batch_size, args.num_workers,
-        args.val_fraction, args.seed, args.max_objects,
+        args.val_fraction, args.seed, args.max_objects, args.input_mode,
     )
     model = EuclidSFHAutoencoder(
         n_bins=n_bins, embed_dim=args.embed_dim, d_model=args.d_model,
@@ -334,7 +387,8 @@ def main():
     logger = CSVLogger(save_dir=str(log_dir), name=args.run_name)
     print(
         f'Pretraining SFH encoder-decoder: {n_bins} bins, '
-        f'{n_realizations} posterior realizations, mask={args.mask_fraction:g}, '
+        f'input={args.input_mode}, {n_realizations} posterior realizations, '
+        f'mask={args.mask_fraction:g}, '
         f'W1 weight={args.w1_weight:g}', flush=True,
     )
     trainer = L.Trainer(

@@ -717,6 +717,53 @@ split before comparing its retrieval and SFH-neighbour metrics. For a
 decoder-enabled checkpoint, that evaluation also adds median reconstruction
 W1 and mean-absolute-error summaries to `metrics.json`.
 
+#### Recent-preserved IAAFT encoder ablation
+
+This controlled experiment asks whether the temporal ordering of the older
+SFH contributes to image alignment beyond the latest 10% of fractional cosmic
+time. For each galaxy, the newest 25 of 250 bins are copied exactly. IAAFT
+randomizes the Fourier phase of the older 225 bins while preserving their
+value distribution and approximate power spectrum. A ten-bin crossfade is
+applied wholly on the old side of the boundary, and the old segment is
+rescaled to retain its original integral.
+
+The preprocessing job generates four candidates per galaxy and keeps the one
+with the smallest absolute old-shape correlation. Every generated history is
+normalized before writing. The job then reads back the stored float32
+logarithms and aborts if any recovered integral differs from one by more than
+`2e-6`, or if any recent bin changed. The output JSON records the observed
+minimum and maximum integrals.
+
+Run the end-to-end 2,048-object smoke test first:
+
+```bash
+sbatch euclid/slurm_pretrain_sfh_iaaft_test.sh
+```
+
+For the full comparison, build the compact IAAFT file:
+
+```bash
+PREP_JOB=$(sbatch --parsable euclid/slurm_build_iaaft_sfh_dataset.sh)
+```
+
+The original and IAAFT encoders use the same deterministic median input,
+four-layer width-128 transformer, 256-dimensional latent, two-layer decoder,
+35% contiguous masking, loss, optimizer, and edge-on-filtered CLIP split. This
+avoids comparing posterior augmentation in only one arm. Submit the original
+control immediately and make the IAAFT arm depend on successful preprocessing:
+
+```bash
+sbatch euclid/slurm_pretrain_sfh_iaaft_ablation.sh control
+sbatch --dependency="afterok:${PREP_JOB}" \
+  euclid/slurm_pretrain_sfh_iaaft_ablation.sh iaaft
+```
+
+The default outputs are `sfh_autoencoder_median_control_150k` and
+`sfh_autoencoder_iaaft_recent10_150k`. Compare `val_loss`, `val_w1`, and
+`val_clean_w1` only between these two matched runs. The next CLIP ablation must
+likewise feed original SFHs to the control encoder and IAAFT SFHs to the IAAFT
+encoder; swapping only the checkpoints would be an inconsistent input domain.
+
 #### Frozen SFH autoencoder with a linear CLIP projection
 
 Full fine-tuning can return the pretrained SFH transformer to the same optimum
