@@ -1,4 +1,4 @@
-"""Plot random Euclid SFHs with recent-preserved IAAFT surrogates."""
+"""Plot random Euclid SFHs with temporal-ablation IAAFT surrogates."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .sfh_surrogates import recent_preserved_iaaft
+from .sfh_surrogates import past_preserved_iaaft, recent_preserved_iaaft
 
 
 def _arguments():
@@ -22,6 +22,7 @@ def _arguments():
     parser.add_argument("--n-examples", type=int, default=8)
     parser.add_argument("--n-surrogates", type=int, default=3)
     parser.add_argument("--recent-fraction", type=float, default=0.1)
+    parser.add_argument("--preserve", choices=("recent", "past"), default="recent")
     parser.add_argument("--transition-bins", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -57,22 +58,31 @@ def main():
     axes = np.atleast_1d(axes).ravel()
     colors = plt.cm.plasma(np.linspace(0.18, 0.78, args.n_surrogates))
     records = []
+    transform = recent_preserved_iaaft if args.preserve == "recent" else past_preserved_iaaft
+    randomized_name = "old" if args.preserve == "recent" else "recent"
+    preserved_name = "recent" if args.preserve == "recent" else "past"
+    correlation_key = f"{randomized_name}_correlation"
+    integral_error_key = f"{randomized_name}_integral_error"
 
     for panel, row in enumerate(selected):
         ax = axes[panel]
         original = weights[row] / totals[row]
-        ax.axvspan(0, args.recent_fraction, color="#d7f0e4", alpha=0.75,
-                   label="preserved recent 10%" if panel == 0 else None)
+        if args.preserve == "recent":
+            ax.axvspan(0, args.recent_fraction, color="#d7f0e4", alpha=0.75,
+                       label="preserved recent 10%" if panel == 0 else None)
+        else:
+            ax.axvspan(args.recent_fraction, 1, color="#d7f0e4", alpha=0.75,
+                       label="preserved past 90%" if panel == 0 else None)
         ax.plot(time, original, color="black", lw=2.0,
                 label="original" if panel == 0 else None, zorder=5)
         correlations = []
         for number, color in enumerate(colors, start=1):
-            surrogate, diagnostic = recent_preserved_iaaft(
+            surrogate, diagnostic = transform(
                 original, time, rng,
                 recent_fraction=args.recent_fraction,
                 transition_bins=args.transition_bins,
             )
-            correlations.append(diagnostic["old_correlation"])
+            correlations.append(diagnostic[correlation_key])
             record = {
                 "galaxy_id": int(galaxy_id[row]),
                 "h5_row": int(row),
@@ -88,7 +98,8 @@ def main():
         ax.set_title(
             f"ID {galaxy_id[row]}  |  z={redshift[row]:.2f}  |  "
             f"0.1 age={physical_recent:.2f} Gyr\n"
-            f"old-shape correlation: {np.min(correlations):.2f} to {np.max(correlations):.2f}",
+            f"{randomized_name}-shape correlation: "
+            f"{np.min(correlations):.2f} to {np.max(correlations):.2f}",
             fontsize=9,
         )
         ax.grid(alpha=0.18, lw=0.6)
@@ -103,8 +114,9 @@ def main():
         ax.set_visible(False)
     axes[0].legend(loc="upper left", fontsize=8, frameon=True, framealpha=0.92)
     fig.suptitle(
-        "Recent-preserved IAAFT SFH surrogates\n"
-        "The latest 10% is exact; the older value distribution and integral are preserved",
+        f"{preserved_name.capitalize()}-preserved IAAFT SFH surrogates\n"
+        f"The {preserved_name} segment is exact; the {randomized_name} value "
+        "distribution and integral are preserved",
         fontsize=14, y=0.992,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.965), h_pad=1.3)
@@ -122,15 +134,20 @@ def main():
             "source_h5": str(args.h5),
             "seed": args.seed,
             "recent_fraction": args.recent_fraction,
+            "preserved_segment": args.preserve,
             "transition_bins_requested": args.transition_bins,
             "n_examples": args.n_examples,
             "n_surrogates_per_example": args.n_surrogates,
             "selected_galaxy_ids": [int(galaxy_id[row]) for row in selected],
-            "maximum_absolute_old_integral_error": float(max(abs(x["old_integral_error"]) for x in records)),
-            "old_correlation_median": float(np.nanmedian([x["old_correlation"] for x in records])),
-            "old_correlation_range": [
-                float(np.nanmin([x["old_correlation"] for x in records])),
-                float(np.nanmax([x["old_correlation"] for x in records])),
+            f"maximum_absolute_{randomized_name}_integral_error": float(
+                max(abs(x[integral_error_key]) for x in records)
+            ),
+            f"{randomized_name}_correlation_median": float(
+                np.nanmedian([x[correlation_key] for x in records])
+            ),
+            f"{randomized_name}_correlation_range": [
+                float(np.nanmin([x[correlation_key] for x in records])),
+                float(np.nanmax([x[correlation_key] for x in records])),
             ],
             "per_surrogate": records,
         }
