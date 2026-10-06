@@ -20,7 +20,22 @@ conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
 TRAINING=${BASE}/conditional_sfh_diffusion_phz
-CHECKPOINT=${1:-${TRAINING}/checkpoints/last.ckpt}
+if [[ $# -ge 1 && -n "$1" ]]; then
+    CHECKPOINT=$1
+else
+    CHECKPOINT=$(python - "${TRAINING}/runtime.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(f'Missing training runtime report: {path}')
+checkpoint = Path(json.loads(path.read_text())['best_checkpoint'])
+print(checkpoint)
+PY
+    )
+fi
 OUTPUT=${2:-${TRAINING}/validation_predictive_sfhs.h5}
 DRAWS=${3:-32}
 DATASET=${BASE}/sfh_clip_150k.h5
