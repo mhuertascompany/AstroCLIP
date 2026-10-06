@@ -58,12 +58,34 @@ class ConditionedStamps(Dataset):
 
 class PixelDiffusion(L.LightningModule):
     def __init__(self, condition_dim=256, base=32, steps=1000, lr=1e-4,
-                 condition_dropout=.15, ema_decay=.999, cache_sha256=''):
+                 condition_dropout=.15, ema_decay=.999, cache_sha256='',
+                 high_noise_fraction=0.0, high_noise_min=0.8):
         super().__init__()
+        if not 0 <= condition_dropout < 1:
+            raise ValueError('condition_dropout must be in [0, 1).')
+        if not 0 <= high_noise_fraction <= 1:
+            raise ValueError('high_noise_fraction must be in [0, 1].')
+        if not 0 <= high_noise_min < 1:
+            raise ValueError('high_noise_min must be in [0, 1).')
         self.save_hyperparameters()
         self.net = ConditionalUNet(condition_dim, base)
         self.ema = copy.deepcopy(self.net).eval().requires_grad_(False)
         self.schedule = DiffusionSchedule(steps)
+
+    def sample_training_timesteps(self, batch_size, device):
+        """Sample timesteps, optionally oversampling the lowest-SNR interval."""
+        count = len(self.schedule.alpha)
+        timestep = torch.randint(count, (batch_size,), device=device)
+        fraction = float(self.hparams.high_noise_fraction)
+        if fraction > 0:
+            replace = torch.rand(batch_size, device=device) < fraction
+            n_replace = int(replace.sum().item())
+            if n_replace:
+                lower = min(int(float(self.hparams.high_noise_min) * count), count - 1)
+                timestep[replace] = torch.randint(
+                    lower, count, (n_replace,), device=device,
+                )
+        return timestep
 
     def train(self, mode=True):
         super().train(mode)
@@ -72,7 +94,7 @@ class PixelDiffusion(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         image, condition = batch
-        t = torch.randint(len(self.schedule.alpha), (len(image),), device=self.device)
+        t = self.sample_training_timesteps(len(image), self.device)
         noisy, target = self.schedule.noisy_target(image, torch.randn_like(image), t)
         drop = torch.rand(len(image), device=self.device) < self.hparams.condition_dropout
         prediction = self.net(noisy, t, condition, drop)
@@ -93,13 +115,20 @@ class PixelDiffusion(L.LightningModule):
         t = torch.randint(len(self.schedule.alpha), (len(image),), generator=rng, device=self.device)
         noise = torch.randn(image.shape, generator=rng, device=self.device)
         noisy, target = self.schedule.noisy_target(image, noise, t)
+        high_noise = t >= int(float(self.hparams.high_noise_min) * len(self.schedule.alpha))
         for label, cond, drop in (
             ('val_v_mse', condition, None),
             ('val_shuffled_v_mse', condition.roll(1, dims=0), None),
             ('val_unconditional_v_mse', condition, torch.ones(len(image), dtype=torch.bool, device=self.device)),
         ):
-            loss = F.mse_loss(self.ema(noisy, t, cond, drop).float(), target)
+            per_object = F.mse_loss(
+                self.ema(noisy, t, cond, drop).float(), target, reduction='none',
+            ).mean(dim=(1, 2, 3))
+            loss = per_object.mean()
             self.log(label, loss, prog_bar=label == 'val_v_mse', batch_size=len(image))
+            if high_noise.any():
+                high_label = label.replace('val_', 'val_high_noise_')
+                self.log(high_label, per_object[high_noise].mean(), batch_size=int(high_noise.sum()))
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.net.parameters(), lr=self.hparams.lr, weight_decay=.01)
@@ -156,11 +185,24 @@ def main():
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--base', type=int, default=32)
+    parser.add_argument('--condition-dropout', type=float, default=.15)
+    parser.add_argument(
+        '--high-noise-fraction', type=float, default=0.0,
+        help='Fraction of training examples resampled from the high-noise interval.',
+    )
+    parser.add_argument(
+        '--high-noise-min', type=float, default=.8,
+        help='Lower fractional timestep boundary of the high-noise interval.',
+    )
     parser.add_argument('--accelerator', choices=['gpu', 'cpu'], default='gpu')
     parser.add_argument('--sample-steps', type=int, default=100)
     args = parser.parse_args()
     if min(args.batch_size, args.accumulate, args.epochs) < 1 or args.workers < 0:
         parser.error('Batch, accumulation and epochs must be positive; workers nonnegative.')
+    if not 0 <= args.condition_dropout < 1:
+        parser.error('condition-dropout must lie in [0, 1).')
+    if not 0 <= args.high_noise_fraction <= 1 or not 0 <= args.high_noise_min < 1:
+        parser.error('high-noise-fraction must lie in [0, 1] and high-noise-min in [0, 1).')
     if args.resume and args.sample_checkpoint:
         parser.error('Use either resume or sample-checkpoint.')
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
@@ -183,6 +225,9 @@ def main():
             raise ValueError('Resume checkpoint uses a different condition cache.')
     else:
         model = PixelDiffusion(condition_dim=train.conditions.shape[1], base=args.base,
+                               condition_dropout=args.condition_dropout,
+                               high_noise_fraction=args.high_noise_fraction,
+                               high_noise_min=args.high_noise_min,
                                cache_sha256=digest)
     args.output.mkdir(parents=True, exist_ok=True)
     settings = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}

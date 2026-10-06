@@ -65,6 +65,17 @@ class PixelDiffusionTests(unittest.TestCase):
                 initial_noise=torch.randn(1, 1, 32, 32),
             )
 
+    def test_high_noise_timestep_sampling(self):
+        model = PixelDiffusion(
+            16, base=8, steps=100, high_noise_fraction=1.0,
+            high_noise_min=0.8,
+        )
+        timestep = model.sample_training_timesteps(2048, 'cpu')
+        self.assertGreaterEqual(int(timestep.min()), 80)
+        self.assertLess(int(timestep.max()), 100)
+        with self.assertRaisesRegex(ValueError, 'high_noise_fraction'):
+            PixelDiffusion(16, base=8, high_noise_fraction=1.1)
+
     def test_data_split_and_lightning_checkpoint(self):
         import lightning as L
         with tempfile.TemporaryDirectory() as tmp:

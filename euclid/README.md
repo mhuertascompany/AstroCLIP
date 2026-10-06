@@ -1999,6 +1999,37 @@ module's `--output` option with a fresh directory, or preserve/rename the prior
 smoke output before resubmitting. If memory is tight, reduce batch size to 4;
 the default effective batch then becomes 16 instead of 32.
 
+The original diffusion model responds only weakly to large movements through
+the conditioning space. The controlled replacement uses the edge-on-filtered
+AE-adjacency CLIP checkpoint and its exact filtered split. It also sends half
+of training examples to timesteps in the noisiest 20% of the schedule, where
+the corrupted image carries little morphology and the SFH condition is more
+useful. Condition dropout is reduced from 0.15 to 0.10. Create the new cache
+and run the smoke test with a dependency:
+
+```bash
+CONDITION_JOB=$(sbatch --parsable \
+  euclid/slurm_prepare_diffusion_conditions_ae_no_edgeon.sh)
+sbatch --dependency=afterok:${CONDITION_JOB} --time=02:00:00 \
+  euclid/slurm_train_pixel_diffusion_ae_no_edgeon.sh smoke 8
+```
+
+The condition cache is
+`diffusion_conditions_ae_adjacency_no_edgeon.npz`; the smoke output is
+`pixel_diffusion_ae_adjacency_no_edgeon_conditioned_smoke`. In addition to the
+usual validation losses, inspect `val_high_noise_v_mse`,
+`val_high_noise_shuffled_v_mse`, and `val_high_noise_unconditional_v_mse`.
+Correct conditions should beat shuffled and null conditions, especially in
+the high-noise subset. Also inspect `samples_best/conditioning_comparison.png`
+before launching the full run:
+
+```bash
+sbatch euclid/slurm_train_pixel_diffusion_ae_no_edgeon.sh full 8
+```
+
+This is intentionally a fresh training, not a resume from the old diffusion:
+the object split and 256-dimensional conditioning coordinate system changed.
+
 For additional samples, run `python -m euclid.train_pixel_diffusion` in a GPU
 allocation with `--conditions`, `--stamps`, a fresh `--output`, and
 `--sample-checkpoint /path/to/best.ckpt --sample-steps 100`. This loads EMA
