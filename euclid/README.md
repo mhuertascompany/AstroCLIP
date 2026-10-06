@@ -2061,6 +2061,20 @@ it was trained, so rendering maps those analogue IDs through
 `diffusion_conditions_aligned_best.npz`; passing AE-adjacency vectors directly
 to this older pixel model would mix incompatible latent coordinate systems.
 
+To diagnose whether interpolation or five-object centroiding suppresses the
+morphological evolution, render every candidate with its exact condition:
+
+```bash
+sbatch euclid/slurm_render_progenitor_candidate_images.sh
+```
+
+This generates the descendant and all five candidates at each of the 13
+checkpoints with identical initial noise (seed `314159`). It applies neither
+embedding interpolation nor centroid averaging. The output contains a
+multi-page candidate comparison, a discrete rank-1 sequence, the individual
+images, and a CSV of condition cosines and image RMS differences relative to
+the descendant. A different seed can be supplied as the fourth argument.
+
 ### Diffusion comparison with contrasting SFHs
 
 From the Candide repository root, submit:
