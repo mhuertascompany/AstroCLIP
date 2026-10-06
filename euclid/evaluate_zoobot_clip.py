@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from scipy.spatial.distance import cdist
 from torch.utils.data import DataLoader
 
-from .dataset_zoobot import EuclidZooBotDataset
+from .dataset_zoobot import EuclidZooBotDataset, validate_sfh_override
 from .training_index import inspect_sfh_file
 from .vis_fits import resolve_fits_directory, vis_fits_path
 
@@ -95,7 +95,7 @@ def validate_saved_split(dataset_path, split_path, stamp_root, band='VIS',
 def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
                       image_size, batch_size, num_workers,
                       image_format='jpg', image_stats=None,
-                      asinh_scale=20.0):
+                      asinh_scale=20.0, sfh_override_path=None):
     dataset = EuclidZooBotDataset(
         sfh_path=dataset_path,
         stamp_root=stamp_root,
@@ -108,6 +108,7 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
         image_format=image_format,
         image_stats=image_stats,
         asinh_scale=asinh_scale,
+        sfh_override_path=sfh_override_path,
     )
     return DataLoader(
         dataset,
@@ -612,6 +613,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--dataset', type=Path, required=True)
+    parser.add_argument(
+        '--sfh-override', type=Path,
+        help=(
+            'Optional compact, row-aligned SFH file used as encoder input. '
+            'Posterior diagnostics must be skipped because the source posterior '
+            'draws do not represent the override histories.'
+        ),
+    )
     parser.add_argument('--stamp-root', type=Path, required=True)
     parser.add_argument(
         '--image-format', choices=('jpg', 'fits'), default='jpg',
@@ -653,6 +662,21 @@ def main():
     for path in (args.checkpoint, args.dataset, args.split):
         if not path.is_file():
             raise FileNotFoundError(path)
+    if args.sfh_override is not None:
+        if not args.sfh_override.is_file():
+            raise FileNotFoundError(args.sfh_override)
+        if not args.skip_posterior:
+            raise ValueError(
+                '--sfh-override requires --skip-posterior because the source '
+                'posterior realizations do not describe the override SFHs.'
+            )
+        tolerance, maximum_error = validate_sfh_override(
+            args.dataset, args.sfh_override,
+        )
+        log.info(
+            'Validated SFH override: max |integral-1|=%.3g <= %.3g',
+            maximum_error, tolerance,
+        )
     if args.image_format == 'fits':
         if args.image_stats is None or not args.image_stats.is_file():
             raise FileNotFoundError(
@@ -690,6 +714,7 @@ def main():
         args.dataset, args.stamp_root, val_rows, val_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
         args.image_format, args.image_stats, args.asinh_scale,
+        args.sfh_override,
     )
     extracted = extract_embeddings(
         model, loader, device, include_image_preprojection=True,
@@ -719,11 +744,17 @@ def main():
     paired_cosine = np.sum(image_embedding * sfh_embedding, axis=1)
     with h5py.File(args.dataset, 'r') as source:
         redshifts = _read_rows(source['redshift'], val_rows).astype(np.float32)
-        raw_sfh = _read_rows(source['sfh'], val_rows).astype(np.float32)
+    sfh_value_path = args.sfh_override or args.dataset
+    with h5py.File(sfh_value_path, 'r') as sfh_source:
+        raw_sfh = _read_rows(sfh_source['sfh'], val_rows).astype(np.float32)
 
     report = {
         'checkpoint': str(args.checkpoint.resolve()),
         'dataset': str(args.dataset.resolve()),
+        'sfh_override': (
+            str(args.sfh_override.resolve())
+            if args.sfh_override is not None else None
+        ),
         'split': str(args.split.resolve()),
         'device': str(device),
         'alignment_objective': (
