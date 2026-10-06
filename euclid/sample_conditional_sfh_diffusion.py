@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--partition', choices=('train', 'val', 'all'), default='val')
     parser.add_argument('--draws', type=int, default=32)
-    parser.add_argument('--batch-size', type=int, default=64,
+    parser.add_argument('--batch-size', type=int, default=16,
                         help='Number of distinct galaxies sampled per GPU batch.')
     parser.add_argument('--sample-steps', type=int, default=100)
     parser.add_argument('--guidance', type=float, default=1.0,
@@ -105,7 +105,10 @@ def main():
             stop = min(start + args.batch_size, n)
             condition = torch.from_numpy(raw_condition[start:stop]).to(device)
             expanded = condition.repeat_interleave(args.draws, dim=0)
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.autocast(
+                device_type=device.type, dtype=torch.float16,
+                enabled=device.type == 'cuda',
+            ):
                 generated, generated_clr = model.model.sample_weights(
                     expanded, steps=args.sample_steps, guidance=args.guidance,
                     seed=args.seed + start * 1000003,

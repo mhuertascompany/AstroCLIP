@@ -53,7 +53,7 @@ python -u -m euclid.sample_conditional_sfh_diffusion \
     --output "${OUTPUT}" \
     --partition val \
     --draws "${DRAWS}" \
-    --batch-size 64 \
+    --batch-size 16 \
     --sample-steps 100 \
     --guidance 1 \
     --seed 42 \
