@@ -56,6 +56,23 @@ def test_load_conditions_uses_phz_catalog_values(tmp_path):
         target['phz_pp_median_stellarmass'] = [10.0, 10.5, np.nan]
         target['phz_pp_median_redshift'] = [0.5, 1.0, 0.7]
         target['phz_pp_median_sfr'] = [-0.2, 0.4, 0.1]
-    conditions, valid = load_conditions(path)
+    conditions, valid = load_conditions(path, sfr_source='phz')
     np.testing.assert_allclose(conditions[:2], [[10.0, 0.5, -0.2], [10.5, 1.0, 0.4]])
     np.testing.assert_array_equal(valid, [True, True, False])
+
+
+def test_load_conditions_can_derive_sfr100_from_same_sfh(tmp_path):
+    path = tmp_path / 'catalog.h5'
+    weights = np.array([[0.2, 0.3, 0.5]], dtype=np.float32)
+    with h5py.File(path, 'w') as target:
+        target['phz_pp_median_stellarmass'] = [10.0]
+        target['phz_pp_median_redshift'] = [0.5]
+        target['sfh'] = np.log10(weights + 1e-10)
+        target['sfh_time_grid'] = [0.0, 0.5, 1.0]
+        target['sfh_time_norm'] = [1000.0]
+    conditions, valid = load_conditions(path, sfr_source='sfh')
+    # The first bin spans fractional time [0,.25]. A 100 Myr window at an
+    # age of 1 Gyr covers .1/.25 of its 0.2 mass weight: fraction=0.08.
+    expected_log_sfr = 10.0 + np.log10(0.08) - 8.0
+    np.testing.assert_allclose(conditions[0, 2], expected_log_sfr, atol=1e-6)
+    np.testing.assert_array_equal(valid, [True])

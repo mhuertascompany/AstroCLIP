@@ -19,7 +19,7 @@ MODE=${1:-full}
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
 DATASET=${BASE}/sfh_clip_150k.h5
 SPLIT=${BASE}/training_bright_frozen_unrestricted_ae_no_edgeon/pair_split.npz
-OUTPUT=${2:-${BASE}/conditional_sfh_diffusion_phz}
+OUTPUT=${2:-${BASE}/conditional_sfh_diffusion_sfh_sfr100}
 RESUME=${3:-}
 
 [[ "${MODE}" == "full" || "${MODE}" == "smoke" ]] || {
@@ -45,6 +45,7 @@ python -u -m euclid.train_conditional_sfh_diffusion \
     --split "${SPLIT}" \
     --output "${OUTPUT}" \
     --input-mode posterior \
+    --sfr-source sfh \
     --batch-size 256 \
     --workers "${SLURM_CPUS_PER_TASK}" \
     --epochs 100 \
@@ -57,4 +58,3 @@ python -u -m euclid.train_conditional_sfh_diffusion \
     --lr 1e-4 \
     --accelerator gpu \
     "${EXTRA[@]}"
-

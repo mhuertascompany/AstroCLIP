@@ -28,13 +28,11 @@ from .sfh_conditional_diffusion import (
     log_sfh_to_weights,
     weights_to_clr,
 )
+from .sfh_shape import sfh_recent_activity
 
 
-CONDITION_COLUMNS = (
-    'phz_pp_median_stellarmass',
-    'phz_pp_median_redshift',
-    'phz_pp_median_sfr',
-)
+BASE_CONDITION_COLUMNS = ('phz_pp_median_stellarmass', 'phz_pp_median_redshift')
+PHZ_SFR_COLUMN = 'phz_pp_median_sfr'
 CONDITION_LABELS = ('log_stellar_mass', 'redshift', 'log_sfr_100myr')
 
 
@@ -46,14 +44,30 @@ def _read_rows(dataset, rows):
     return np.asarray(dataset[rows[order]])[inverse]
 
 
-def load_conditions(dataset_path):
+def load_conditions(dataset_path, sfr_source='sfh'):
+    if sfr_source not in {'sfh', 'phz'}:
+        raise ValueError("sfr_source must be 'sfh' or 'phz'.")
     with h5py.File(dataset_path, 'r') as source:
-        missing = [name for name in CONDITION_COLUMNS if name not in source]
+        required = list(BASE_CONDITION_COLUMNS)
+        if sfr_source == 'phz':
+            required.append(PHZ_SFR_COLUMN)
+        else:
+            required.extend(('sfh', 'sfh_time_grid', 'sfh_time_norm'))
+        missing = [name for name in required if name not in source]
         if missing:
             raise ValueError(f'Dataset is missing physical conditions: {missing}')
-        conditions = np.column_stack([
-            np.asarray(source[name], dtype=np.float32) for name in CONDITION_COLUMNS
-        ])
+        mass = np.asarray(source[BASE_CONDITION_COLUMNS[0]], dtype=np.float32)
+        redshift = np.asarray(source[BASE_CONDITION_COLUMNS[1]], dtype=np.float32)
+        if sfr_source == 'phz':
+            log_sfr = np.asarray(source[PHZ_SFR_COLUMN], dtype=np.float32)
+        else:
+            recent = sfh_recent_activity(
+                np.asarray(source['sfh'], dtype=np.float32),
+                np.asarray(source['sfh_time_grid'], dtype=np.float32),
+                age_myr=np.asarray(source['sfh_time_norm'], dtype=np.float32),
+            )
+            log_sfr = recent['sfh_log_sfr_per_stellar_mass_100myr_r0'] + mass
+        conditions = np.column_stack([mass, redshift, log_sfr]).astype(np.float32)
     valid = np.all(np.isfinite(conditions), axis=1)
     valid &= (conditions[:, 0] > 0) & (conditions[:, 0] < 20)
     valid &= (conditions[:, 1] >= 0) & (conditions[:, 1] < 20)
@@ -98,7 +112,7 @@ def fit_transforms(dataset_path, train_rows, conditions, epsilon=1e-10,
 class ConditionalSFHDataset(Dataset):
     def __init__(self, path, rows, conditions, condition_mean, condition_scale,
                  clr_mean, clr_scale, input_mode='posterior', training=True,
-                 epsilon=1e-10, clr_floor=1e-8):
+                 epsilon=1e-10, clr_floor=1e-8, sfr_source='sfh'):
         self.path = str(Path(path))
         self.rows = np.asarray(rows, dtype=np.int64)
         self.conditions = np.asarray(conditions[self.rows], dtype=np.float32)
@@ -110,10 +124,19 @@ class ConditionalSFHDataset(Dataset):
         self.training = training
         self.epsilon = epsilon
         self.clr_floor = clr_floor
+        self.sfr_source = sfr_source
         self._h5 = None
         self._pid = None
         if input_mode not in {'median', 'posterior'}:
             raise ValueError("input_mode must be 'median' or 'posterior'.")
+        if sfr_source not in {'sfh', 'phz'}:
+            raise ValueError("sfr_source must be 'sfh' or 'phz'.")
+        with h5py.File(self.path, 'r') as source:
+            self.time_grid = np.asarray(source['sfh_time_grid'], dtype=np.float32)
+            self.age_myr = _read_rows(source['sfh_time_norm'], self.rows).astype(np.float32)
+        self.time_edges = np.r_[
+            0.0, (self.time_grid[:-1] + self.time_grid[1:]) / 2, 1.0,
+        ]
 
     def __len__(self):
         return len(self.rows)
@@ -150,7 +173,20 @@ class ConditionalSFHDataset(Dataset):
         weights = log_sfh_to_weights(log_sfh, self.epsilon)
         clr = weights_to_clr(weights, self.clr_floor)
         target = (clr - self.clr_mean) / self.clr_scale
-        condition = (self.conditions[index] - self.condition_mean) / self.condition_scale
+        raw_condition = self.conditions[index].copy()
+        if self.sfr_source == 'sfh':
+            age_myr = float(self.age_myr[index])
+            upper = min(1.0e8 / (age_myr * 1.0e6), 1.0)
+            widths = np.diff(self.time_edges)
+            overlap = np.maximum(
+                0.0,
+                np.minimum(self.time_edges[1:], upper) - self.time_edges[:-1],
+            )
+            recent_fraction = float(weights @ (overlap / widths))
+            raw_condition[2] = (
+                raw_condition[0] + np.log10(max(recent_fraction, 1e-15)) - 8.0
+            )
+        condition = (raw_condition - self.condition_mean) / self.condition_scale
         return {
             'target': torch.from_numpy(target.copy()),
             'condition': torch.from_numpy(condition.copy()),
@@ -164,7 +200,7 @@ class ConditionalSFHDiffusion(L.LightningModule):
     def __init__(self, n_bins, condition_mean, condition_scale, clr_mean,
                  clr_scale, d_model=128, n_heads=4, n_layers=4, dropout=0.1,
                  diffusion_steps=1000, condition_dropout=0.15, lr=1e-4,
-                 weight_decay=0.01, ema_decay=0.999):
+                 weight_decay=0.01, ema_decay=0.999, sfr_source='sfh'):
         super().__init__()
         self.save_hyperparameters()
         self.model = ConditionalSFHDiffusionModule(
@@ -240,6 +276,7 @@ def parse_args():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--input-mode', choices=('median', 'posterior'), default='posterior')
+    parser.add_argument('--sfr-source', choices=('sfh', 'phz'), default='sfh')
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=100)
@@ -264,7 +301,7 @@ def main():
         raise ValueError(f'Output is nonempty; pass --resume or use a new path: {args.output}')
     L.seed_everything(42, workers=True)
     split = load_saved_split(args.dataset, args.split)
-    conditions, valid = load_conditions(args.dataset)
+    conditions, valid = load_conditions(args.dataset, args.sfr_source)
     train_rows = split['train_rows'][valid[split['train_rows']]]
     val_rows = split['val_rows'][valid[split['val_rows']]]
     if args.smoke:
@@ -279,11 +316,11 @@ def main():
     )
     train = ConditionalSFHDataset(
         dataset_args[0], train_rows, *dataset_args[1:],
-        input_mode=args.input_mode, training=True,
+        input_mode=args.input_mode, training=True, sfr_source=args.sfr_source,
     )
     val = ConditionalSFHDataset(
         dataset_args[0], val_rows, *dataset_args[1:],
-        input_mode=args.input_mode, training=False,
+        input_mode=args.input_mode, training=False, sfr_source=args.sfr_source,
     )
     args.output.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -300,6 +337,7 @@ def main():
         d_model=args.d_model, n_heads=args.n_heads, n_layers=args.n_layers,
         diffusion_steps=args.diffusion_steps,
         condition_dropout=args.condition_dropout, lr=args.lr,
+        sfr_source=args.sfr_source,
     )
     model = ConditionalSFHDiffusion(**model_args)
     if args.resume is not None:
@@ -309,7 +347,12 @@ def main():
     settings = {key: str(value) if isinstance(value, Path) else value
                 for key, value in vars(args).items()}
     settings.update(
-        condition_columns=CONDITION_COLUMNS, condition_labels=CONDITION_LABELS,
+        condition_columns=(
+            (*BASE_CONDITION_COLUMNS, PHZ_SFR_COLUMN)
+            if args.sfr_source == 'phz'
+            else (*BASE_CONDITION_COLUMNS, 'SFH-derived SFR100; R=0')
+        ),
+        condition_labels=CONDITION_LABELS, sfr_source=args.sfr_source,
         train_count=len(train), val_count=len(val), n_bins=n_bins,
         removed_for_invalid_conditions=int((~valid).sum()),
         sfh_representation='centered log-ratio; inverse softmax sums to one',

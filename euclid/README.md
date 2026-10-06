@@ -2558,8 +2558,11 @@ distribution
 p(\mathrm{SFH}\mid \log M_\star, z_{\rm phot}, \log \mathrm{SFR}_{100})
 \]
 
-using the PHZ median mass, redshift, and 100 Myr SFR columns. The target is a
-250-bin normalized SFH. Diffusion is performed in centered log-ratio space;
+using the PHZ median mass and redshift together with the 100 Myr SFR integrated
+from the same normalized SFH, scaled by the observation-time catalog mass with
+`R=0`. For posterior-mode training, SFR100 is recomputed from the particular
+SFH posterior realization drawn for that example. The target is a 250-bin
+normalized SFH. Diffusion is performed in centered log-ratio space;
 inverse softmax therefore makes every generated draw nonnegative and forces
 its discrete mass integral to equal one. With the default `posterior` input
 mode, a random stored SFH realization is drawn during training. The generated
@@ -2570,7 +2573,7 @@ Run a short end-to-end test before the full job:
 
 ```bash
 sbatch euclid/slurm_train_conditional_sfh_diffusion.sh smoke \
-  /n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/conditional_sfh_diffusion_phz_smoke
+  /n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/conditional_sfh_diffusion_sfh_sfr100_smoke
 ```
 
 Train the full model:
@@ -2587,7 +2590,7 @@ sbatch euclid/slurm_sample_conditional_sfh_diffusion.sh
 ```
 
 The default output is
-`conditional_sfh_diffusion_phz/validation_predictive_sfhs.h5`. It contains the
+`conditional_sfh_diffusion_sfh_sfr100/validation_predictive_sfhs.h5`. It contains the
 draws, predictive mean and percentiles, and two residual definitions:
 
 - `residual_sfh`: observed normalized bin weights minus the predictive mean.

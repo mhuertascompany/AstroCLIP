@@ -12,8 +12,9 @@ import torch
 
 from .sfh_conditional_diffusion import log_sfh_to_weights, weights_to_clr
 from .train_conditional_sfh_diffusion import (
-    CONDITION_COLUMNS,
+    BASE_CONDITION_COLUMNS,
     CONDITION_LABELS,
+    PHZ_SFR_COLUMN,
     ConditionalSFHDiffusion,
     _read_rows,
     load_conditions,
@@ -56,6 +57,7 @@ def main():
     model = ConditionalSFHDiffusion.load_from_checkpoint(
         str(args.checkpoint), map_location='cpu',
     ).to(device).eval()
+    sfr_source = str(getattr(model.hparams, 'sfr_source', 'phz'))
     with np.load(args.split) as split:
         if args.partition == 'all':
             rows = np.concatenate([split['train_rows'], split['val_rows']]).astype(np.int64)
@@ -65,7 +67,7 @@ def main():
             ids = np.asarray(split[f'{args.partition}_ids'], dtype=np.int64)
     if args.limit:
         rows, ids = rows[:args.limit], ids[:args.limit]
-    conditions, valid = load_conditions(args.dataset)
+    conditions, valid = load_conditions(args.dataset, sfr_source)
     if not np.all(valid[rows]):
         raise ValueError('Sampling split contains invalid physical conditions.')
     with h5py.File(args.dataset, 'r') as source:
@@ -133,8 +135,13 @@ def main():
         target.attrs['ddim_steps'] = args.sample_steps
         target.attrs['guidance'] = args.guidance
         target.attrs['seed'] = args.seed
-        target.attrs['condition_columns'] = json.dumps(CONDITION_COLUMNS)
+        target.attrs['condition_columns'] = json.dumps(
+            (*BASE_CONDITION_COLUMNS, PHZ_SFR_COLUMN)
+            if sfr_source == 'phz'
+            else (*BASE_CONDITION_COLUMNS, 'SFH-derived SFR100; R=0')
+        )
         target.attrs['condition_labels'] = json.dumps(CONDITION_LABELS)
+        target.attrs['sfr_source'] = sfr_source
         target.attrs['sfh_normalization'] = 'nonnegative discrete bin weights summing to one'
         target.attrs['residual_definition'] = 'observed normalized SFH - conditional predictive mean'
         target.attrs['clr_residual_definition'] = 'observed CLR - mean generated CLR'
@@ -143,8 +150,8 @@ def main():
         'output': str(args.output), 'n_galaxies': n, 'n_draws': args.draws,
         'maximum_absolute_draw_sum_error': maximum_error,
         'note': (
-            'These are posterior-predictive draws from p(SFH | catalog mass, '
-            'photo-z, catalog SFR100), not repeats of the original SED posterior.'
+            f'These are posterior-predictive draws from p(SFH | catalog mass, '
+            f'photo-z, {sfr_source} SFR100), not repeats of the original SED posterior.'
         ),
     }
     args.output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')

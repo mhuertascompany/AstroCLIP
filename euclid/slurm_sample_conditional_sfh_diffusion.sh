@@ -19,7 +19,7 @@ source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
-TRAINING=${BASE}/conditional_sfh_diffusion_phz
+TRAINING=${BASE}/conditional_sfh_diffusion_sfh_sfr100
 if [[ $# -ge 1 && -n "$1" ]]; then
     CHECKPOINT=$1
 else
