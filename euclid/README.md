@@ -2549,3 +2549,51 @@ python -m euclid.progenitor_analogues \
   --output euclid/diagnostics/progenitor_analogues_main_sequence \
   --pdf output/pdf/euclid_progenitor_analogue_main_sequence.pdf
 ```
+### Conditional SFH diffusion and residual histories
+
+`train_conditional_sfh_diffusion.py` learns the posterior-predictive
+distribution
+
+\[
+p(\mathrm{SFH}\mid \log M_\star, z_{\rm phot}, \log \mathrm{SFR}_{100})
+\]
+
+using the PHZ median mass, redshift, and 100 Myr SFR columns. The target is a
+250-bin normalized SFH. Diffusion is performed in centered log-ratio space;
+inverse softmax therefore makes every generated draw nonnegative and forces
+its discrete mass integral to equal one. With the default `posterior` input
+mode, a random stored SFH realization is drawn during training. The generated
+distribution consequently includes conditional population scatter and the
+uncertainty represented by the stored SFH posterior.
+
+Run a short end-to-end test before the full job:
+
+```bash
+sbatch euclid/slurm_train_conditional_sfh_diffusion.sh smoke \
+  /n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/conditional_sfh_diffusion_phz_smoke
+```
+
+Train the full model:
+
+```bash
+sbatch euclid/slurm_train_conditional_sfh_diffusion.sh full
+```
+
+After training, generate 32 held-out conditional draws per galaxy and residual
+histories:
+
+```bash
+sbatch euclid/slurm_sample_conditional_sfh_diffusion.sh
+```
+
+The default output is
+`conditional_sfh_diffusion_phz/validation_predictive_sfhs.h5`. It contains the
+draws, predictive mean and percentiles, and two residual definitions:
+
+- `residual_sfh`: observed normalized bin weights minus the predictive mean.
+- `residual_clr`: observed centered-log-ratio SFH minus the mean generated CLR.
+
+The CLR residual is preferable for regression because it treats the normalized
+SFH as compositional data. These samples are conditional posterior-predictive
+draws; they are not repeated samples of an individual galaxy's original SED
+posterior.
