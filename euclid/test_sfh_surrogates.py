@@ -2,7 +2,11 @@ import unittest
 
 import numpy as np
 
-from euclid.sfh_surrogates import iaaft_surrogate, recent_preserved_iaaft
+from euclid.sfh_surrogates import (
+    iaaft_surrogate,
+    past_preserved_iaaft,
+    recent_preserved_iaaft,
+)
 
 
 class IAAFTSurrogateTests(unittest.TestCase):
@@ -51,6 +55,27 @@ class IAAFTSurrogateTests(unittest.TestCase):
                 surrogate[:diagnostic["old_start"]],
                 values[:diagnostic["old_start"]],
             )
+
+    def test_past_segment_and_recent_integral_are_preserved(self):
+        rng = np.random.default_rng(19)
+        time = np.linspace(0, 1, 250)
+        values = (
+            0.02
+            + np.exp(-0.5 * ((time - 0.04) / 0.018) ** 2)
+            + 0.6 * np.exp(-0.5 * ((time - 0.3) / 0.08) ** 2)
+        )
+        values /= values.sum()
+        surrogate, diagnostic = past_preserved_iaaft(values, time, rng)
+        split = diagnostic["old_start"]
+        np.testing.assert_array_equal(surrogate[split:], values[split:])
+        self.assertAlmostEqual(
+            float(surrogate[:split].sum()), float(values[:split].sum()), places=14,
+        )
+        self.assertAlmostEqual(float(surrogate.sum()), 1.0, places=14)
+        self.assertGreaterEqual(float(surrogate.min()), 0.0)
+        self.assertAlmostEqual(
+            float(surrogate[split - 1]), float(values[split - 1]), places=14,
+        )
 
 
 if __name__ == "__main__":

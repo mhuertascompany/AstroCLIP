@@ -133,3 +133,90 @@ def recent_preserved_iaaft(
         "old_correlation": float(old_correlation),
     })
     return output, diagnostics
+
+
+def past_preserved_iaaft(
+    weights,
+    time,
+    rng,
+    recent_fraction=0.1,
+    transition_bins=5,
+    max_iterations=1000,
+):
+    """Randomize the recent SFH while preserving the older segment and sums.
+
+    The older interval ``time > recent_fraction`` is copied exactly. The most
+    recent portion is replaced by an IAAFT surrogate made from that galaxy's
+    own recent values. A short crossfade at the old/recent boundary approaches
+    the original SFH, and the randomized segment is rescaled to preserve its
+    integral exactly.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    time = np.asarray(time, dtype=np.float64)
+    if (
+        weights.ndim != 1
+        or time.shape != weights.shape
+        or not np.all(np.isfinite(weights))
+        or np.any(weights < 0)
+        or not np.all(np.isfinite(time))
+        or np.any(np.diff(time) <= 0)
+        or not 0 < recent_fraction < 1
+    ):
+        raise ValueError("expected non-negative SFH weights on an increasing time grid")
+
+    old_start = int(np.searchsorted(time, recent_fraction, side="right"))
+    if old_start < 4 or len(weights) - old_start < 2:
+        raise ValueError("recent_fraction leaves too few recent or old SFH bins")
+
+    recent = weights[:old_start]
+    surrogate, diagnostics = iaaft_surrogate(
+        recent, rng, max_iterations=max_iterations,
+    )
+    target_recent_sum = float(recent.sum())
+
+    # The final recent bins touch the preserved past. Blend them progressively
+    # back to the original values, then normalize only the freely randomized
+    # bins so that the recent and total integrals remain unchanged.
+    width = min(int(transition_bins), len(recent) - 1)
+    if width < 1:
+        raise ValueError("transition_bins must be positive")
+    while width > 1:
+        alpha = np.sin(np.linspace(0.0, np.pi / 2.0, width)) ** 2
+        fixed = (1.0 - alpha) * surrogate[-width:] + alpha * recent[-width:]
+        if fixed.sum() <= target_recent_sum:
+            break
+        width -= 1
+    alpha = np.sin(np.linspace(0.0, np.pi / 2.0, width)) ** 2
+    fixed = (1.0 - alpha) * surrogate[-width:] + alpha * recent[-width:]
+    remaining = target_recent_sum - float(fixed.sum())
+    head = surrogate[:-width].copy()
+    head_sum = float(head.sum())
+    if remaining > 0 and head_sum > 0:
+        head *= remaining / head_sum
+    elif remaining > 0:
+        head = recent[:-width].copy()
+        head *= remaining / max(float(head.sum()), np.finfo(float).eps)
+    else:
+        head.fill(0.0)
+
+    output = weights.copy()
+    output[:old_start - width] = head
+    output[old_start - width:old_start] = fixed
+    # Correct floating-point accumulation within the randomized interval only.
+    output[0] += target_recent_sum - float(output[:old_start].sum())
+    output[0] = max(output[0], 0.0)
+
+    recent_correlation = np.corrcoef(recent, output[:old_start])[0, 1]
+    if not np.isfinite(recent_correlation):
+        recent_correlation = 1.0 if np.allclose(recent, output[:old_start]) else 0.0
+    diagnostics.update({
+        "old_start": old_start,
+        "n_recent_bins": old_start,
+        "n_old_bins": len(weights) - old_start,
+        "transition_bins": width,
+        "recent_sum": target_recent_sum,
+        "old_sum": float(weights[old_start:].sum()),
+        "recent_integral_error": float(output[:old_start].sum() - target_recent_sum),
+        "recent_correlation": float(recent_correlation),
+    })
+    return output, diagnostics

@@ -15,10 +15,10 @@
 set -euo pipefail
 
 # Train matched deterministic-median autoencoders.
-# Usage: sbatch $0 control|iaaft [dataset] [pair_split] [output_dir] [resume.ckpt]
+# Usage: sbatch $0 control|iaaft|past90 [dataset] [pair_split] [output_dir] [resume.ckpt]
 
-if [[ $# -lt 1 || ( "$1" != "control" && "$1" != "iaaft" ) ]]; then
-    echo "Usage: sbatch $0 control|iaaft [dataset] [pair_split] [output_dir] [resume.ckpt]" >&2
+if [[ $# -lt 1 || ( "$1" != "control" && "$1" != "iaaft" && "$1" != "past90" ) ]]; then
+    echo "Usage: sbatch $0 control|iaaft|past90 [dataset] [pair_split] [output_dir] [resume.ckpt]" >&2
     exit 2
 fi
 
@@ -31,10 +31,14 @@ if [[ "${MODE}" == "control" ]]; then
     DEFAULT_DATASET=${BASE}/sfh_clip_150k.h5
     DEFAULT_OUTPUT=${BASE}/sfh_autoencoder_median_control_150k
     RUN_NAME=euclid_sfh_autoencoder_median_control_150k
-else
+elif [[ "${MODE}" == "iaaft" ]]; then
     DEFAULT_DATASET=${BASE}/sfh_iaaft_recent10_150k.h5
     DEFAULT_OUTPUT=${BASE}/sfh_autoencoder_iaaft_recent10_150k
     RUN_NAME=euclid_sfh_autoencoder_iaaft_recent10_150k
+else
+    DEFAULT_DATASET=${BASE}/sfh_iaaft_past90_150k.h5
+    DEFAULT_OUTPUT=${BASE}/sfh_autoencoder_iaaft_past90_150k
+    RUN_NAME=euclid_sfh_autoencoder_iaaft_past90_150k
 fi
 DATASET=${2:-${DEFAULT_DATASET}}
 SPLIT=${3:-${BASE}/training_bright_frozen_unrestricted_ae_no_edgeon/pair_split.npz}

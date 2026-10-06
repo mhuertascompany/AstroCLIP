@@ -56,6 +56,40 @@ class PrecomputeIAAFTTests(unittest.TestCase):
             np.testing.assert_array_equal(item["p84"], item["target"])
             self.assertEqual(int(item["realization"]), -1)
 
+    def test_past_preserved_dataset_keeps_old_bins_and_unit_integrals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source_path = directory / "source.h5"
+            output_path = directory / "past90.h5"
+            rng = np.random.default_rng(15)
+            weights = rng.lognormal(-2.0, 0.8, size=(8, 250))
+            weights /= weights.sum(axis=1, keepdims=True)
+            epsilon = 1e-10
+            time = np.linspace(0, 1, 250)
+            with h5py.File(source_path, "w") as source:
+                source.create_dataset("galaxy_id", data=np.arange(8))
+                source.create_dataset("sfh", data=np.log10(weights + epsilon))
+                source.create_dataset("sfh_time_grid", data=time)
+                source.attrs["sfh_log_epsilon"] = epsilon
+
+            report = build_dataset(
+                source_path, output_path, workers=1, chunk_size=4,
+                candidates=2, max_iterations=100, preserve="past",
+            )
+            split = int(np.searchsorted(time, 0.1, side="right"))
+            with h5py.File(output_path, "r") as result:
+                recovered = np.maximum(
+                    10.0 ** np.asarray(result["sfh"], dtype=np.float64) - epsilon,
+                    0.0,
+                )
+                np.testing.assert_allclose(recovered.sum(axis=1), 1.0, atol=2e-6)
+                np.testing.assert_allclose(
+                    recovered[:, split:], weights[:, split:], atol=2e-7, rtol=2e-6,
+                )
+                self.assertEqual(result.attrs["preserved_segment"], "old")
+            self.assertEqual(report["preserved_segment"], "old")
+            self.assertLessEqual(report["maximum_old_segment_error"], 2e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -786,6 +786,46 @@ recorded float32 round-trip normalization error exceeds its tolerance. The
 default CLIP outputs are `training_bright_ae_recent10_control` and
 `training_bright_ae_iaaft_recent10`.
 
+#### Past-preserved IAAFT encoder ablation
+
+The opposite temporal ablation retains the oldest 90% of each normalized SFH
+exactly and applies IAAFT only to the most recent 10% (about 25 bins). It
+preserves the recent segment's integral, and therefore the fraction of mass
+formed recently, while changing its temporal ordering. A three-bin crossfade
+is confined to the recent side of the boundary; the older bins never change.
+The preprocessing report verifies both the float32 round-trip unit integral
+and the unchanged past segment.
+
+Build the surrogate histories and train their matched autoencoder:
+
+```bash
+PREP_JOB=$(sbatch --parsable \
+  euclid/slurm_build_iaaft_sfh_dataset.sh past90)
+
+AE_JOB=$(sbatch --parsable --dependency="afterok:${PREP_JOB}" \
+  euclid/slurm_pretrain_sfh_iaaft_ablation.sh past90)
+```
+
+After the autoencoder finishes, use its best checkpoint for the matched
+ZooBot plus AE-adjacency alignment:
+
+```bash
+BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
+PAST90_AE=$(find \
+  "${BASE}/sfh_autoencoder_iaaft_past90_150k/checkpoints" \
+  -name 'euclid_sfh_autoencoder_iaaft_past90_150k-*.ckpt' \
+  ! -name 'last.ckpt' | sort -t= -k3,3g | head -n 1)
+
+sbatch euclid/slurm_train_zoobot_clip_bright_iaaft_ablation.sh \
+  past90 "${PAST90_AE}"
+```
+
+The outputs are `sfh_iaaft_past90_150k.h5`,
+`sfh_autoencoder_iaaft_past90_150k`, and
+`training_bright_ae_iaaft_past90`. This arm uses the same original catalog,
+image stamps, split, ZooBot encoder, adapters, edge-on exclusion, and
+AE-adjacency settings as the recent-preserved run.
+
 #### Frozen SFH autoencoder with a linear CLIP projection
 
 Full fine-tuning can return the pretrained SFH transformer to the same optimum

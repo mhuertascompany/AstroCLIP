@@ -1,4 +1,4 @@
-"""Build a compact, recent-preserved IAAFT SFH training dataset."""
+"""Build a compact IAAFT temporal-ablation SFH training dataset."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .sfh_surrogates import recent_preserved_iaaft
+from .sfh_surrogates import past_preserved_iaaft, recent_preserved_iaaft
 
 
 def _process_chunk(payload):
     (
         first_row, log_sfh, time, epsilon, seed, recent_fraction,
-        transition_bins, candidates, max_iterations, integral_tolerance,
+        transition_bins, candidates, max_iterations, integral_tolerance, preserve,
     ) = payload
     output = np.empty_like(log_sfh, dtype=np.float32)
     diagnostics = []
@@ -32,28 +32,42 @@ def _process_chunk(payload):
         for candidate in range(candidates):
             candidate_seed = np.random.SeedSequence([seed, source_row, candidate])
             rng = np.random.default_rng(candidate_seed)
-            surrogate, info = recent_preserved_iaaft(
+            transform = (
+                recent_preserved_iaaft if preserve == "recent" else past_preserved_iaaft
+            )
+            surrogate, info = transform(
                 weights, time, rng,
                 recent_fraction=recent_fraction,
                 transition_bins=transition_bins,
                 max_iterations=max_iterations,
             )
-            score = abs(info["old_correlation"])
+            randomized_key = "old_correlation" if preserve == "recent" else "recent_correlation"
+            score = abs(info[randomized_key])
             if best is None or score < best[0]:
                 best = (score, surrogate, info, candidate)
         _, surrogate, info, candidate = best
 
         integral = float(surrogate.sum())
         recent_bins = int(info["n_recent_bins"])
-        recent_error = float(np.max(np.abs(surrogate[:recent_bins] - weights[:recent_bins])))
+        if preserve == "recent":
+            preserved_error = float(
+                np.max(np.abs(surrogate[:recent_bins] - weights[:recent_bins]))
+            )
+            randomized_correlation = float(info["old_correlation"])
+        else:
+            preserved_error = float(
+                np.max(np.abs(surrogate[recent_bins:] - weights[recent_bins:]))
+            )
+            randomized_correlation = float(info["recent_correlation"])
         if abs(integral - 1.0) > integral_tolerance:
             raise ValueError(
                 f"IAAFT integral is {integral:.12g} at source row {source_row}; "
                 f"tolerance={integral_tolerance:g}"
             )
-        if recent_error > integral_tolerance:
+        if preserved_error > integral_tolerance:
             raise ValueError(
-                f"Recent SFH changed by {recent_error:.3g} at source row {source_row}"
+                f"Preserved SFH segment changed by {preserved_error:.3g} "
+                f"at source row {source_row}"
             )
 
         stored = np.log10(surrogate + epsilon).astype(np.float32)
@@ -66,8 +80,8 @@ def _process_chunk(payload):
             )
         output[offset] = stored
         diagnostics.append((
-            integral, stored_integral, recent_error,
-            float(info["old_correlation"]), float(info["spectral_error"]),
+            integral, stored_integral, preserved_error,
+            randomized_correlation, float(info["spectral_error"]),
             int(info["iterations"]), int(candidate),
         ))
     return first_row, output, np.asarray(diagnostics, dtype=np.float64)
@@ -86,6 +100,7 @@ def build_dataset(
     workers=8,
     chunk_size=256,
     max_rows=None,
+    preserve="recent",
 ):
     source_path = Path(source_path)
     output_path = Path(output_path)
@@ -95,6 +110,8 @@ def build_dataset(
         raise ValueError("workers, chunk_size, and candidates must be positive")
     if not 0 < integral_tolerance < 1e-3:
         raise ValueError("integral_tolerance must lie in (0, 1e-3)")
+    if preserve not in {"recent", "past"}:
+        raise ValueError("preserve must be 'recent' or 'past'")
 
     with h5py.File(source_path, "r") as source:
         required = ("galaxy_id", "sfh", "sfh_time_grid")
@@ -118,6 +135,7 @@ def build_dataset(
                 int(candidates),
                 int(max_iterations),
                 float(integral_tolerance),
+                preserve,
             )
             for start in range(0, n_rows, chunk_size)
         ]
@@ -153,12 +171,15 @@ def build_dataset(
                 executor.shutdown()
 
         diagnostics = np.concatenate(all_diagnostics)
-        target.attrs.update({
+        preserved_name = "recent" if preserve == "recent" else "old"
+        randomized_name = "old" if preserve == "recent" else "recent"
+        attributes = {
             "n_galaxies": n_rows,
             "n_bins": n_bins,
             "sfh_log_epsilon": epsilon,
             "source_dataset": str(source_path),
-            "transformation": "recent-preserved IAAFT",
+            "transformation": f"{preserved_name}-preserved IAAFT",
+            "preserved_segment": preserved_name,
             "recent_fraction": recent_fraction,
             "transition_bins": transition_bins,
             "candidates_per_galaxy": candidates,
@@ -169,11 +190,15 @@ def build_dataset(
             "maximum_absolute_stored_integral_error": float(
                 np.max(np.abs(diagnostics[:, 1] - 1.0))
             ),
-            "maximum_recent_segment_error": float(np.max(diagnostics[:, 2])),
-            "median_old_correlation": float(np.median(diagnostics[:, 3])),
-            "maximum_absolute_old_correlation": float(np.max(np.abs(diagnostics[:, 3]))),
+            "maximum_preserved_segment_error": float(np.max(diagnostics[:, 2])),
+            f"maximum_{preserved_name}_segment_error": float(np.max(diagnostics[:, 2])),
+            f"median_{randomized_name}_correlation": float(np.median(diagnostics[:, 3])),
+            f"maximum_absolute_{randomized_name}_correlation": float(
+                np.max(np.abs(diagnostics[:, 3]))
+            ),
             "median_spectral_error": float(np.median(diagnostics[:, 4])),
-        })
+        }
+        target.attrs.update(attributes)
     partial.replace(output_path)
 
     report = {
@@ -182,6 +207,7 @@ def build_dataset(
         "n_galaxies": n_rows,
         "n_bins": n_bins,
         "recent_fraction": recent_fraction,
+        "preserved_segment": preserved_name,
         "transition_bins": transition_bins,
         "candidates_per_galaxy": candidates,
         "seed": seed,
@@ -191,9 +217,10 @@ def build_dataset(
         "maximum_absolute_stored_integral_error": float(
             np.max(np.abs(diagnostics[:, 1] - 1.0))
         ),
-        "maximum_recent_segment_error": float(np.max(diagnostics[:, 2])),
-        "old_correlation_median": float(np.median(diagnostics[:, 3])),
-        "old_correlation_p05_p95": [
+        "maximum_preserved_segment_error": float(np.max(diagnostics[:, 2])),
+        f"maximum_{preserved_name}_segment_error": float(np.max(diagnostics[:, 2])),
+        f"{randomized_name}_correlation_median": float(np.median(diagnostics[:, 3])),
+        f"{randomized_name}_correlation_p05_p95": [
             float(np.quantile(diagnostics[:, 3], 0.05)),
             float(np.quantile(diagnostics[:, 3], 0.95)),
         ],
@@ -211,6 +238,10 @@ def parse_args():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--recent-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--preserve", choices=("recent", "past"), default="recent",
+        help="SFH segment copied exactly; IAAFT is applied to the other segment.",
+    )
     parser.add_argument("--transition-bins", type=int, default=10)
     parser.add_argument("--candidates", type=int, default=4)
     parser.add_argument("--max-iterations", type=int, default=1000)
@@ -236,6 +267,7 @@ def main():
         workers=args.workers,
         chunk_size=args.chunk_size,
         max_rows=args.max_rows,
+        preserve=args.preserve,
     )
 
 

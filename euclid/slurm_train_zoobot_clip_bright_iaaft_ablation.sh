@@ -15,11 +15,11 @@
 set -euo pipefail
 
 # Matched ZooBot/AE-adjacency alignment for original or IAAFT SFHs.
-# Usage: sbatch $0 control|iaaft AUTOENCODER_CKPT \
+# Usage: sbatch $0 control|iaaft|past90 AUTOENCODER_CKPT \
 #        [source_dataset] [stamp_root] [output_dir] [sfh_override] [resume.ckpt]
 
-if [[ $# -lt 2 || ( "$1" != "control" && "$1" != "iaaft" ) ]]; then
-    echo "Usage: sbatch $0 control|iaaft AUTOENCODER_CKPT [source_dataset] [stamp_root] [output_dir] [sfh_override] [resume.ckpt]" >&2
+if [[ $# -lt 2 || ( "$1" != "control" && "$1" != "iaaft" && "$1" != "past90" ) ]]; then
+    echo "Usage: sbatch $0 control|iaaft|past90 AUTOENCODER_CKPT [source_dataset] [stamp_root] [output_dir] [sfh_override] [resume.ckpt]" >&2
     exit 2
 fi
 
@@ -36,10 +36,14 @@ if [[ "${MODE}" == "control" ]]; then
     DEFAULT_OUTPUT=${BASE}/training_bright_ae_recent10_control
     RUN_NAME=euclid_bright_ae_recent10_control
     DEFAULT_OVERRIDE=
-else
+elif [[ "${MODE}" == "iaaft" ]]; then
     DEFAULT_OUTPUT=${BASE}/training_bright_ae_iaaft_recent10
     RUN_NAME=euclid_bright_ae_iaaft_recent10
     DEFAULT_OVERRIDE=${BASE}/sfh_iaaft_recent10_150k.h5
+else
+    DEFAULT_OUTPUT=${BASE}/training_bright_ae_iaaft_past90
+    RUN_NAME=euclid_bright_ae_iaaft_past90
+    DEFAULT_OVERRIDE=${BASE}/sfh_iaaft_past90_150k.h5
 fi
 OUTPUT_DIR=${5:-${DEFAULT_OUTPUT}}
 SFH_OVERRIDE=${6:-${DEFAULT_OVERRIDE}}
@@ -48,7 +52,7 @@ RESUME_FROM=${7:-}
 [[ -f "${AUTOENCODER_CKPT}" ]] || { echo "Missing autoencoder checkpoint: ${AUTOENCODER_CKPT}" >&2; exit 2; }
 [[ -f "${DATASET}" ]] || { echo "Missing source dataset: ${DATASET}" >&2; exit 2; }
 [[ -d "${STAMP_ROOT}/VIS" ]] || { echo "Missing VIS stamps: ${STAMP_ROOT}/VIS" >&2; exit 2; }
-if [[ "${MODE}" == "iaaft" ]]; then
+if [[ "${MODE}" != "control" ]]; then
     [[ -f "${SFH_OVERRIDE}" ]] || { echo "Missing IAAFT SFH override: ${SFH_OVERRIDE}" >&2; exit 2; }
 elif [[ -n "${SFH_OVERRIDE}" ]]; then
     echo "The control run must not use an SFH override." >&2
