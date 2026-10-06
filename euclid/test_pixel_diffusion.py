@@ -49,6 +49,22 @@ class PixelDiffusionTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(a).all())
         self.assertLessEqual(a.abs().max().item(), 1)
 
+    def test_explicit_shared_initial_noise(self):
+        model = ConditionalUNet(16, base=8).eval()
+        schedule = DiffusionSchedule(10)
+        condition = torch.randn(2, 16)
+        shared = torch.randn(1, 1, 32, 32).repeat(2, 1, 1, 1)
+        result = schedule.sample(
+            model, condition, size=32, steps=3, guidance=0,
+            initial_noise=shared,
+        )
+        torch.testing.assert_close(result[0], result[1])
+        with self.assertRaisesRegex(ValueError, 'expected'):
+            schedule.sample(
+                model, condition, size=32, steps=3,
+                initial_noise=torch.randn(1, 1, 32, 32),
+            )
+
     def test_data_split_and_lightning_checkpoint(self):
         import lightning as L
         with tempfile.TemporaryDirectory() as tmp:

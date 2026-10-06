@@ -93,11 +93,23 @@ class DiffusionSchedule(nn.Module):
         return a * noisy - s * velocity, s * noisy + a * velocity
 
     @torch.inference_mode()
-    def sample(self, model, condition, size=224, steps=100, guidance=2., seed=42):
+    def sample(self, model, condition, size=224, steps=100, guidance=2., seed=42,
+               initial_noise=None):
         if not 2 <= steps <= len(self.alpha):
             raise ValueError('Sampling steps must be between 2 and training steps.')
-        generator = torch.Generator(device=condition.device).manual_seed(seed)
-        x = torch.randn((len(condition), 1, size, size), device=condition.device, generator=generator)
+        expected_shape = (len(condition), 1, size, size)
+        if initial_noise is None:
+            generator = torch.Generator(device=condition.device).manual_seed(seed)
+            x = torch.randn(expected_shape, device=condition.device, generator=generator)
+        else:
+            if initial_noise.shape != expected_shape:
+                raise ValueError(
+                    f'initial_noise has shape {tuple(initial_noise.shape)}; '
+                    f'expected {expected_shape}.'
+                )
+            if initial_noise.device != condition.device:
+                raise ValueError('initial_noise and condition must be on the same device.')
+            x = initial_noise.clone()
         times = torch.linspace(len(self.alpha)-1, 0, steps, device=x.device).round().long()
         for index, timestep in enumerate(times):
             t = timestep.expand(len(x))
