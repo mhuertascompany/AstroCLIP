@@ -2045,6 +2045,22 @@ sbatch --time=02:00:00 \
   "${BASE}/progenitor_movie_smoke_${DESCENDANT_ID}" 24
 ```
 
+The repository also contains a prepared track for descendant
+`2701130960681498535`, selected from `euclid_selected_galaxies.csv` in the
+original-SFH AE-adjacency explorer. It has 13 checkpoints extending to 6.66
+Gyr, uses global-shape weight 0.5, and was the best-supported track among the
+eight most massive selected descendants. Render it with simply:
+
+```bash
+sbatch euclid/slurm_render_progenitor_morphology_movie.sh
+```
+
+Its analogue IDs and checkpoints come from the AE-adjacency run. The VIS
+diffusion itself must still receive conditions in the embedding space on which
+it was trained, so rendering maps those analogue IDs through
+`diffusion_conditions_aligned_best.npz`; passing AE-adjacency vectors directly
+to this older pixel model would mix incompatible latent coordinate systems.
+
 ### Diffusion comparison with contrasting SFHs
 
 From the Candide repository root, submit:

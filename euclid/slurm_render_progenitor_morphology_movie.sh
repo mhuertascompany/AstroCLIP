@@ -14,17 +14,15 @@
 
 set -euo pipefail
 
-# Usage: sbatch $0 analogue_candidates.csv DESCENDANT_ID [output_dir] [frames]
-if [[ $# -lt 2 ]]; then
-    echo "Usage: sbatch $0 analogue_candidates.csv DESCENDANT_ID [output_dir] [frames]" >&2
-    exit 2
-fi
+# With no arguments, render the selected AE-adjacency descendant packaged in
+# euclid/movie_tracks. Optional usage:
+#   sbatch $0 [analogue_candidates.csv] [DESCENDANT_ID] [output_dir] [frames]
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
 
 BASE=/n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000
-CANDIDATES=$1
-DESCENDANT_ID=$2
+CANDIDATES=${1:-euclid/movie_tracks/ae_adjacency_descendant_2701130960681498535.csv}
+DESCENDANT_ID=${2:-2701130960681498535}
 OUTPUT=${3:-${BASE}/progenitor_morphology_movie_${DESCENDANT_ID}_${SLURM_JOB_ID}}
 FRAMES=${4:-120}
 CONDITION_CACHE=${BASE}/diffusion_conditions_aligned_best.npz
