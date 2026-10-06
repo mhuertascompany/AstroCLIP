@@ -2640,3 +2640,42 @@ The CLR residual is preferable for regression because it treats the normalized
 SFH as compositional data. These samples are conditional posterior-predictive
 draws; they are not repeated samples of an individual galaxy's original SED
 posterior.
+
+#### Fixed-local-properties SFH-to-morphology intervention
+
+The intervention script connects the two diffusion models to test whether
+different past histories produce different morphology at fixed local physical
+properties. For each selected validation condition it:
+
+1. starts from draws of
+   `p(SFH | log Mstar, z, log SFR100)`;
+2. recomputes SFR100 from every draw and retains draws within 0.15 dex of the
+   requested value whenever enough are available;
+3. chooses the retained draws with maximally different older cumulative SFHs;
+4. encodes each SFH with the exact aligned SFH encoder used to train the VIS
+   diffusion;
+5. generates images with identical initial pixel noise across SFH variants;
+6. encodes those images before and after the learned image adapter.
+
+The unaligned control is the frozen ZooBot backbone output. The script verifies
+that the CLIP checkpoint matches the condition-cache hash and refuses a CLIP
+checkpoint whose ZooBot backbone was unfrozen. Run the default six-galaxy,
+five-draw experiment with two independent fixed image-noise seeds using:
+
+```bash
+sbatch euclid/slurm_sfh_draw_image_intervention.sh
+```
+
+For a faster two-galaxy, two-draw integration test:
+
+```bash
+sbatch --time=02:00:00 \
+  euclid/slurm_sfh_draw_image_intervention.sh \
+  /n03data/huertas/euclid/sfh_clip/edfn_vislt22p0_150000/sfh_draw_image_smoke 2 2
+```
+
+The output contains a multipage SFH/image comparison, PCA motion plots for the
+frozen and aligned image representations, pairwise SFH and embedding distances,
+the embeddings themselves, every generated image, and `report.json`. PCA is
+used only for visualization; the quantitative test uses cosine distances in
+the complete encoder spaces.
