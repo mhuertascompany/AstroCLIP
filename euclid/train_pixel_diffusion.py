@@ -1,4 +1,4 @@
-"""Train 224-pixel VIS diffusion conditioned on cached aligned SFH embeddings."""
+"""Train 224-pixel VIS diffusion conditioned on cached aligned embeddings."""
 import argparse
 import copy
 import json
@@ -240,7 +240,7 @@ def main():
                        pin_memory=args.accelerator == 'gpu', persistent_workers=args.workers > 0)
     checkpoint = ModelCheckpoint(dirpath=args.output / 'checkpoints', monitor='val_v_mse',
                                  mode='min', save_last=True, save_top_k=1,
-                                 filename='pixel-sfh-{epoch:03d}-{val_v_mse:.5f}')
+                                 filename='pixel-condition-{epoch:03d}-{val_v_mse:.5f}')
     trainer = L.Trainer(accelerator=args.accelerator, devices=1,
                         precision='16-mixed' if args.accelerator == 'gpu' else '32-true',
                         max_epochs=2 if args.smoke else args.epochs,
