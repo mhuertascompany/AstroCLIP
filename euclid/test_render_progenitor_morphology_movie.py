@@ -5,10 +5,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import h5py
 
 from euclid.render_progenitor_morphology_movie import (
     build_track,
     interpolate_track,
+    load_descendant_sfh,
+    nearest_reference,
     slerp,
 )
 
@@ -45,6 +48,44 @@ class ProgenitorMorphologyMovieTests(unittest.TestCase):
             self.assertEqual(time.tolist(), [2.0, 1.5, 1.0, 0.5, 0.0])
             self.assertAlmostEqual(fraction[-1], 1.0)
             torch.testing.assert_close(embedding.norm(dim=1), torch.ones(5))
+
+    def test_nearest_reference_across_chunks(self):
+        reference = np.asarray([
+            [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.6, 0.8],
+        ], dtype=np.float32)
+        query = np.asarray([[0.9, 0.1], [0.55, 0.82]], dtype=np.float32)
+        similarity, index = nearest_reference(query, reference, chunk=2)
+        np.testing.assert_array_equal(index, [0, 3])
+        np.testing.assert_allclose(
+            similarity, [query[0] @ reference[0], query[1] @ reference[3]],
+        )
+
+    def test_track_uses_best_candidate_present_in_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "candidates.csv"
+            pd.DataFrame({
+                "descendant_id": [10, 10], "stage": [1, 1], "rank": [1, 2],
+                "galaxy_id": [99, 11], "state_lookback_gyr": [1.0, 1.0],
+                "formed_mass_fraction": [0.9, 0.9],
+            }).to_csv(path, index=False)
+            ids = np.asarray([10, 11])
+            condition = np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+            _, anchors = build_track(path, 10, ids, condition, 1)
+            self.assertEqual(anchors[1]["galaxy_ids"], [11])
+
+    def test_loaded_sfh_rate_integrates_to_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sfh.h5"
+            with h5py.File(path, "w") as target:
+                target["galaxy_id"] = [10]
+                target["sfh"] = np.log10([[0.2, 0.3, 0.5]])
+                target["sfh_time_grid"] = [0.0, 0.5, 1.0]
+                target["sfh_time_norm"] = [2000.0]
+                target.attrs["sfh_log_epsilon"] = 0.0
+            time, rate, norm = load_descendant_sfh(path, 10)
+            np.testing.assert_allclose(time, [0.0, 1.0, 2.0])
+            self.assertEqual(norm, 2.0)
+            np.testing.assert_allclose(np.sum(rate * [0.5, 1.0, 0.5]), 1.0)
 
 
 if __name__ == "__main__":

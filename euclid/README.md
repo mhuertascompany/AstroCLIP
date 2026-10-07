@@ -2106,6 +2106,27 @@ multi-page candidate comparison, a discrete rank-1 sequence, the individual
 images, and a CSV of condition cosines and image RMS differences relative to
 the descendant. A different seed can be supplied as the fourth argument.
 
+For the condition-sensitive AE-adjacency/no-edge-on diffusion, the snapped
+movie workflow first recomputes this descendant's analogue anchors against the
+complete bright explorer sample. It then samples a dense path between the
+rank-1 anchors only to define target locations and replaces every target by
+the closest *observed* condition in the complete filtered diffusion cache.
+The generator therefore never receives an interpolated embedding. Frame `i`
+uses independent noise seed `42000+i`. Beside each generated stamp, the movie
+progressively reveals the descendant SFH from its earliest history toward the
+observation epoch:
+
+```bash
+sbatch euclid/slurm_render_full_sample_snapped_progenitor_movie.sh
+```
+
+The default is descendant `2701130960681498535`, 120 frames, and the best
+checkpoint recorded by the completed 100-epoch diffusion run. Positional
+arguments are descendant ID, output directory, frame count, base noise seed,
+and matched PHZ catalogue path. The output contains the recomputed full-sample
+track, GIF/MP4, all SFH-annotated frames, `snapped_track.npz` with the selected
+real IDs and per-frame seeds, diagnostics, and a compressed download archive.
+
 ### Diffusion comparison with contrasting SFHs
 
 From the Candide repository root, submit:
