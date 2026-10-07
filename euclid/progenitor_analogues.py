@@ -1302,6 +1302,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE)
     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
+    parser.add_argument(
+        "--stamps", type=Path,
+        help="Directory containing VIS_<object_id>.jpg; defaults to BUNDLE/VIS.",
+    )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument(
         "--no-catalog", action="store_true",
@@ -1350,7 +1354,9 @@ def main() -> None:
     if args.sfr_mass_source == "phz" and catalog is None:
         parser.error("--sfr-mass-source phz requires --catalog")
     data = _load_inputs(args.bundle, args.archive, catalog, args.ms_sfr_offset)
-    stamps = args.bundle / "VIS"
+    stamps = args.stamps if args.stamps is not None else args.bundle / "VIS"
+    if not stamps.is_dir():
+        raise FileNotFoundError(f"VIS stamp directory does not exist: {stamps}")
     descendant_index = _choose_descendant(
         data,
         stamps,
@@ -1429,6 +1435,7 @@ def main() -> None:
         "catalog": str(catalog) if catalog is not None else None,
         "bundle": str(args.bundle),
         "archive": str(args.archive),
+        "stamps": str(stamps),
         "pdf": str(args.pdf),
     }
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

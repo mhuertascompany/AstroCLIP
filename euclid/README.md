@@ -2124,8 +2124,10 @@ The default is descendant `2701130960681498535`, 120 frames, and the best
 checkpoint recorded by the completed 100-epoch diffusion run. Positional
 arguments are descendant ID, output directory, frame count, and base noise
 seed. The track uses stellar masses already stored in the full explorer archive
-and does not require the separately matched PHZ catalogue. The output contains
-the recomputed full-sample track, GIF/MP4, all SFH-annotated frames,
+and reads images from the canonical Candide directory
+`zoobot_stamps_rmax/VIS`; it does not require stamps to be extracted inside the
+compact explorer bundle or require the separately matched PHZ catalogue. The
+output contains the recomputed full-sample track, GIF/MP4, all SFH-annotated frames,
 `snapped_track.npz` with the selected real IDs and per-frame seeds, diagnostics,
 and a compressed download archive.
 

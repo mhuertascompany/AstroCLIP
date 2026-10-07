@@ -30,6 +30,7 @@ TRAINING=${BASE}/training_bright_frozen_mlp
 FULL_BUNDLE=${TRAINING}/full_sample_explorer_bundle
 FULL_ARCHIVE=${TRAINING}/full_sample_explorer/euclid_clip_full_umap_diagnostics.npz
 DATASET=${BASE}/sfh_clip_150k.h5
+STAMPS=${BASE}/zoobot_stamps_rmax/VIS
 CONDITION_CACHE=${BASE}/diffusion_conditions_ae_adjacency_no_edgeon.npz
 DIFFUSION=${BASE}/pixel_diffusion_ae_adjacency_no_edgeon_conditioned_full
 
@@ -44,7 +45,7 @@ for path in \
     "${CONDITION_CACHE}" "${DIFFUSION}/runtime.json"; do
     [[ -f "${path}" ]] || { echo "Missing required file: ${path}" >&2; exit 2; }
 done
-[[ -d "${FULL_BUNDLE}/VIS" ]] || { echo "Missing full-sample stamps: ${FULL_BUNDLE}/VIS" >&2; exit 2; }
+[[ -d "${STAMPS}" ]] || { echo "Missing canonical VIS stamps: ${STAMPS}" >&2; exit 2; }
 [[ ! -e "${OUTPUT}" ]] || { echo "Output already exists: ${OUTPUT}" >&2; exit 2; }
 
 PIXEL_CHECKPOINT=$(
@@ -65,6 +66,7 @@ mkdir -p "${MPLCONFIGDIR}" "${OUTPUT}"
 python -u -m euclid.progenitor_analogues \
     --bundle "${FULL_BUNDLE}" \
     --archive "${FULL_ARCHIVE}" \
+    --stamps "${STAMPS}" \
     --no-catalog \
     --descendant-id "${DESCENDANT_ID}" \
     --minimum-descendant-mass 0 \
