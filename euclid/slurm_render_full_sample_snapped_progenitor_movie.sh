@@ -32,7 +32,8 @@ FULL_ARCHIVE=${TRAINING}/full_sample_explorer/euclid_clip_full_umap_diagnostics.
 DATASET=${BASE}/sfh_clip_150k.h5
 STAMPS=${BASE}/zoobot_stamps_rmax/VIS
 CONDITION_CACHE=${BASE}/diffusion_conditions_ae_adjacency_no_edgeon.npz
-CONDITION_UMAP=${BASE}/diffusion_conditions_ae_adjacency_no_edgeon_umap.npz
+REFERENCE_UMAP=${BASE}/explorer_ae_adjacency_edgeon_ablation/edgeon_filtered/euclid_clip_umap_diagnostics.npz
+CONDITION_UMAP=${BASE}/diffusion_conditions_ae_adjacency_no_edgeon_explorer_anchored_sfh_umap.npz
 DIFFUSION=${BASE}/pixel_diffusion_ae_adjacency_no_edgeon_conditioned_full
 
 DESCENDANT_ID=${1:-2701130960681498535}
@@ -43,7 +44,7 @@ TRACK=${OUTPUT}/full_sample_track
 
 for path in \
     "${FULL_BUNDLE}/euclid_explorer.h5" "${FULL_ARCHIVE}" "${DATASET}" \
-    "${CONDITION_CACHE}" "${DIFFUSION}/runtime.json"; do
+    "${CONDITION_CACHE}" "${REFERENCE_UMAP}" "${DIFFUSION}/runtime.json"; do
     [[ -f "${path}" ]] || { echo "Missing required file: ${path}" >&2; exit 2; }
 done
 [[ -d "${STAMPS}" ]] || { echo "Missing canonical VIS stamps: ${STAMPS}" >&2; exit 2; }
@@ -67,7 +68,8 @@ if [[ ! -f "${CONDITION_UMAP}" ]]; then
     python -u -m euclid.build_condition_umap \
         --conditions "${CONDITION_CACHE}" \
         --output "${CONDITION_UMAP}" \
-        --neighbors 30 --min-dist 0.1 --seed 42
+        --reference-archive "${REFERENCE_UMAP}" \
+        --neighbors 15 --min-dist 0.1 --seed 42
 fi
 
 # Keep extra ranked candidates because the diffusion cache deliberately omits
