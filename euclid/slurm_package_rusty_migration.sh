@@ -41,9 +41,25 @@ else
     exit 2
 fi
 
-for path in "${BRIGHT_TAR}" "${LEGACY_TAR}" "${CHECKSUMS}"; do
-    [[ ! -e "${path}" ]] || { echo "Refusing to overwrite: ${path}" >&2; exit 2; }
-done
+archive_is_reusable() {
+    local archive=$1
+    if [[ ! -e "${archive}" ]]; then
+        return 1
+    fi
+    echo "Validating existing archive: ${archive}"
+    if ! tar -tf "${archive}" >/dev/null; then
+        echo "Existing archive is incomplete or invalid: ${archive}" >&2
+        echo "Move it aside or remove it before resubmitting." >&2
+        exit 2
+    fi
+    echo "Reusing complete archive: ${archive}"
+    return 0
+}
+
+REUSE_BRIGHT=false
+REUSE_LEGACY=false
+if archive_is_reusable "${BRIGHT_TAR}"; then REUSE_BRIGHT=true; fi
+if archive_is_reusable "${LEGACY_TAR}"; then REUSE_LEGACY=true; fi
 
 BRIGHT_TMP=${BRIGHT_TAR}.partial.${SLURM_JOB_ID}
 LEGACY_TMP=${LEGACY_TAR}.partial.${SLURM_JOB_ID}
@@ -54,8 +70,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Uncompressed tar files need approximately the apparent source size plus tar
-# headers. Require a 5% margin and an additional GiB before doing any work.
-SOURCE_BYTES=$(du -sk "${BRIGHT_SOURCE}" "${LEGACY_SOURCE}" | awk '{total += $1} END {print total * 1024}')
+# headers. Count only archives that still need to be built, then require a 5%
+# margin and an additional GiB before doing any work.
+SOURCE_BYTES=0
+if [[ "${REUSE_BRIGHT}" == false ]]; then
+    BYTES=$(du -sk "${BRIGHT_SOURCE}" | awk '{print $1 * 1024}')
+    SOURCE_BYTES=$((SOURCE_BYTES + BYTES))
+fi
+if [[ "${REUSE_LEGACY}" == false ]]; then
+    BYTES=$(du -sk "${LEGACY_SOURCE}" | awk '{print $1 * 1024}')
+    SOURCE_BYTES=$((SOURCE_BYTES + BYTES))
+fi
 AVAILABLE_BYTES=$(df -Pk "${MIGRATION}" | awk 'NR == 2 {print $4 * 1024}')
 REQUIRED_BYTES=$((SOURCE_BYTES + SOURCE_BYTES / 20 + 1073741824))
 printf 'Source apparent size: %s bytes\n' "${SOURCE_BYTES}"
@@ -66,14 +91,22 @@ if (( AVAILABLE_BYTES < REQUIRED_BYTES )); then
     exit 2
 fi
 
-echo "Packaging ${BRIGHT_SOURCE}"
-tar -cf "${BRIGHT_TMP}" -C "${SOURCE}" "${BRIGHT}"
+if [[ "${REUSE_BRIGHT}" == false ]]; then
+    echo "Packaging ${BRIGHT_SOURCE}"
+    tar -cf "${BRIGHT_TMP}" -C "${SOURCE}" "${BRIGHT}"
+fi
 
-echo "Packaging ${LEGACY_SOURCE}"
-tar -cf "${LEGACY_TMP}" -C "${SOURCE}" "${LEGACY}"
+if [[ "${REUSE_LEGACY}" == false ]]; then
+    echo "Packaging ${LEGACY_SOURCE}"
+    tar -cf "${LEGACY_TMP}" -C "${SOURCE}" "${LEGACY}"
+fi
 
-mv "${BRIGHT_TMP}" "${BRIGHT_TAR}"
-mv "${LEGACY_TMP}" "${LEGACY_TAR}"
+if [[ "${REUSE_BRIGHT}" == false ]]; then
+    mv "${BRIGHT_TMP}" "${BRIGHT_TAR}"
+fi
+if [[ "${REUSE_LEGACY}" == false ]]; then
+    mv "${LEGACY_TMP}" "${LEGACY_TAR}"
+fi
 
 # Store relative filenames so the checksum manifest works after transfer.
 (
