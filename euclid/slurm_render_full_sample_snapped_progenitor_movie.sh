@@ -21,7 +21,6 @@ set -euo pipefail
 #   2 output directory
 #   3 number of dense movie frames
 #   4 base noise seed (frame i uses base+i)
-#   5 matched PHZ catalogue path
 
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
@@ -38,12 +37,11 @@ DESCENDANT_ID=${1:-2701130960681498535}
 OUTPUT=${2:-${BASE}/progenitor_snapped_full_${DESCENDANT_ID}_${SLURM_JOB_ID}}
 FRAMES=${3:-120}
 NOISE_SEED=${4:-42000}
-CATALOG=${5:-${BASE}/phz_sfr_mass_matched_bright.fits}
 TRACK=${OUTPUT}/full_sample_track
 
 for path in \
     "${FULL_BUNDLE}/euclid_explorer.h5" "${FULL_ARCHIVE}" "${DATASET}" \
-    "${CATALOG}" "${CONDITION_CACHE}" "${DIFFUSION}/runtime.json"; do
+    "${CONDITION_CACHE}" "${DIFFUSION}/runtime.json"; do
     [[ -f "${path}" ]] || { echo "Missing required file: ${path}" >&2; exit 2; }
 done
 [[ -d "${FULL_BUNDLE}/VIS" ]] || { echo "Missing full-sample stamps: ${FULL_BUNDLE}/VIS" >&2; exit 2; }
@@ -67,7 +65,7 @@ mkdir -p "${MPLCONFIGDIR}" "${OUTPUT}"
 python -u -m euclid.progenitor_analogues \
     --bundle "${FULL_BUNDLE}" \
     --archive "${FULL_ARCHIVE}" \
-    --catalog "${CATALOG}" \
+    --no-catalog \
     --descendant-id "${DESCENDANT_ID}" \
     --minimum-descendant-mass 0 \
     --minimum-progenitor-mass 9 \

@@ -1303,6 +1303,10 @@ def main() -> None:
     parser.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE)
     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument(
+        "--no-catalog", action="store_true",
+        help="Run from explorer/archive masses without an external PHZ catalogue.",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--pdf", type=Path, default=DEFAULT_PDF)
     parser.add_argument("--descendant-id", type=int)
@@ -1342,7 +1346,10 @@ def main() -> None:
     if args.quenched_descendant and args.main_sequence_descendant:
         parser.error("Choose either --quenched-descendant or --main-sequence-descendant")
 
-    data = _load_inputs(args.bundle, args.archive, args.catalog, args.ms_sfr_offset)
+    catalog = None if args.no_catalog else args.catalog
+    if args.sfr_mass_source == "phz" and catalog is None:
+        parser.error("--sfr-mass-source phz requires --catalog")
+    data = _load_inputs(args.bundle, args.archive, catalog, args.ms_sfr_offset)
     stamps = args.bundle / "VIS"
     descendant_index = _choose_descendant(
         data,
@@ -1419,7 +1426,7 @@ def main() -> None:
         "formed_mass_return_fraction": 0.0,
         "ms_sfr_offset_dex": args.ms_sfr_offset,
         "sfr_mass_panel_source": args.sfr_mass_source,
-        "catalog": str(args.catalog),
+        "catalog": str(catalog) if catalog is not None else None,
         "bundle": str(args.bundle),
         "archive": str(args.archive),
         "pdf": str(args.pdf),
