@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +11,11 @@ import h5py
 from euclid.render_progenitor_morphology_movie import (
     build_track,
     interpolate_track,
+    load_condition_umap,
     load_descendant_sfh,
     nearest_reference,
     slerp,
+    umap_density,
 )
 
 
@@ -86,6 +89,21 @@ class ProgenitorMorphologyMovieTests(unittest.TestCase):
             np.testing.assert_allclose(time, [0.0, 1.0, 2.0])
             self.assertEqual(norm, 2.0)
             np.testing.assert_allclose(np.sum(rate * [0.5, 1.0, 0.5]), 1.0)
+
+    def test_condition_umap_alignment_and_density(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "condition_umap.npz"
+            np.savez(
+                path, galaxy_id=np.array([20, 10, 30]),
+                xy=np.array([[2, 2], [1, 1], [3, 3]], dtype=np.float32),
+                metadata=json.dumps({"condition_cache_sha256": "abc"}),
+            )
+            xy, metadata = load_condition_umap(path, np.array([10, 20, 30]), "abc")
+            np.testing.assert_array_equal(xy, [[1, 1], [2, 2], [3, 3]])
+            self.assertEqual(metadata["condition_cache_sha256"], "abc")
+            density, extent = umap_density(xy, bins=8)
+            self.assertEqual(density.shape, (8, 8))
+            self.assertEqual(len(extent), 4)
 
 
 if __name__ == "__main__":

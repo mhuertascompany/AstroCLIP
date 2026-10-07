@@ -1,4 +1,5 @@
 import unittest
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -15,6 +16,7 @@ from euclid.progenitor_analogues import (
     lookback_at_formed_fraction,
     older_fraction,
     _choose_descendant,
+    _replace_track_coordinates,
 )
 
 
@@ -107,6 +109,20 @@ class ProgenitorAnalogueMathTest(unittest.TestCase):
                 data, stamps, None, 10.5, 11.0, None, 0.3
             )
         self.assertEqual(chosen, 1)
+
+    def test_external_track_coordinates_align_by_id(self):
+        data = {"ids": np.array([10, 20, 30]), "xy_joint": np.zeros((3, 2))}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "track_umap.npz"
+            np.savez(
+                path, galaxy_id=np.array([30, 10]),
+                xy=np.array([[3.0, 3.5], [1.0, 1.5]]),
+                metadata=json.dumps({"space": "test condition space"}),
+            )
+            _replace_track_coordinates(data, path)
+        np.testing.assert_allclose(data["xy_joint"][[0, 2]], [[1, 1.5], [3, 3.5]])
+        self.assertTrue(np.isnan(data["xy_joint"][1]).all())
+        self.assertEqual(data["track_space_label"], "test condition space")
 
 
 if __name__ == "__main__":

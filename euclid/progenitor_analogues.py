@@ -399,7 +399,30 @@ def _load_inputs(
         "catalog_delta_ms": catalog_delta_ms,
         "physical_parameters_matched": physical_parameters_matched,
         "ms_sfr_offset": ms_sfr_offset,
+        "track_space_label": "Joint-average aligned image+SFH embedding",
     }
+
+
+def _replace_track_coordinates(data, path: Path) -> None:
+    """Replace report-only UMAP coordinates without changing analogue matching."""
+    with np.load(path, allow_pickle=False) as source:
+        coordinate_ids = np.asarray(source["galaxy_id"], dtype=np.int64)
+        coordinate_xy = np.asarray(source["xy"], dtype=float)
+        metadata = json.loads(str(source["metadata"])) if "metadata" in source else {}
+    if coordinate_xy.shape != (len(coordinate_ids), 2):
+        raise ValueError("Track UMAP must contain galaxy_id[N] and xy[N,2].")
+    if len(np.unique(coordinate_ids)) != len(coordinate_ids):
+        raise ValueError("Track UMAP contains duplicate galaxy IDs.")
+    lookup = {int(gid): index for index, gid in enumerate(coordinate_ids)}
+    ids = np.asarray(data["ids"], dtype=np.int64)
+    positions = np.array([lookup.get(int(gid), -1) for gid in ids])
+    xy = np.full((len(ids), 2), np.nan, dtype=float)
+    present = positions >= 0
+    xy[present] = coordinate_xy[positions[present]]
+    data["xy_joint"] = xy
+    data["track_space_label"] = str(
+        metadata.get("space", "external track embedding")
+    )
 
 
 def _choose_descendant(
@@ -873,7 +896,7 @@ def make_report(
             if selected.empty:
                 continue
             indices = selected.bundle_index.to_numpy(dtype=int)
-            centroid = np.median(xy[indices], axis=0)
+            centroid = np.nanmedian(xy[indices], axis=0)
             umap_ax.scatter(
                 xy[indices, 0], xy[indices, 1], s=40, c=[color], edgecolor="white",
                 linewidth=0.6, zorder=3,
@@ -904,9 +927,10 @@ def make_report(
             ax=umap_ax, label="Descendant checkpoint lookback [Gyr]",
             fraction=0.045, pad=0.02,
         )
+        track_label = str(data.get("track_space_label", "embedding"))
         umap_ax.set(
-            xlabel="Joint-average UMAP 1", ylabel="Joint-average UMAP 2",
-            title="Numbered analogue track in the joint embedding",
+            xlabel="UMAP 1", ylabel="UMAP 2",
+            title=f"Numbered analogue track in the {track_label}",
         )
 
         right = grid[:, 2].subgridspec(
@@ -1306,6 +1330,10 @@ def main() -> None:
         "--stamps", type=Path,
         help="Directory containing VIS_<object_id>.jpg; defaults to BUNDLE/VIS.",
     )
+    parser.add_argument(
+        "--track-umap", type=Path,
+        help="Optional galaxy_id/xy NPZ used only for report track coordinates.",
+    )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument(
         "--no-catalog", action="store_true",
@@ -1354,6 +1382,8 @@ def main() -> None:
     if args.sfr_mass_source == "phz" and catalog is None:
         parser.error("--sfr-mass-source phz requires --catalog")
     data = _load_inputs(args.bundle, args.archive, catalog, args.ms_sfr_offset)
+    if args.track_umap is not None:
+        _replace_track_coordinates(data, args.track_umap)
     stamps = args.stamps if args.stamps is not None else args.bundle / "VIS"
     if not stamps.is_dir():
         raise FileNotFoundError(f"VIS stamp directory does not exist: {stamps}")
@@ -1428,7 +1458,8 @@ def main() -> None:
             ),
         ],
         "selection_does_not_use": ["redshift", "morphology", "image embedding", "UMAP position", "sSFR"],
-        "track_visualization_space": "xy_joint (normalized average of aligned image and SFH embeddings)",
+        "track_visualization_space": str(data["track_space_label"]),
+        "track_umap": str(args.track_umap) if args.track_umap is not None else None,
         "formed_mass_return_fraction": 0.0,
         "ms_sfr_offset_dex": args.ms_sfr_offset,
         "sfr_mass_panel_source": args.sfr_mass_source,

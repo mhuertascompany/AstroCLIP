@@ -32,6 +32,7 @@ FULL_ARCHIVE=${TRAINING}/full_sample_explorer/euclid_clip_full_umap_diagnostics.
 DATASET=${BASE}/sfh_clip_150k.h5
 STAMPS=${BASE}/zoobot_stamps_rmax/VIS
 CONDITION_CACHE=${BASE}/diffusion_conditions_ae_adjacency_no_edgeon.npz
+CONDITION_UMAP=${BASE}/diffusion_conditions_ae_adjacency_no_edgeon_umap.npz
 DIFFUSION=${BASE}/pixel_diffusion_ae_adjacency_no_edgeon_conditioned_full
 
 DESCENDANT_ID=${1:-2701130960681498535}
@@ -58,7 +59,16 @@ python -c 'import json,sys; print(json.load(open(sys.argv[1]))["best_checkpoint"
 }
 
 export MPLCONFIGDIR=${SLURM_TMPDIR:-/tmp}/mpl_${SLURM_JOB_ID}
-mkdir -p "${MPLCONFIGDIR}" "${OUTPUT}"
+export NUMBA_CACHE_DIR=${SLURM_TMPDIR:-/tmp}/numba_${SLURM_JOB_ID}
+export NUMBA_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+mkdir -p "${MPLCONFIGDIR}" "${NUMBA_CACHE_DIR}" "${OUTPUT}"
+
+if [[ ! -f "${CONDITION_UMAP}" ]]; then
+    python -u -m euclid.build_condition_umap \
+        --conditions "${CONDITION_CACHE}" \
+        --output "${CONDITION_UMAP}" \
+        --neighbors 30 --min-dist 0.1 --seed 42
+fi
 
 # Keep extra ranked candidates because the diffusion cache deliberately omits
 # the edge-on ablation objects. The renderer takes the best available candidate
@@ -67,6 +77,7 @@ python -u -m euclid.progenitor_analogues \
     --bundle "${FULL_BUNDLE}" \
     --archive "${FULL_ARCHIVE}" \
     --stamps "${STAMPS}" \
+    --track-umap "${CONDITION_UMAP}" \
     --no-catalog \
     --descendant-id "${DESCENDANT_ID}" \
     --minimum-descendant-mass 0 \
@@ -84,6 +95,8 @@ python -u -m euclid.render_progenitor_morphology_movie \
     --condition-cache "${CONDITION_CACHE}" \
     --pixel-checkpoint "${PIXEL_CHECKPOINT}" \
     --sfh-dataset "${DATASET}" \
+    --condition-umap "${CONDITION_UMAP}" \
+    --real-stamps "${STAMPS}" \
     --output "${OUTPUT}/movie" \
     --n-analogues 1 \
     --frames "${FRAMES}" \

@@ -174,21 +174,58 @@ def load_descendant_sfh(path, descendant_id):
     return fractional_time * time_norm_gyr, weights / widths_gyr, time_norm_gyr
 
 
+def load_condition_umap(path, condition_ids, cache_digest):
+    """Load and align a UMAP fitted to the exact diffusion-condition cache."""
+    with np.load(path, allow_pickle=False) as source:
+        ids = np.asarray(source["galaxy_id"], dtype=np.int64)
+        xy = np.asarray(source["xy"], dtype=np.float32)
+        metadata = json.loads(str(source["metadata"]))
+    if metadata.get("condition_cache_sha256") != cache_digest:
+        raise ValueError("Condition UMAP was fitted to a different condition cache.")
+    if xy.shape != (len(ids), 2) or len(np.unique(ids)) != len(ids):
+        raise ValueError("Invalid condition UMAP arrays.")
+    lookup = {int(gid): index for index, gid in enumerate(ids)}
+    positions = np.array([lookup.get(int(gid), -1) for gid in condition_ids])
+    if np.any(positions < 0):
+        raise ValueError("Condition UMAP does not contain every condition-cache ID.")
+    return xy[positions], metadata
+
+
+def umap_density(xy, bins=320):
+    """Build a reusable density background for fast per-frame UMAP panels."""
+    xy = np.asarray(xy, dtype=float)
+    low = np.nanpercentile(xy, 0.2, axis=0)
+    high = np.nanpercentile(xy, 99.8, axis=0)
+    padding = np.maximum((high - low) * 0.04, 1e-3)
+    low, high = low - padding, high + padding
+    density, x_edges, y_edges = np.histogram2d(
+        xy[:, 0], xy[:, 1], bins=bins,
+        range=((low[0], high[0]), (low[1], high[1])),
+    )
+    extent = (x_edges[0], x_edges[-1], y_edges[0], y_edges[-1])
+    return np.log1p(density.T), extent
+
+
 def evolution_frame(
     pixels, index, total, lookback, mass_fraction, nearest, descendant_id,
     analogue_id, noise_seed, sfh_time, sfh_rate, time_norm_gyr,
+    track_xy=None, density=None, extent=None, image_label="Generated morphology",
 ):
     """Render a generated stamp beside the progressively revealed descendant SFH."""
-    figure = plt.figure(figsize=(11, 5.2), dpi=100, facecolor="#111318")
-    grid = figure.add_gridspec(1, 2, width_ratios=(1.0, 1.25), wspace=0.18)
+    has_umap = track_xy is not None
+    figure = plt.figure(
+        figsize=(15.5 if has_umap else 11, 5.2), dpi=100, facecolor="#111318",
+    )
+    widths = (1.0, 1.25, 1.12) if has_umap else (1.0, 1.25)
+    grid = figure.add_gridspec(1, len(widths), width_ratios=widths, wspace=0.20)
     image_axis = figure.add_subplot(grid[0, 0])
     sfh_axis = figure.add_subplot(grid[0, 1])
     image_axis.imshow(pixels, cmap="gray", vmin=0, vmax=255)
     image_axis.axis("off")
-    image_axis.set_title(
-        f"Nearest observed condition: {analogue_id}\nindependent noise seed {noise_seed}",
-        color="white", fontsize=10,
-    )
+    subtitle = f"condition ID {analogue_id}"
+    if noise_seed is not None:
+        subtitle += f" · noise seed {noise_seed}"
+    image_axis.set_title(f"{image_label}\n{subtitle}", color="white", fontsize=10)
 
     revealed = sfh_time >= lookback - 1e-10
     sfh_axis.plot(sfh_time, sfh_rate, color="#657080", lw=1.2, alpha=0.35,
@@ -219,6 +256,35 @@ def evolution_frame(
         f"nearest cosine={nearest:.3f}",
         color="white", fontsize=10,
     )
+    if has_umap:
+        umap_axis = figure.add_subplot(grid[0, 2])
+        umap_axis.imshow(
+            density, origin="lower", extent=extent, cmap="Greys", aspect="auto",
+            interpolation="nearest", alpha=0.68,
+        )
+        umap_axis.plot(
+            track_xy[:, 0], track_xy[:, 1], color="#788291", lw=1.0, alpha=0.5,
+        )
+        umap_axis.plot(
+            track_xy[:index + 1, 0], track_xy[:index + 1, 1],
+            color="#4fd09b", lw=2.0,
+        )
+        umap_axis.scatter(
+            track_xy[index, 0], track_xy[index, 1], marker="*", s=130,
+            color="#ffcf66", edgecolor="black", linewidth=0.6, zorder=5,
+        )
+        umap_axis.set_xlim(extent[0], extent[1])
+        umap_axis.set_ylim(extent[2], extent[3])
+        umap_axis.set_xlabel("UMAP 1", color="white")
+        umap_axis.set_ylabel("UMAP 2", color="white")
+        umap_axis.tick_params(colors="white")
+        for spine in umap_axis.spines.values():
+            spine.set_color("#737b88")
+        umap_axis.set_facecolor("#111318")
+        umap_axis.set_title(
+            "AE-adjacency aligned-SFH UMAP\nexact diffusion-condition space",
+            color="white", fontsize=10,
+        )
     figure.canvas.draw()
     rgba = np.asarray(figure.canvas.buffer_rgba()).copy()
     plt.close(figure)
@@ -271,6 +337,14 @@ def parse_args():
         "--sfh-dataset", type=Path,
         help="Source HDF5 used to add a progressively revealed descendant-SFH panel.",
     )
+    parser.add_argument(
+        "--condition-umap", type=Path,
+        help="Full UMAP fitted to the exact diffusion-condition cache.",
+    )
+    parser.add_argument(
+        "--real-stamps", type=Path,
+        help="If given, also render a movie from the selected real VIS stamps.",
+    )
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
@@ -282,6 +356,8 @@ def run(args):
     paths = [args.candidates, args.condition_cache, args.pixel_checkpoint]
     if args.sfh_dataset is not None:
         paths.append(args.sfh_dataset)
+    if args.condition_umap is not None:
+        paths.append(args.condition_umap)
     for path in paths:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -302,6 +378,8 @@ def run(args):
         raise ValueError("Pixel checkpoint was trained with a different condition cache.")
     if not 2 <= args.steps <= len(pixel.schedule.alpha):
         raise ValueError("Sampling steps lie outside the diffusion schedule.")
+    if args.real_stamps is not None and not args.real_stamps.is_dir():
+        raise FileNotFoundError(args.real_stamps)
 
     frame_time, frame_fraction, embedding = interpolate_track(
         anchor_rows, args.frames, device,
@@ -320,6 +398,14 @@ def run(args):
         )
     else:
         sfh_time = sfh_rate = sfh_time_norm = None
+    if args.condition_umap is not None:
+        reference_xy, umap_metadata = load_condition_umap(
+            args.condition_umap, ids, cache_digest,
+        )
+        track_xy = reference_xy[nearest_index]
+        density, extent = umap_density(reference_xy)
+    else:
+        reference_xy = track_xy = density = extent = umap_metadata = None
     generator = torch.Generator(device=device).manual_seed(args.noise_seed)
     base_noise = torch.randn((1, 1, 224, 224), device=device, generator=generator)
     frame_seeds = (
@@ -365,6 +451,7 @@ def run(args):
                 pixels, index, args.frames, frame_time[index], frame_fraction[index],
                 nearest[index], descendant_id, int(analogue_ids[index]),
                 int(frame_seeds[index]), sfh_time, sfh_rate, sfh_time_norm,
+                track_xy=track_xy, density=density, extent=extent,
             )
         frame.save(frame_dir / f"frame_{index:04d}.png")
         annotated.append(frame)
@@ -381,6 +468,39 @@ def run(args):
             "-i", str(frame_dir / "frame_%04d.png"), "-c:v", "libx264",
             "-pix_fmt", "yuv420p", str(mp4),
         ], check=True)
+
+    real_gif = real_mp4 = None
+    if args.real_stamps is not None:
+        real_frame_dir = args.output / "real_frames"
+        real_frame_dir.mkdir()
+        real_frames = []
+        for index, galaxy_id in enumerate(analogue_ids):
+            stamp = args.real_stamps / f"VIS_{int(galaxy_id)}.jpg"
+            if not stamp.is_file():
+                raise FileNotFoundError(stamp)
+            with Image.open(stamp) as source:
+                real_pixels = np.asarray(source.convert("L"))
+            frame = evolution_frame(
+                real_pixels, index, args.frames, frame_time[index],
+                frame_fraction[index], nearest[index], descendant_id,
+                int(galaxy_id), None, sfh_time, sfh_rate,
+                sfh_time_norm, track_xy=track_xy, density=density, extent=extent,
+                image_label="Real nearest analogue",
+            )
+            frame.save(real_frame_dir / f"frame_{index:04d}.png")
+            real_frames.append(frame)
+        real_gif = args.output / "real_morphology_track.gif"
+        real_frames[0].save(
+            real_gif, save_all=True, append_images=real_frames[1:],
+            duration=round(1000 / args.fps), loop=0, optimize=False,
+        )
+        if shutil.which("ffmpeg"):
+            real_mp4 = args.output / "real_morphology_track.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
+                "-i", str(real_frame_dir / "frame_%04d.png"), "-c:v", "libx264",
+                "-pix_fmt", "yuv420p", str(real_mp4),
+            ], check=True)
 
     sample = np.unique(np.linspace(0, args.frames - 1, min(12, args.frames)).round().astype(int))
     figure, axes = plt.subplots(2, int(np.ceil(len(sample) / 2)), figsize=(18, 6), squeeze=False)
@@ -426,6 +546,7 @@ def run(args):
         nearest_real_cosine=nearest,
         nearest_real_id=analogue_ids,
         frame_noise_seed=frame_seeds,
+        condition_umap_xy=(track_xy if track_xy is not None else np.empty((0, 2))),
         anchor_lookback_gyr=anchor_time,
         anchor_embedding=np.stack([row["condition"] for row in anchor_rows]),
     )
@@ -441,6 +562,9 @@ def run(args):
         "independent_noise": args.independent_noise,
         "snap_to_reference": args.snap_to_reference,
         "sfh_dataset": str(args.sfh_dataset) if args.sfh_dataset else None,
+        "condition_umap": str(args.condition_umap) if args.condition_umap else None,
+        "condition_umap_metadata": umap_metadata,
+        "real_stamps": str(args.real_stamps) if args.real_stamps else None,
         "sampling_steps": args.steps, "fps": args.fps,
         "condition_cache_sha256": cache_digest,
         "condition_cache_metadata": metadata,
@@ -450,6 +574,8 @@ def run(args):
         "anchors": serializable_anchors,
         "gif": str(args.output / "morphology_track.gif"),
         "mp4": str(mp4) if mp4 is not None else None,
+        "real_gif": str(real_gif) if real_gif is not None else None,
+        "real_mp4": str(real_mp4) if real_mp4 is not None else None,
         "interpretation": (
             "A model-generated counterfactual sequence. Dense target points follow the "
             "analogue track; with snap_to_reference they are rendered through the nearest "

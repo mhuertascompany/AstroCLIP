@@ -2114,7 +2114,10 @@ the closest *observed* condition in the complete filtered diffusion cache.
 The generator therefore never receives an interpolated embedding. Frame `i`
 uses independent noise seed `42000+i`. Beside each generated stamp, the movie
 progressively reveals the descendant SFH from its earliest history toward the
-observation epoch:
+observation epoch. A third panel follows the selected objects through a UMAP
+fitted directly to the complete 256-dimensional AE-adjacency/no-edge-on SFH
+condition cache. This is the exact coordinate space supplied to the diffusion,
+not the older frozen-MLP joint embedding:
 
 ```bash
 sbatch euclid/slurm_render_full_sample_snapped_progenitor_movie.sh
@@ -2129,7 +2132,11 @@ and reads images from the canonical Candide directory
 compact explorer bundle or require the separately matched PHZ catalogue. The
 output contains the recomputed full-sample track, GIF/MP4, all SFH-annotated frames,
 `snapped_track.npz` with the selected real IDs and per-frame seeds, diagnostics,
-and a compressed download archive.
+and a compressed download archive. It also produces `real_morphology_track.gif`
+from the actual VIS stamps of the same nearest objects, with identical SFH and
+UMAP panels, for direct comparison with the generated sequence. The first job
+fits and caches `${BASE}/diffusion_conditions_ae_adjacency_no_edgeon_umap.npz`;
+subsequent movies reuse it after verifying the condition-cache hash.
 
 ### Diffusion comparison with contrasting SFHs
 
