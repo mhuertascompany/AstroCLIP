@@ -210,6 +210,7 @@ def evolution_frame(
     pixels, index, total, lookback, mass_fraction, nearest, descendant_id,
     analogue_id, noise_seed, sfh_time, sfh_rate, time_norm_gyr,
     track_xy=None, density=None, extent=None, image_label="Generated morphology",
+    morphology_id=None, morphology_similarity=None,
 ):
     """Render a generated stamp beside the progressively revealed descendant SFH."""
     has_umap = track_xy is not None
@@ -222,7 +223,9 @@ def evolution_frame(
     sfh_axis = figure.add_subplot(grid[0, 1])
     image_axis.imshow(pixels, cmap="gray", vmin=0, vmax=255)
     image_axis.axis("off")
-    subtitle = f"condition ID {analogue_id}"
+    subtitle = f"SFH state ID {analogue_id}"
+    if morphology_id is not None:
+        subtitle += f" · morphology donor {morphology_id}"
     if noise_seed is not None:
         subtitle += f" · noise seed {noise_seed}"
     image_axis.set_title(f"{image_label}\n{subtitle}", color="white", fontsize=10)
@@ -250,10 +253,13 @@ def evolution_frame(
     legend.get_frame().set_facecolor("#222630")
     for text in legend.get_texts():
         text.set_color("white")
+    similarity_text = f"SFH snap cosine={nearest:.3f}"
+    if morphology_similarity is not None:
+        similarity_text += f" · SFH→morph cosine={morphology_similarity:.3f}"
     sfh_axis.set_title(
         f"Descendant {descendant_id} · frame {index + 1}/{total}\n"
         f"lookback={lookback:.2f} Gyr · formed mass={mass_fraction:.3f} · "
-        f"nearest cosine={nearest:.3f}",
+        f"{similarity_text}",
         color="white", fontsize=10,
     )
     if has_umap:
@@ -282,7 +288,7 @@ def evolution_frame(
             spine.set_color("#737b88")
         umap_axis.set_facecolor("#111318")
         umap_axis.set_title(
-            "AE-adjacency aligned-SFH UMAP\nexact diffusion-condition space",
+            "AE-adjacency aligned-SFH UMAP\nexact track-condition space",
             color="white", fontsize=10,
         )
     figure.canvas.draw()
@@ -317,6 +323,12 @@ def parse_args():
                         help="analogue_candidates.csv from progenitor tracking.")
     parser.add_argument("--descendant-id", type=int)
     parser.add_argument("--condition-cache", type=Path, required=True)
+    parser.add_argument(
+        "--generation-condition-cache", type=Path,
+        help=("Optional second cache used by the pixel generator. Dense track "
+              "states remain defined in the SFH cache and retrieve their "
+              "nearest aligned condition from this cache."),
+    )
     parser.add_argument("--pixel-checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--n-analogues", type=int, default=5)
@@ -354,6 +366,8 @@ def run(args):
     from .train_pixel_diffusion import PixelDiffusion
 
     paths = [args.candidates, args.condition_cache, args.pixel_checkpoint]
+    if args.generation_condition_cache is not None:
+        paths.append(args.generation_condition_cache)
     if args.sfh_dataset is not None:
         paths.append(args.sfh_dataset)
     if args.condition_umap is not None:
@@ -367,6 +381,8 @@ def run(args):
         raise ValueError("Counts, steps, and fps must be positive.")
     device = torch.device(args.device)
     ids, reference, metadata = load_condition_cache(args.condition_cache)
+    if metadata.get("modality") not in {None, "sfh"}:
+        raise ValueError("The track condition cache must contain aligned SFH embeddings.")
     descendant_id, anchor_rows = build_track(
         args.candidates, args.descendant_id, ids, reference, args.n_analogues,
     )
@@ -374,24 +390,57 @@ def run(args):
         str(args.pixel_checkpoint), map_location="cpu",
     ).to(device).eval().requires_grad_(False)
     cache_digest = sha256(args.condition_cache)
-    if str(pixel.hparams.cache_sha256) != cache_digest:
+    if args.generation_condition_cache is None:
+        generation_ids = ids
+        generation_reference = reference
+        generation_metadata = metadata
+        generation_cache_digest = cache_digest
+    else:
+        generation_ids, generation_reference, generation_metadata = load_condition_cache(
+            args.generation_condition_cache,
+        )
+        if generation_metadata.get("modality") != "image":
+            raise ValueError(
+                "The generation condition cache must contain aligned image embeddings."
+            )
+        if generation_reference.shape[1] != reference.shape[1]:
+            raise ValueError("SFH and image alignment spaces have different dimensions.")
+        for key in ("checkpoint_sha256", "split_sha256"):
+            if generation_metadata.get(key) != metadata.get(key):
+                raise ValueError(
+                    f"SFH and image condition caches use different {key}."
+                )
+        generation_cache_digest = sha256(args.generation_condition_cache)
+    if str(pixel.hparams.cache_sha256) != generation_cache_digest:
         raise ValueError("Pixel checkpoint was trained with a different condition cache.")
     if not 2 <= args.steps <= len(pixel.schedule.alpha):
         raise ValueError("Sampling steps lie outside the diffusion schedule.")
     if args.real_stamps is not None and not args.real_stamps.is_dir():
         raise FileNotFoundError(args.real_stamps)
 
-    frame_time, frame_fraction, embedding = interpolate_track(
+    frame_time, frame_fraction, track_embedding = interpolate_track(
         anchor_rows, args.frames, device,
     )
     nearest, nearest_index = nearest_reference(
-        embedding.float().cpu().numpy(), reference,
+        track_embedding.float().cpu().numpy(), reference,
     )
     analogue_ids = ids[nearest_index]
     if args.snap_to_reference:
-        embedding = torch.as_tensor(reference[nearest_index], device=device)
+        track_embedding = torch.as_tensor(reference[nearest_index], device=device)
         # Exact references have unit self-cosine; retain the target-to-reference
         # similarity above as a diagnostic of the snapping approximation.
+    if args.generation_condition_cache is None:
+        morphology_similarity = nearest.copy()
+        morphology_ids = analogue_ids.copy()
+        generation_embedding = track_embedding
+    else:
+        morphology_similarity, morphology_index = nearest_reference(
+            track_embedding.float().cpu().numpy(), generation_reference,
+        )
+        morphology_ids = generation_ids[morphology_index]
+        generation_embedding = torch.as_tensor(
+            generation_reference[morphology_index], device=device,
+        )
     if args.sfh_dataset is not None:
         sfh_time, sfh_rate, sfh_time_norm = load_descendant_sfh(
             args.sfh_dataset, descendant_id,
@@ -415,7 +464,7 @@ def run(args):
     )
     pixel_frames = []
     for start in range(0, args.frames, args.batch_size):
-        condition = embedding[start:start + args.batch_size]
+        condition = generation_embedding[start:start + args.batch_size]
         if args.independent_noise:
             noise = []
             for seed in frame_seeds[start:start + len(condition)]:
@@ -452,6 +501,14 @@ def run(args):
                 nearest[index], descendant_id, int(analogue_ids[index]),
                 int(frame_seeds[index]), sfh_time, sfh_rate, sfh_time_norm,
                 track_xy=track_xy, density=density, extent=extent,
+                morphology_id=(
+                    int(morphology_ids[index])
+                    if args.generation_condition_cache is not None else None
+                ),
+                morphology_similarity=(
+                    float(morphology_similarity[index])
+                    if args.generation_condition_cache is not None else None
+                ),
             )
         frame.save(frame_dir / f"frame_{index:04d}.png")
         annotated.append(frame)
@@ -474,7 +531,7 @@ def run(args):
         real_frame_dir = args.output / "real_frames"
         real_frame_dir.mkdir()
         real_frames = []
-        for index, galaxy_id in enumerate(analogue_ids):
+        for index, galaxy_id in enumerate(morphology_ids):
             stamp = args.real_stamps / f"VIS_{int(galaxy_id)}.jpg"
             if not stamp.is_file():
                 raise FileNotFoundError(stamp)
@@ -483,9 +540,21 @@ def run(args):
             frame = evolution_frame(
                 real_pixels, index, args.frames, frame_time[index],
                 frame_fraction[index], nearest[index], descendant_id,
-                int(galaxy_id), None, sfh_time, sfh_rate,
+                int(analogue_ids[index]), None, sfh_time, sfh_rate,
                 sfh_time_norm, track_xy=track_xy, density=density, extent=extent,
-                image_label="Real nearest analogue",
+                image_label=(
+                    "Real retrieved morphology donor"
+                    if args.generation_condition_cache is not None
+                    else "Real nearest analogue"
+                ),
+                morphology_id=(
+                    int(galaxy_id)
+                    if args.generation_condition_cache is not None else None
+                ),
+                morphology_similarity=(
+                    float(morphology_similarity[index])
+                    if args.generation_condition_cache is not None else None
+                ),
             )
             frame.save(real_frame_dir / f"frame_{index:04d}.png")
             real_frames.append(frame)
@@ -502,6 +571,41 @@ def run(args):
                 "-pix_fmt", "yuv420p", str(real_mp4),
             ], check=True)
 
+    sfh_real_gif = sfh_real_mp4 = None
+    if args.real_stamps is not None and args.generation_condition_cache is not None:
+        sfh_real_frame_dir = args.output / "real_sfh_frames"
+        sfh_real_frame_dir.mkdir()
+        sfh_real_frames = []
+        for index, galaxy_id in enumerate(analogue_ids):
+            stamp = args.real_stamps / f"VIS_{int(galaxy_id)}.jpg"
+            if not stamp.is_file():
+                raise FileNotFoundError(stamp)
+            with Image.open(stamp) as source:
+                real_pixels = np.asarray(source.convert("L"))
+            frame = evolution_frame(
+                real_pixels, index, args.frames, frame_time[index],
+                frame_fraction[index], nearest[index], descendant_id,
+                int(galaxy_id), None, sfh_time, sfh_rate, sfh_time_norm,
+                track_xy=track_xy, density=density, extent=extent,
+                image_label="Real SFH-track analogue",
+                morphology_id=int(morphology_ids[index]),
+                morphology_similarity=float(morphology_similarity[index]),
+            )
+            frame.save(sfh_real_frame_dir / f"frame_{index:04d}.png")
+            sfh_real_frames.append(frame)
+        sfh_real_gif = args.output / "real_sfh_track.gif"
+        sfh_real_frames[0].save(
+            sfh_real_gif, save_all=True, append_images=sfh_real_frames[1:],
+            duration=round(1000 / args.fps), loop=0, optimize=False,
+        )
+        if shutil.which("ffmpeg"):
+            sfh_real_mp4 = args.output / "real_sfh_track.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
+                "-i", str(sfh_real_frame_dir / "frame_%04d.png"), "-c:v", "libx264",
+                "-pix_fmt", "yuv420p", str(sfh_real_mp4),
+            ], check=True)
+
     sample = np.unique(np.linspace(0, args.frames - 1, min(12, args.frames)).round().astype(int))
     figure, axes = plt.subplots(2, int(np.ceil(len(sample) / 2)), figsize=(18, 6), squeeze=False)
     for ax, index in zip(axes.ravel(), sample):
@@ -511,8 +615,9 @@ def run(args):
     for ax in axes.ravel()[len(sample):]:
         ax.axis("off")
     figure.suptitle(
-        f"{'Nearest-real' if args.snap_to_reference else 'Interpolated'} morphology "
-        f"sequence for descendant {descendant_id}"
+        f"{'Nearest-real' if args.snap_to_reference else 'Interpolated'} SFH track → "
+        f"{'nearest aligned morphology' if args.generation_condition_cache else 'SFH condition'} "
+        f"for descendant {descendant_id}"
     )
     figure.tight_layout()
     figure.savefig(args.output / "contact_sheet.pdf", bbox_inches="tight")
@@ -523,14 +628,27 @@ def run(args):
     anchor_similarity = np.asarray([
         float(np.max(np.asarray(row["condition"]) @ reference.T)) for row in anchor_rows
     ])
-    figure, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
+    diagnostic_rows = 3 if args.generation_condition_cache is not None else 2
+    figure, axes = plt.subplots(
+        diagnostic_rows, 1, figsize=(7, 8 if diagnostic_rows == 3 else 6),
+        sharex=True,
+    )
     axes[0].plot(frame_time, nearest, color="#276f9f")
     axes[0].scatter(anchor_time, anchor_similarity, color="black", s=25, zorder=4)
     axes[0].set_ylabel("Nearest real cosine")
     axes[0].axhline(0.9, color="0.5", ls="--", lw=0.8)
-    axes[1].plot(frame_time, frame_fraction, color="#278c66")
-    axes[1].scatter(anchor_time, [row["formed_mass_fraction"] for row in anchor_rows], color="black", s=25)
-    axes[1].set(xlabel="Descendant lookback time [Gyr]", ylabel="Formed mass fraction")
+    fraction_axis = axes[-1]
+    if diagnostic_rows == 3:
+        axes[1].plot(frame_time, morphology_similarity, color="#9b55b5")
+        axes[1].set_ylabel("SFH→morph cosine")
+    fraction_axis.plot(frame_time, frame_fraction, color="#278c66")
+    fraction_axis.scatter(
+        anchor_time, [row["formed_mass_fraction"] for row in anchor_rows],
+        color="black", s=25,
+    )
+    fraction_axis.set(
+        xlabel="Descendant lookback time [Gyr]", ylabel="Formed mass fraction",
+    )
     for ax in axes:
         ax.invert_xaxis()
         ax.grid(alpha=0.2)
@@ -542,9 +660,12 @@ def run(args):
     np.savez_compressed(
         args.output / track_name,
         frame_lookback_gyr=frame_time, formed_mass_fraction=frame_fraction,
-        aligned_sfh_embedding=embedding.float().cpu().numpy(),
+        aligned_sfh_embedding=track_embedding.float().cpu().numpy(),
+        aligned_generation_embedding=generation_embedding.float().cpu().numpy(),
         nearest_real_cosine=nearest,
         nearest_real_id=analogue_ids,
+        nearest_morphology_cosine=morphology_similarity,
+        nearest_morphology_id=morphology_ids,
         frame_noise_seed=frame_seeds,
         condition_umap_xy=(track_xy if track_xy is not None else np.empty((0, 2))),
         anchor_lookback_gyr=anchor_time,
@@ -568,19 +689,32 @@ def run(args):
         "sampling_steps": args.steps, "fps": args.fps,
         "condition_cache_sha256": cache_digest,
         "condition_cache_metadata": metadata,
+        "generation_condition_cache": (
+            str(args.generation_condition_cache)
+            if args.generation_condition_cache is not None else None
+        ),
+        "generation_condition_cache_sha256": generation_cache_digest,
+        "generation_condition_cache_metadata": generation_metadata,
         "minimum_nearest_real_cosine": float(nearest.min()),
         "median_nearest_real_cosine": float(np.median(nearest)),
         "unique_nearest_real_objects": int(len(np.unique(analogue_ids))),
+        "minimum_sfh_to_morphology_cosine": float(morphology_similarity.min()),
+        "median_sfh_to_morphology_cosine": float(np.median(morphology_similarity)),
+        "unique_morphology_donors": int(len(np.unique(morphology_ids))),
         "anchors": serializable_anchors,
         "gif": str(args.output / "morphology_track.gif"),
         "mp4": str(mp4) if mp4 is not None else None,
         "real_gif": str(real_gif) if real_gif is not None else None,
         "real_mp4": str(real_mp4) if real_mp4 is not None else None,
+        "real_sfh_gif": str(sfh_real_gif) if sfh_real_gif is not None else None,
+        "real_sfh_mp4": str(sfh_real_mp4) if sfh_real_mp4 is not None else None,
         "interpretation": (
             "A model-generated counterfactual sequence. Dense target points follow the "
             "analogue track; with snap_to_reference they are rendered through the nearest "
-            "real full-cache SFH condition rather than an interpolated condition. It is not "
-            "an observed evolutionary movie."
+            "real full-cache SFH condition rather than an interpolated condition. When a "
+            "generation cache is supplied, each SFH state retrieves its nearest aligned "
+            "image embedding, which conditions the pixel generator. It is not an observed "
+            "evolutionary movie."
         ),
     }
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
