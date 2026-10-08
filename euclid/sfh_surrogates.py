@@ -48,6 +48,135 @@ def iaaft_surrogate(values, rng, max_iterations=1000, tolerance=1e-7):
     return surrogate, {"iterations": iterations, "spectral_error": error}
 
 
+def _randomize_bounded_segment(
+    values, rng, transition_bins, max_iterations, blend_left=False, blend_right=False,
+):
+    """IAAFT-randomize one segment while approaching fixed neighbours smoothly."""
+    values = np.asarray(values, dtype=np.float64)
+    if len(values) < 4:
+        raise ValueError("Each randomized SFH segment must contain at least four bins.")
+    surrogate, diagnostics = iaaft_surrogate(
+        values, rng, max_iterations=max_iterations,
+    )
+    target = float(values.sum())
+    sides = int(blend_left) + int(blend_right)
+    maximum_width = (
+        (len(values) - 1) // 2 if sides == 2 else len(values) - 1
+    )
+    width = min(int(transition_bins), maximum_width)
+    if width < 1:
+        raise ValueError("transition_bins must be positive")
+
+    while True:
+        output = surrogate.copy()
+        fixed = np.zeros(len(values), dtype=bool)
+        alpha = np.sin(np.linspace(0.0, np.pi / 2.0, width)) ** 2
+        if blend_left:
+            output[:width] = (1.0 - alpha) * values[:width] + alpha * surrogate[:width]
+            fixed[:width] = True
+        if blend_right:
+            right_alpha = np.ones(1) if width == 1 else alpha
+            output[-width:] = (
+                (1.0 - right_alpha) * surrogate[-width:]
+                + right_alpha * values[-width:]
+            )
+            fixed[-width:] = True
+        free = ~fixed
+        remaining = target - float(output[fixed].sum())
+        if remaining >= 0 or width == 1:
+            break
+        width -= 1
+
+    free_sum = float(output[free].sum())
+    if remaining > 0 and free_sum > 0:
+        output[free] *= remaining / free_sum
+    elif remaining > 0:
+        output[free] = values[free]
+        output[free] *= remaining / max(float(output[free].sum()), np.finfo(float).eps)
+    else:
+        output[free] = 0.0
+    correction_index = int(np.flatnonzero(free)[0])
+    output[correction_index] += target - float(output.sum())
+    output[correction_index] = max(output[correction_index], 0.0)
+    diagnostics["transition_bins"] = width
+    diagnostics["integral_error"] = float(output.sum() - target)
+    return output, diagnostics
+
+
+def window_preserved_iaaft(
+    weights,
+    time,
+    rng,
+    window_start=0.1,
+    window_end=0.2,
+    transition_bins=5,
+    max_iterations=1000,
+):
+    """Preserve one fractional-time window and randomize both sides with IAAFT.
+
+    The half-open interval ``window_start <= time < window_end`` is copied
+    exactly (including the final time bin when ``window_end == 1``). The two
+    outside segments are randomized independently, crossfaded toward the fixed
+    window, and normalized to their original integrals separately.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    time = np.asarray(time, dtype=np.float64)
+    if (
+        weights.ndim != 1
+        or time.shape != weights.shape
+        or not np.all(np.isfinite(weights))
+        or np.any(weights < 0)
+        or not np.all(np.isfinite(time))
+        or np.any(np.diff(time) <= 0)
+        or not 0 <= window_start < window_end <= 1
+    ):
+        raise ValueError("expected non-negative SFH weights and a valid time window")
+    first = int(np.searchsorted(time, window_start, side="left"))
+    last_side = "right" if np.isclose(window_end, 1.0) else "left"
+    last = int(np.searchsorted(time, window_end, side=last_side))
+    if last <= first:
+        raise ValueError("The preserved window contains no SFH bins.")
+    if first and first < 4:
+        raise ValueError("The recent randomized segment contains fewer than four bins.")
+    if last < len(weights) and len(weights) - last < 4:
+        raise ValueError("The old randomized segment contains fewer than four bins.")
+
+    output = weights.copy()
+    component_info = []
+    if first:
+        output[:first], info = _randomize_bounded_segment(
+            weights[:first], rng, transition_bins, max_iterations,
+            blend_right=True,
+        )
+        component_info.append(info)
+    if last < len(weights):
+        output[last:], info = _randomize_bounded_segment(
+            weights[last:], rng, transition_bins, max_iterations,
+            blend_left=True,
+        )
+        component_info.append(info)
+
+    outside = np.r_[0:first, last:len(weights)]
+    correlation = np.corrcoef(weights[outside], output[outside])[0, 1]
+    if not np.isfinite(correlation):
+        correlation = 1.0 if np.allclose(weights[outside], output[outside]) else 0.0
+    return output, {
+        "window_start": float(window_start),
+        "window_end": float(window_end),
+        "window_start_index": first,
+        "window_end_index": last,
+        "n_preserved_bins": last - first,
+        "n_randomized_bins": len(outside),
+        "preserved_sum": float(weights[first:last].sum()),
+        "outside_sum": float(weights[outside].sum()),
+        "outside_integral_error": float(output[outside].sum() - weights[outside].sum()),
+        "outside_correlation": float(correlation),
+        "spectral_error": float(np.mean([x["spectral_error"] for x in component_info])),
+        "iterations": int(max(x["iterations"] for x in component_info)),
+        "transition_bins": int(max(x["transition_bins"] for x in component_info)),
+    }
+
+
 def recent_preserved_iaaft(
     weights,
     time,

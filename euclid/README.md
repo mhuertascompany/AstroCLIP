@@ -826,6 +826,29 @@ The outputs are `sfh_iaaft_past90_150k.h5`,
 image stamps, split, ZooBot encoder, adapters, edge-on exclusion, and
 AE-adjacency settings as the recent-preserved run.
 
+#### Sliding-window IAAFT ablations
+
+To localize which SFH epoch carries morphology information, a window run
+copies one 0.1-wide fractional-time interval exactly and randomizes everything
+outside it. The recent and old outside segments receive independent IAAFT
+surrogates, five-bin crossfades are confined to the randomized sides, and each
+outside segment retains its own integral. Consequently no formed mass moves
+across the preserved window and the complete SFH remains normalized to one.
+
+One job builds the surrogate dataset, trains its matched SFH autoencoder, and
+then trains the same edge-on-filtered ZooBot plus AE-adjacency alignment. Pass
+the start of the preserved window in the range 0.1 through 0.9:
+
+```bash
+sbatch euclid/slurm_train_iaaft_window_ablation.sh 0.1  # preserve [0.1, 0.2)
+sbatch euclid/slurm_train_iaaft_window_ablation.sh 0.5  # preserve [0.5, 0.6)
+```
+
+For a start value of `0.1`, the three outputs are named
+`sfh_iaaft_window_10_20_150k.h5`,
+`sfh_autoencoder_iaaft_window_10_20_150k`, and
+`training_bright_ae_iaaft_window_10_20`.
+
 #### Frozen SFH autoencoder with a linear CLIP projection
 
 Full fine-tuning can return the pretrained SFH transformer to the same optimum

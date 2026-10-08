@@ -6,6 +6,7 @@ from euclid.sfh_surrogates import (
     iaaft_surrogate,
     past_preserved_iaaft,
     recent_preserved_iaaft,
+    window_preserved_iaaft,
 )
 
 
@@ -76,6 +77,24 @@ class IAAFTSurrogateTests(unittest.TestCase):
         self.assertAlmostEqual(
             float(surrogate[split - 1]), float(values[split - 1]), places=14,
         )
+
+    def test_middle_window_and_both_outside_integrals_are_preserved(self):
+        rng = np.random.default_rng(29)
+        time = np.linspace(0, 1, 250)
+        values = rng.lognormal(mean=-2.0, sigma=0.9, size=len(time))
+        values /= values.sum()
+        surrogate, diagnostic = window_preserved_iaaft(
+            values, time, rng, window_start=0.3, window_end=0.4,
+        )
+        first = diagnostic["window_start_index"]
+        last = diagnostic["window_end_index"]
+        np.testing.assert_array_equal(surrogate[first:last], values[first:last])
+        self.assertAlmostEqual(surrogate[:first].sum(), values[:first].sum(), places=14)
+        self.assertAlmostEqual(surrogate[last:].sum(), values[last:].sum(), places=14)
+        self.assertAlmostEqual(surrogate.sum(), 1.0, places=14)
+        self.assertGreaterEqual(surrogate.min(), 0.0)
+        self.assertFalse(np.allclose(surrogate[:first], values[:first]))
+        self.assertFalse(np.allclose(surrogate[last:], values[last:]))
 
 
 if __name__ == "__main__":

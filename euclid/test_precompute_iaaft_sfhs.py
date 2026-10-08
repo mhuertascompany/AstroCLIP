@@ -90,6 +90,45 @@ class PrecomputeIAAFTTests(unittest.TestCase):
             self.assertEqual(report["preserved_segment"], "old")
             self.assertLessEqual(report["maximum_old_segment_error"], 2e-6)
 
+    def test_window_preserved_dataset_keeps_requested_bins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source_path = directory / "source.h5"
+            output_path = directory / "window.h5"
+            rng = np.random.default_rng(25)
+            weights = rng.lognormal(-2.0, 0.8, size=(8, 250))
+            weights /= weights.sum(axis=1, keepdims=True)
+            epsilon = 1e-10
+            time = np.linspace(0, 1, 250)
+            with h5py.File(source_path, "w") as source:
+                source.create_dataset("galaxy_id", data=np.arange(8))
+                source.create_dataset("sfh", data=np.log10(weights + epsilon))
+                source.create_dataset("sfh_time_grid", data=time)
+                source.attrs["sfh_log_epsilon"] = epsilon
+
+            report = build_dataset(
+                source_path, output_path, workers=1, chunk_size=4,
+                candidates=2, max_iterations=100, preserve="window",
+                window_start=0.3, window_end=0.4,
+            )
+            first = int(np.searchsorted(time, 0.3, side="left"))
+            last = int(np.searchsorted(time, 0.4, side="left"))
+            with h5py.File(output_path, "r") as result:
+                recovered = np.maximum(
+                    10.0 ** np.asarray(result["sfh"], dtype=np.float64) - epsilon,
+                    0.0,
+                )
+                np.testing.assert_allclose(recovered.sum(axis=1), 1.0, atol=2e-6)
+                np.testing.assert_allclose(
+                    recovered[:, first:last], weights[:, first:last],
+                    atol=2e-7, rtol=2e-6,
+                )
+                self.assertEqual(result.attrs["preserved_segment"], "window")
+                self.assertEqual(result.attrs["window_start"], 0.3)
+                self.assertEqual(result.attrs["window_end"], 0.4)
+            self.assertEqual(report["preserved_segment"], "window")
+            self.assertLessEqual(report["maximum_window_segment_error"], 2e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

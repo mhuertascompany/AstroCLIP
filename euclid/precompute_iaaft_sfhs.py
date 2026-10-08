@@ -10,13 +10,16 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .sfh_surrogates import past_preserved_iaaft, recent_preserved_iaaft
+from .sfh_surrogates import (
+    past_preserved_iaaft, recent_preserved_iaaft, window_preserved_iaaft,
+)
 
 
 def _process_chunk(payload):
     (
         first_row, log_sfh, time, epsilon, seed, recent_fraction,
         transition_bins, candidates, max_iterations, integral_tolerance, preserve,
+        window_start, window_end,
     ) = payload
     output = np.empty_like(log_sfh, dtype=np.float32)
     diagnostics = []
@@ -32,29 +35,47 @@ def _process_chunk(payload):
         for candidate in range(candidates):
             candidate_seed = np.random.SeedSequence([seed, source_row, candidate])
             rng = np.random.default_rng(candidate_seed)
-            transform = (
-                recent_preserved_iaaft if preserve == "recent" else past_preserved_iaaft
-            )
-            surrogate, info = transform(
-                weights, time, rng,
-                recent_fraction=recent_fraction,
-                transition_bins=transition_bins,
-                max_iterations=max_iterations,
-            )
-            randomized_key = "old_correlation" if preserve == "recent" else "recent_correlation"
+            if preserve == "window":
+                surrogate, info = window_preserved_iaaft(
+                    weights, time, rng, window_start=window_start,
+                    window_end=window_end, transition_bins=transition_bins,
+                    max_iterations=max_iterations,
+                )
+                randomized_key = "outside_correlation"
+            else:
+                transform = (
+                    recent_preserved_iaaft
+                    if preserve == "recent" else past_preserved_iaaft
+                )
+                surrogate, info = transform(
+                    weights, time, rng,
+                    recent_fraction=recent_fraction,
+                    transition_bins=transition_bins,
+                    max_iterations=max_iterations,
+                )
+                randomized_key = (
+                    "old_correlation" if preserve == "recent" else "recent_correlation"
+                )
             score = abs(info[randomized_key])
             if best is None or score < best[0]:
                 best = (score, surrogate, info, candidate)
         _, surrogate, info, candidate = best
 
         integral = float(surrogate.sum())
-        recent_bins = int(info["n_recent_bins"])
-        if preserve == "recent":
+        if preserve == "window":
+            first, last = info["window_start_index"], info["window_end_index"]
+            preserved_error = float(
+                np.max(np.abs(surrogate[first:last] - weights[first:last]))
+            )
+            randomized_correlation = float(info["outside_correlation"])
+        elif preserve == "recent":
+            recent_bins = int(info["n_recent_bins"])
             preserved_error = float(
                 np.max(np.abs(surrogate[:recent_bins] - weights[:recent_bins]))
             )
             randomized_correlation = float(info["old_correlation"])
         else:
+            recent_bins = int(info["n_recent_bins"])
             preserved_error = float(
                 np.max(np.abs(surrogate[recent_bins:] - weights[recent_bins:]))
             )
@@ -101,6 +122,8 @@ def build_dataset(
     chunk_size=256,
     max_rows=None,
     preserve="recent",
+    window_start=0.1,
+    window_end=0.2,
 ):
     source_path = Path(source_path)
     output_path = Path(output_path)
@@ -110,8 +133,10 @@ def build_dataset(
         raise ValueError("workers, chunk_size, and candidates must be positive")
     if not 0 < integral_tolerance < 1e-3:
         raise ValueError("integral_tolerance must lie in (0, 1e-3)")
-    if preserve not in {"recent", "past"}:
-        raise ValueError("preserve must be 'recent' or 'past'")
+    if preserve not in {"recent", "past", "window"}:
+        raise ValueError("preserve must be 'recent', 'past', or 'window'")
+    if preserve == "window" and not 0 <= window_start < window_end <= 1:
+        raise ValueError("window_start and window_end must define a window within [0, 1]")
 
     with h5py.File(source_path, "r") as source:
         required = ("galaxy_id", "sfh", "sfh_time_grid")
@@ -136,6 +161,8 @@ def build_dataset(
                 int(max_iterations),
                 float(integral_tolerance),
                 preserve,
+                float(window_start),
+                float(window_end),
             )
             for start in range(0, n_rows, chunk_size)
         ]
@@ -171,8 +198,14 @@ def build_dataset(
                 executor.shutdown()
 
         diagnostics = np.concatenate(all_diagnostics)
-        preserved_name = "recent" if preserve == "recent" else "old"
-        randomized_name = "old" if preserve == "recent" else "recent"
+        preserved_name = (
+            "window" if preserve == "window" else
+            ("recent" if preserve == "recent" else "old")
+        )
+        randomized_name = (
+            "outside" if preserve == "window" else
+            ("old" if preserve == "recent" else "recent")
+        )
         attributes = {
             "n_galaxies": n_rows,
             "n_bins": n_bins,
@@ -181,6 +214,8 @@ def build_dataset(
             "transformation": f"{preserved_name}-preserved IAAFT",
             "preserved_segment": preserved_name,
             "recent_fraction": recent_fraction,
+            "window_start": window_start if preserve == "window" else np.nan,
+            "window_end": window_end if preserve == "window" else np.nan,
             "transition_bins": transition_bins,
             "candidates_per_galaxy": candidates,
             "random_seed": seed,
@@ -207,6 +242,8 @@ def build_dataset(
         "n_galaxies": n_rows,
         "n_bins": n_bins,
         "recent_fraction": recent_fraction,
+        "window_start": window_start if preserve == "window" else None,
+        "window_end": window_end if preserve == "window" else None,
         "preserved_segment": preserved_name,
         "transition_bins": transition_bins,
         "candidates_per_galaxy": candidates,
@@ -239,10 +276,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--recent-fraction", type=float, default=0.1)
     parser.add_argument(
-        "--preserve", choices=("recent", "past"), default="recent",
+        "--preserve", choices=("recent", "past", "window"), default="recent",
         help="SFH segment copied exactly; IAAFT is applied to the other segment.",
     )
     parser.add_argument("--transition-bins", type=int, default=10)
+    parser.add_argument("--window-start", type=float, default=0.1)
+    parser.add_argument("--window-end", type=float, default=0.2)
     parser.add_argument("--candidates", type=int, default=4)
     parser.add_argument("--max-iterations", type=int, default=1000)
     parser.add_argument("--integral-tolerance", type=float, default=2e-6)
@@ -268,6 +307,8 @@ def main():
         chunk_size=args.chunk_size,
         max_rows=args.max_rows,
         preserve=args.preserve,
+        window_start=args.window_start,
+        window_end=args.window_end,
     )
 
 
