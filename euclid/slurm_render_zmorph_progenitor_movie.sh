@@ -22,6 +22,9 @@ set -euo pipefail
 #   2 output directory
 #   3 number of dense movie frames
 #   4 base noise seed (frame i uses base+i)
+#   5 morphology retrieval: nearest, sample, or interpolate
+#   6 number of morphology neighbours
+#   7 softmax temperature for sampling/interpolation
 
 source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual/
@@ -42,6 +45,9 @@ DESCENDANT_ID=${1:-2701130960681498535}
 OUTPUT=${2:-${BASE}/progenitor_zmorph_full_${DESCENDANT_ID}_${SLURM_JOB_ID}}
 FRAMES=${3:-120}
 NOISE_SEED=${4:-42000}
+MORPH_RETRIEVAL=${5:-nearest}
+MORPH_NEIGHBORS=${6:-16}
+MORPH_TEMPERATURE=${7:-0.03}
 TRACK=${OUTPUT}/full_sample_track
 
 for path in \
@@ -96,6 +102,10 @@ python -u -m euclid.render_progenitor_morphology_movie \
     --descendant-id "${DESCENDANT_ID}" \
     --condition-cache "${SFH_CACHE}" \
     --generation-condition-cache "${MORPH_CACHE}" \
+    --morphology-retrieval "${MORPH_RETRIEVAL}" \
+    --morphology-neighbors "${MORPH_NEIGHBORS}" \
+    --morphology-temperature "${MORPH_TEMPERATURE}" \
+    --morphology-seed 31415 \
     --pixel-checkpoint "${PIXEL_CHECKPOINT}" \
     --sfh-dataset "${DATASET}" \
     --condition-umap "${SFH_UMAP}" \

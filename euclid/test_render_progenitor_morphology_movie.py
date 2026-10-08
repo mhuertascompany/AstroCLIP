@@ -14,7 +14,9 @@ from euclid.render_progenitor_morphology_movie import (
     load_condition_umap,
     load_descendant_sfh,
     nearest_reference,
+    morphology_conditions,
     slerp,
+    topk_reference,
     umap_density,
 )
 
@@ -62,6 +64,43 @@ class ProgenitorMorphologyMovieTests(unittest.TestCase):
         np.testing.assert_allclose(
             similarity, [query[0] @ reference[0], query[1] @ reference[3]],
         )
+
+    def test_topk_reference_is_sorted(self):
+        reference = np.asarray([
+            [1.0, 0.0], [0.8, 0.6], [0.0, 1.0], [-1.0, 0.0],
+        ], dtype=np.float32)
+        similarity, index = topk_reference([[1.0, 0.0]], reference, 3, chunk=2)
+        np.testing.assert_array_equal(index, [[0, 1, 2]])
+        np.testing.assert_allclose(similarity, [[1.0, 0.8, 0.0]])
+
+    def test_morphology_sampling_is_reproducible(self):
+        reference = np.asarray([
+            [1.0, 0.0], [0.8, 0.6], [0.6, 0.8], [0.0, 1.0],
+        ], dtype=np.float32)
+        query = np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        first = morphology_conditions(
+            query, reference, mode="sample", k=3, temperature=0.5, seed=7,
+        )
+        second = morphology_conditions(
+            query, reference, mode="sample", k=3, temperature=0.5, seed=7,
+        )
+        np.testing.assert_array_equal(
+            first["representative_index"], second["representative_index"],
+        )
+        np.testing.assert_allclose(np.linalg.norm(first["condition"], axis=1), 1)
+
+    def test_morphology_interpolation_is_normalized_and_not_a_donor(self):
+        reference = np.asarray([
+            [1.0, 0.0], [0.8, 0.6], [0.6, 0.8], [0.0, 1.0],
+        ], dtype=np.float32)
+        result = morphology_conditions(
+            [[1.0, 0.0]], reference, mode="interpolate", k=3,
+            temperature=0.5,
+        )
+        np.testing.assert_allclose(np.linalg.norm(result["condition"], axis=1), 1)
+        self.assertFalse(any(
+            np.allclose(result["condition"][0], donor) for donor in reference
+        ))
 
     def test_track_uses_best_candidate_present_in_cache(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -147,6 +147,75 @@ def nearest_reference(frame_embeddings, reference, chunk=32768):
     return best, best_index
 
 
+def topk_reference(frame_embeddings, reference, k, chunk=32768):
+    """Return the highest-cosine reference entries for every query."""
+    query = np.asarray(frame_embeddings, dtype=np.float32)
+    k = min(int(k), len(reference))
+    if k < 1:
+        raise ValueError("The morphology-neighbour count must be positive.")
+    best = np.full((len(query), k), -np.inf, dtype=np.float32)
+    best_index = np.full((len(query), k), -1, dtype=np.int64)
+    for start in range(0, len(reference), chunk):
+        similarity = query @ reference[start:start + chunk].T
+        local_k = min(k, similarity.shape[1])
+        local = np.argpartition(similarity, -local_k, axis=1)[:, -local_k:]
+        local_similarity = np.take_along_axis(similarity, local, axis=1)
+        combined = np.concatenate((best, local_similarity), axis=1)
+        combined_index = np.concatenate((best_index, start + local), axis=1)
+        keep = np.argpartition(combined, -k, axis=1)[:, -k:]
+        best = np.take_along_axis(combined, keep, axis=1)
+        best_index = np.take_along_axis(combined_index, keep, axis=1)
+    order = np.argsort(best, axis=1)[:, ::-1]
+    return (
+        np.take_along_axis(best, order, axis=1),
+        np.take_along_axis(best_index, order, axis=1),
+    )
+
+
+def morphology_conditions(
+    frame_embeddings, reference, mode="nearest", k=16, temperature=0.03, seed=42,
+):
+    """Map SFH states to nearest, sampled, or locally interpolated morphology codes."""
+    if mode not in {"nearest", "sample", "interpolate"}:
+        raise ValueError(f"Unknown morphology retrieval mode: {mode}")
+    if temperature <= 0:
+        raise ValueError("Morphology-neighbour temperature must be positive.")
+    similarities, indices = topk_reference(
+        frame_embeddings, reference, 1 if mode == "nearest" else k,
+    )
+    shifted = (similarities - similarities[:, :1]) / float(temperature)
+    weights = np.exp(shifted)
+    weights /= weights.sum(axis=1, keepdims=True)
+    if mode == "nearest":
+        selected_column = np.zeros(len(similarities), dtype=np.int64)
+        conditions = reference[indices[:, 0]].copy()
+    elif mode == "sample":
+        rng = np.random.default_rng(seed)
+        selected_column = np.asarray([
+            rng.choice(similarities.shape[1], p=row) for row in weights
+        ], dtype=np.int64)
+        conditions = reference[indices[np.arange(len(indices)), selected_column]].copy()
+    else:
+        selected_column = np.zeros(len(similarities), dtype=np.int64)
+        conditions = np.einsum("nk,nkd->nd", weights, reference[indices])
+        norm = np.linalg.norm(conditions, axis=1, keepdims=True)
+        if np.any(~np.isfinite(norm)) or np.any(norm < 1e-6):
+            raise ValueError("Degenerate interpolated morphology condition.")
+        conditions /= norm
+    selected_index = indices[np.arange(len(indices)), selected_column]
+    selected_similarity = np.sum(
+        np.asarray(frame_embeddings, dtype=np.float32) * conditions, axis=1,
+    )
+    return {
+        "condition": conditions.astype(np.float32),
+        "similarity": selected_similarity.astype(np.float32),
+        "representative_index": selected_index,
+        "neighbor_index": indices,
+        "neighbor_similarity": similarities,
+        "neighbor_weight": weights.astype(np.float32),
+    }
+
+
 def nearest_similarity(frame_embeddings, reference, chunk=32768):
     """Return only the cosine value for backward compatibility."""
     return nearest_reference(frame_embeddings, reference, chunk=chunk)[0]
@@ -329,6 +398,18 @@ def parse_args():
               "states remain defined in the SFH cache and retrieve their "
               "nearest aligned condition from this cache."),
     )
+    parser.add_argument(
+        "--morphology-retrieval", choices=("nearest", "sample", "interpolate"),
+        default="nearest",
+        help=("How an aligned SFH state is converted to an aligned morphology "
+              "condition. Sampling and interpolation operate on the top-k neighbours."),
+    )
+    parser.add_argument("--morphology-neighbors", type=int, default=16)
+    parser.add_argument("--morphology-temperature", type=float, default=0.03)
+    parser.add_argument(
+        "--morphology-seed", type=int, default=31415,
+        help="Random seed used only for top-k morphology-neighbour sampling.",
+    )
     parser.add_argument("--pixel-checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--n-analogues", type=int, default=5)
@@ -377,8 +458,17 @@ def run(args):
             raise FileNotFoundError(path)
     if args.output.exists():
         raise FileExistsError(args.output)
-    if min(args.n_analogues, args.frames, args.batch_size, args.steps, args.fps) < 1:
+    if min(
+        args.n_analogues, args.frames, args.batch_size, args.steps, args.fps,
+        args.morphology_neighbors,
+    ) < 1:
         raise ValueError("Counts, steps, and fps must be positive.")
+    if args.morphology_temperature <= 0:
+        raise ValueError("Morphology-neighbour temperature must be positive.")
+    if args.generation_condition_cache is None and args.morphology_retrieval != "nearest":
+        raise ValueError(
+            "Morphology sampling/interpolation requires --generation-condition-cache."
+        )
     device = torch.device(args.device)
     ids, reference, metadata = load_condition_cache(args.condition_cache)
     if metadata.get("modality") not in {None, "sfh"}:
@@ -433,14 +523,22 @@ def run(args):
         morphology_similarity = nearest.copy()
         morphology_ids = analogue_ids.copy()
         generation_embedding = track_embedding
+        morphology_neighbors = nearest_index[:, None]
+        morphology_neighbor_similarity = nearest[:, None]
+        morphology_neighbor_weight = np.ones((len(nearest), 1), dtype=np.float32)
     else:
-        morphology_similarity, morphology_index = nearest_reference(
+        retrieval = morphology_conditions(
             track_embedding.float().cpu().numpy(), generation_reference,
+            mode=args.morphology_retrieval, k=args.morphology_neighbors,
+            temperature=args.morphology_temperature, seed=args.morphology_seed,
         )
+        morphology_similarity = retrieval["similarity"]
+        morphology_index = retrieval["representative_index"]
         morphology_ids = generation_ids[morphology_index]
-        generation_embedding = torch.as_tensor(
-            generation_reference[morphology_index], device=device,
-        )
+        generation_embedding = torch.as_tensor(retrieval["condition"], device=device)
+        morphology_neighbors = retrieval["neighbor_index"]
+        morphology_neighbor_similarity = retrieval["neighbor_similarity"]
+        morphology_neighbor_weight = retrieval["neighbor_weight"]
     if args.sfh_dataset is not None:
         sfh_time, sfh_rate, sfh_time_norm = load_descendant_sfh(
             args.sfh_dataset, descendant_id,
@@ -543,7 +641,7 @@ def run(args):
                 int(analogue_ids[index]), None, sfh_time, sfh_rate,
                 sfh_time_norm, track_xy=track_xy, density=density, extent=extent,
                 image_label=(
-                    "Real retrieved morphology donor"
+                    "Real representative morphology neighbour"
                     if args.generation_condition_cache is not None
                     else "Real nearest analogue"
                 ),
@@ -616,7 +714,7 @@ def run(args):
         ax.axis("off")
     figure.suptitle(
         f"{'Nearest-real' if args.snap_to_reference else 'Interpolated'} SFH track → "
-        f"{'nearest aligned morphology' if args.generation_condition_cache else 'SFH condition'} "
+        f"{args.morphology_retrieval + ' aligned morphology' if args.generation_condition_cache else 'SFH condition'} "
         f"for descendant {descendant_id}"
     )
     figure.tight_layout()
@@ -666,6 +764,9 @@ def run(args):
         nearest_real_id=analogue_ids,
         nearest_morphology_cosine=morphology_similarity,
         nearest_morphology_id=morphology_ids,
+        morphology_neighbor_id=generation_ids[morphology_neighbors],
+        morphology_neighbor_cosine=morphology_neighbor_similarity,
+        morphology_neighbor_weight=morphology_neighbor_weight,
         frame_noise_seed=frame_seeds,
         condition_umap_xy=(track_xy if track_xy is not None else np.empty((0, 2))),
         anchor_lookback_gyr=anchor_time,
@@ -695,6 +796,10 @@ def run(args):
         ),
         "generation_condition_cache_sha256": generation_cache_digest,
         "generation_condition_cache_metadata": generation_metadata,
+        "morphology_retrieval": args.morphology_retrieval,
+        "morphology_neighbors": args.morphology_neighbors,
+        "morphology_temperature": args.morphology_temperature,
+        "morphology_seed": args.morphology_seed,
         "minimum_nearest_real_cosine": float(nearest.min()),
         "median_nearest_real_cosine": float(np.median(nearest)),
         "unique_nearest_real_objects": int(len(np.unique(analogue_ids))),
@@ -713,7 +818,8 @@ def run(args):
             "analogue track; with snap_to_reference they are rendered through the nearest "
             "real full-cache SFH condition rather than an interpolated condition. When a "
             "generation cache is supplied, each SFH state retrieves its nearest aligned "
-            "image embedding, which conditions the pixel generator. It is not an observed "
+            f"image embedding using {args.morphology_retrieval} retrieval, which conditions "
+            "the pixel generator. It is not an observed "
             "evolutionary movie."
         ),
     }
