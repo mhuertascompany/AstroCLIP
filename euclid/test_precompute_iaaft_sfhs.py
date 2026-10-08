@@ -129,6 +129,42 @@ class PrecomputeIAAFTTests(unittest.TestCase):
             self.assertEqual(report["preserved_segment"], "window")
             self.assertLessEqual(report["maximum_window_segment_error"], 2e-6)
 
+    def test_random_windows_never_preserve_recent_tenth_and_are_reproducible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source_path = directory / "source.h5"
+            first_path = directory / "random_a.h5"
+            second_path = directory / "random_b.h5"
+            rng = np.random.default_rng(125)
+            weights = rng.lognormal(-2.0, 0.8, size=(10, 250))
+            weights /= weights.sum(axis=1, keepdims=True)
+            epsilon = 1e-10
+            time = np.linspace(0, 1, 250)
+            with h5py.File(source_path, "w") as source:
+                source.create_dataset("galaxy_id", data=np.arange(10))
+                source.create_dataset("sfh", data=np.log10(weights + epsilon))
+                source.create_dataset("sfh_time_grid", data=time)
+                source.attrs["sfh_log_epsilon"] = epsilon
+            kwargs = dict(
+                workers=1, chunk_size=4, candidates=2, max_iterations=100,
+                preserve="random-window", seed=77,
+            )
+            report = build_dataset(source_path, first_path, **kwargs)
+            build_dataset(source_path, second_path, **kwargs)
+            with h5py.File(first_path, "r") as first, h5py.File(second_path, "r") as second:
+                starts = np.asarray(first["preserved_window_start"])
+                ends = np.asarray(first["preserved_window_end"])
+                self.assertTrue(np.all(starts >= 0.1))
+                self.assertTrue(np.all(ends <= 1.0))
+                np.testing.assert_allclose(ends - starts, 0.1, atol=1e-6)
+                np.testing.assert_array_equal(
+                    starts, np.asarray(second["preserved_window_start"]),
+                )
+                np.testing.assert_array_equal(first["sfh"], second["sfh"])
+                self.assertEqual(first.attrs["preserved_segment"], "random_window")
+            self.assertGreaterEqual(report["minimum_window_start"], 0.1)
+            self.assertLessEqual(report["maximum_window_end"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

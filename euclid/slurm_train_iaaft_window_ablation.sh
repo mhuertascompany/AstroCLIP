@@ -20,11 +20,12 @@ set -euo pipefail
 #   3. train a matched SFH autoencoder;
 #   4. train the edge-on-ablated ZooBot/AE-adjacency alignment.
 #
-# Usage: sbatch $0 WINDOW_START
+# Usage: sbatch $0 random|WINDOW_START
+# Recommended random control: sbatch $0 random
 # Example: sbatch $0 0.1   # preserves [0.1, 0.2)
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: sbatch $0 WINDOW_START" >&2
+    echo "Usage: sbatch $0 random|WINDOW_START" >&2
     exit 2
 fi
 
@@ -37,8 +38,12 @@ SOURCE=${BASE}/sfh_clip_150k.h5
 STAMP_ROOT=${BASE}/zoobot_stamps_rmax
 PAIR_SPLIT=${BASE}/training_bright_frozen_unrestricted_ae_no_edgeon/pair_split.npz
 WINDOW_START=$1
-
-read -r WINDOW_END LABEL <<EOF
+if [[ "${WINDOW_START}" == "random" ]]; then
+    WINDOW_END=
+    LABEL=random_window_past90
+    PRESERVE_ARGS=(--preserve random-window)
+else
+    read -r WINDOW_END LABEL <<EOF
 $(python - "${WINDOW_START}" <<'PY'
 import sys
 start = float(sys.argv[1])
@@ -49,6 +54,10 @@ print(f"{end:.10g} {round(start * 100):02d}_{round(end * 100):02d}")
 PY
 )
 EOF
+    PRESERVE_ARGS=(
+        --preserve window --window-start "${WINDOW_START}" --window-end "${WINDOW_END}"
+    )
+fi
 
 IAAFT=${BASE}/sfh_iaaft_window_${LABEL}_150k.h5
 AE_OUTPUT=${BASE}/sfh_autoencoder_iaaft_window_${LABEL}_150k
@@ -67,9 +76,7 @@ done
 python -u -m euclid.precompute_iaaft_sfhs \
     --source "${SOURCE}" \
     --output "${IAAFT}" \
-    --preserve window \
-    --window-start "${WINDOW_START}" \
-    --window-end "${WINDOW_END}" \
+    "${PRESERVE_ARGS[@]}" \
     --transition-bins 10 \
     --candidates 4 \
     --max-iterations 1000 \
@@ -136,7 +143,11 @@ python -u -m euclid.train_zoobot_clip \
     --lr 1e-4 --weight-decay 0.01 --unfreeze-blocks 0 \
     --accelerator gpu --devices 1 --precision 16-mixed
 
-echo "Preserved fractional-time window: [${WINDOW_START}, ${WINDOW_END})"
+if [[ "${WINDOW_START}" == "random" ]]; then
+    echo "Preserved window: deterministic random 0.1 interval in [0.1, 1] per galaxy"
+else
+    echo "Preserved fractional-time window: [${WINDOW_START}, ${WINDOW_END})"
+fi
 echo "IAAFT dataset: ${IAAFT}"
 echo "SFH autoencoder: ${AE_OUTPUT}"
 echo "CLIP alignment: ${CLIP_OUTPUT}"

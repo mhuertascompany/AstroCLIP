@@ -31,14 +31,23 @@ def _process_chunk(payload):
             raise ValueError(f"Invalid SFH integral at source row {source_row}: {total}")
         weights /= total
 
+        current_window_start = window_start
+        current_window_end = window_end
+        if preserve == "random-window":
+            window_rng = np.random.default_rng(
+                np.random.SeedSequence([seed, source_row, 104729])
+            )
+            current_window_start = float(window_rng.uniform(0.1, 0.9))
+            current_window_end = current_window_start + 0.1
+
         best = None
         for candidate in range(candidates):
             candidate_seed = np.random.SeedSequence([seed, source_row, candidate])
             rng = np.random.default_rng(candidate_seed)
-            if preserve == "window":
+            if preserve in {"window", "random-window"}:
                 surrogate, info = window_preserved_iaaft(
-                    weights, time, rng, window_start=window_start,
-                    window_end=window_end, transition_bins=transition_bins,
+                    weights, time, rng, window_start=current_window_start,
+                    window_end=current_window_end, transition_bins=transition_bins,
                     max_iterations=max_iterations,
                 )
                 randomized_key = "outside_correlation"
@@ -62,7 +71,7 @@ def _process_chunk(payload):
         _, surrogate, info, candidate = best
 
         integral = float(surrogate.sum())
-        if preserve == "window":
+        if preserve in {"window", "random-window"}:
             first, last = info["window_start_index"], info["window_end_index"]
             preserved_error = float(
                 np.max(np.abs(surrogate[first:last] - weights[first:last]))
@@ -104,6 +113,8 @@ def _process_chunk(payload):
             integral, stored_integral, preserved_error,
             randomized_correlation, float(info["spectral_error"]),
             int(info["iterations"]), int(candidate),
+            float(info.get("window_start", np.nan)),
+            float(info.get("window_end", np.nan)),
         ))
     return first_row, output, np.asarray(diagnostics, dtype=np.float64)
 
@@ -133,8 +144,10 @@ def build_dataset(
         raise ValueError("workers, chunk_size, and candidates must be positive")
     if not 0 < integral_tolerance < 1e-3:
         raise ValueError("integral_tolerance must lie in (0, 1e-3)")
-    if preserve not in {"recent", "past", "window"}:
-        raise ValueError("preserve must be 'recent', 'past', or 'window'")
+    if preserve not in {"recent", "past", "window", "random-window"}:
+        raise ValueError(
+            "preserve must be 'recent', 'past', 'window', or 'random-window'"
+        )
     if preserve == "window" and not 0 <= window_start < window_end <= 1:
         raise ValueError("window_start and window_end must define a window within [0, 1]")
 
@@ -198,12 +211,20 @@ def build_dataset(
                 executor.shutdown()
 
         diagnostics = np.concatenate(all_diagnostics)
+        if preserve in {"window", "random-window"}:
+            target.create_dataset(
+                "preserved_window_start", data=diagnostics[:, 7].astype(np.float32),
+            )
+            target.create_dataset(
+                "preserved_window_end", data=diagnostics[:, 8].astype(np.float32),
+            )
         preserved_name = (
-            "window" if preserve == "window" else
+            ("random_window" if preserve == "random-window" else "window")
+            if preserve in {"window", "random-window"} else
             ("recent" if preserve == "recent" else "old")
         )
         randomized_name = (
-            "outside" if preserve == "window" else
+            "outside" if preserve in {"window", "random-window"} else
             ("old" if preserve == "recent" else "recent")
         )
         attributes = {
@@ -216,6 +237,17 @@ def build_dataset(
             "recent_fraction": recent_fraction,
             "window_start": window_start if preserve == "window" else np.nan,
             "window_end": window_end if preserve == "window" else np.nan,
+            "window_width": 0.1 if preserve == "random-window" else (
+                window_end - window_start if preserve == "window" else np.nan
+            ),
+            "minimum_window_start": (
+                float(np.min(diagnostics[:, 7]))
+                if preserve in {"window", "random-window"} else np.nan
+            ),
+            "maximum_window_end": (
+                float(np.max(diagnostics[:, 8]))
+                if preserve in {"window", "random-window"} else np.nan
+            ),
             "transition_bins": transition_bins,
             "candidates_per_galaxy": candidates,
             "random_seed": seed,
@@ -244,6 +276,17 @@ def build_dataset(
         "recent_fraction": recent_fraction,
         "window_start": window_start if preserve == "window" else None,
         "window_end": window_end if preserve == "window" else None,
+        "window_width": 0.1 if preserve == "random-window" else (
+            window_end - window_start if preserve == "window" else None
+        ),
+        "minimum_window_start": (
+            float(np.min(diagnostics[:, 7]))
+            if preserve in {"window", "random-window"} else None
+        ),
+        "maximum_window_end": (
+            float(np.max(diagnostics[:, 8]))
+            if preserve in {"window", "random-window"} else None
+        ),
         "preserved_segment": preserved_name,
         "transition_bins": transition_bins,
         "candidates_per_galaxy": candidates,
@@ -276,7 +319,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--recent-fraction", type=float, default=0.1)
     parser.add_argument(
-        "--preserve", choices=("recent", "past", "window"), default="recent",
+        "--preserve", choices=("recent", "past", "window", "random-window"),
+        default="recent",
         help="SFH segment copied exactly; IAAFT is applied to the other segment.",
     )
     parser.add_argument("--transition-bins", type=int, default=10)

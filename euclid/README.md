@@ -836,8 +836,18 @@ outside segment retains its own integral. Consequently no formed mass moves
 across the preserved window and the complete SFH remains normalized to one.
 
 One job builds the surrogate dataset, trains its matched SFH autoencoder, and
-then trains the same edge-on-filtered ZooBot plus AE-adjacency alignment. Pass
-the start of the preserved window in the range 0.1 through 0.9:
+then trains the same edge-on-filtered ZooBot plus AE-adjacency alignment. The
+recommended control draws a deterministic random window independently for
+every galaxy. Its start is uniform between 0.1 and 0.9, so the recent 0--0.1
+interval is always randomized. The chosen start and end are stored as HDF5
+datasets for every object:
+
+```bash
+sbatch euclid/slurm_train_iaaft_window_ablation.sh random
+```
+
+Fixed windows remain available by passing a start in the range 0.1 through
+0.9:
 
 ```bash
 sbatch euclid/slurm_train_iaaft_window_ablation.sh 0.1  # preserve [0.1, 0.2)
