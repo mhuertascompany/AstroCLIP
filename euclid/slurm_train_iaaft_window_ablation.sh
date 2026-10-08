@@ -70,7 +70,7 @@ python -u -m euclid.precompute_iaaft_sfhs \
     --preserve window \
     --window-start "${WINDOW_START}" \
     --window-end "${WINDOW_END}" \
-    --transition-bins 5 \
+    --transition-bins 10 \
     --candidates 4 \
     --max-iterations 1000 \
     --integral-tolerance 2e-6 \

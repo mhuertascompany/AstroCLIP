@@ -831,7 +831,7 @@ AE-adjacency settings as the recent-preserved run.
 To localize which SFH epoch carries morphology information, a window run
 copies one 0.1-wide fractional-time interval exactly and randomizes everything
 outside it. The recent and old outside segments receive independent IAAFT
-surrogates, five-bin crossfades are confined to the randomized sides, and each
+surrogates, ten-bin crossfades are confined to the randomized sides, and each
 outside segment retains its own integral. Consequently no formed mass moves
 across the preserved window and the complete SFH remains normalized to one.
 
