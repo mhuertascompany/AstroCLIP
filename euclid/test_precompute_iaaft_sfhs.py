@@ -157,6 +157,8 @@ class PrecomputeIAAFTTests(unittest.TestCase):
                 self.assertTrue(np.all(starts >= 0.1))
                 self.assertTrue(np.all(ends <= 1.0))
                 np.testing.assert_allclose(ends - starts, 0.1, atol=1e-6)
+                old_starts = np.searchsorted(time, ends, side="left")
+                self.assertTrue(np.all(len(time) - old_starts >= 4))
                 np.testing.assert_array_equal(
                     starts, np.asarray(second["preserved_window_start"]),
                 )

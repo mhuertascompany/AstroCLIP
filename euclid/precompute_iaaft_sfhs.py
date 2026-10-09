@@ -23,6 +23,20 @@ def _process_chunk(payload):
     ) = payload
     output = np.empty_like(log_sfh, dtype=np.float32)
     diagnostics = []
+    random_window_width = 0.1
+    # IAAFT needs at least four samples.  Keep the preserved window away from
+    # the oldest boundary by exactly that minimum so a nonempty old segment is
+    # always long enough to randomize.  The recent boundary is already safe
+    # because random windows start at or after fractional time 0.1.
+    maximum_random_window_start = min(
+        1.0 - random_window_width,
+        float(time[-4]) - random_window_width,
+    )
+    if preserve == "random-window" and maximum_random_window_start < 0.1:
+        raise ValueError(
+            "The SFH time grid is too short for a 0.1 preserved window and "
+            "four-bin randomized segments."
+        )
     for offset, values in enumerate(log_sfh):
         source_row = first_row + offset
         weights = np.maximum(10.0 ** values.astype(np.float64) - epsilon, 0.0)
@@ -37,8 +51,10 @@ def _process_chunk(payload):
             window_rng = np.random.default_rng(
                 np.random.SeedSequence([seed, source_row, 104729])
             )
-            current_window_start = float(window_rng.uniform(0.1, 0.9))
-            current_window_end = current_window_start + 0.1
+            current_window_start = float(
+                window_rng.uniform(0.1, maximum_random_window_start)
+            )
+            current_window_end = current_window_start + random_window_width
 
         best = None
         for candidate in range(candidates):
