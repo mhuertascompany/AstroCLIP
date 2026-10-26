@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=clip_iaaft_full
-#SBATCH --partition=gpupreempt
-#SBATCH --qos=gpupreempt
+#SBATCH --partition=gpu
+#SBATCH --qos=gen
 #SBATCH --account=other
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
