@@ -707,7 +707,10 @@ def main():
              len(train_rows), len(val_rows))
 
     model = EuclidZooBotCLIP.load_from_checkpoint(
-        str(args.checkpoint), map_location='cpu',
+        # These are trusted Lightning checkpoints produced by this training
+        # pipeline.  PyTorch 2.6 defaults torch.load to weights_only=True,
+        # which rejects the NumPy metadata stored by Lightning.
+        str(args.checkpoint), map_location='cpu', weights_only=False,
     ).to(device)
     is_pcmepp = getattr(model.hparams, 'alignment_objective', 'clip') == 'pcmepp'
     loader = extraction_loader(
