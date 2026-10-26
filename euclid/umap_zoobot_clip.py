@@ -14,7 +14,6 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import patch
 
 import h5py
 import matplotlib
@@ -389,17 +388,24 @@ def property_specs(properties):
 
 
 def fit_umap(embedding, n_neighbors=15, min_dist=0.1, seed=42):
+    missing = object()
+    tensorflow = sys.modules.get('tensorflow', missing)
     try:
         # umap-learn imports its optional ParametricUMAP extension at package
         # import time.  Some cluster environments provide an incompatible
         # TensorFlow/protobuf stack even though ordinary UMAP does not use it.
         # Treat TensorFlow as unavailable while importing the standard UMAP.
-        with patch.dict(sys.modules, {'tensorflow': None}):
-            import umap
+        sys.modules['tensorflow'] = None
+        import umap
     except ImportError as error:
         raise ImportError(
             'umap-learn is required; use the same cosmos_visual environment as training.'
         ) from error
+    finally:
+        if tensorflow is missing:
+            sys.modules.pop('tensorflow', None)
+        else:
+            sys.modules['tensorflow'] = tensorflow
     reducer = umap.UMAP(
         n_components=2,
         n_neighbors=n_neighbors,
