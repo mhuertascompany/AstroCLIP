@@ -9,6 +9,7 @@
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:h100:1
+#SBATCH --requeue
 #SBATCH --output=/mnt/home/mhuertas/ceph/euclid/sfh_clip/logs/clip_iaaft_full_%j.out
 #SBATCH --error=/mnt/home/mhuertas/ceph/euclid/sfh_clip/logs/clip_iaaft_full_%j.err
 
@@ -52,12 +53,25 @@ done
 }
 
 RESUME_ARGS=()
-if [[ -n "${RESUME_FROM}" ]]; then
+if [[ -f "${OUTPUT}/COMPLETED" ]]; then
+    echo "Training is already marked complete: ${OUTPUT}" >&2
+    exit 2
+elif [[ -n "${RESUME_FROM}" ]]; then
     [[ -f "${RESUME_FROM}" ]] || { echo "Missing resume checkpoint: ${RESUME_FROM}" >&2; exit 2; }
     RESUME_ARGS=(--resume-from "${RESUME_FROM}")
+elif [[ -f "${OUTPUT}/checkpoints/last.ckpt" ]]; then
+    RESUME_FROM="${OUTPUT}/checkpoints/last.ckpt"
+    RESUME_ARGS=(--resume-from "${RESUME_FROM}")
+    echo "Automatically resuming from ${RESUME_FROM}"
 elif [[ -d "${OUTPUT}" ]] && [[ -n "$(find "${OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-    echo "Output is not empty. Pass last.ckpt to resume: ${OUTPUT}" >&2
-    exit 2
+    if [[ "${SLURM_RESTART_COUNT:-0}" -gt 0 ]]; then
+        INTERRUPTED="${OUTPUT}.interrupted_job${SLURM_JOB_ID}_restart${SLURM_RESTART_COUNT}_$(date +%Y%m%dT%H%M%S)"
+        echo "Requeued before the first checkpoint; preserving partial output as ${INTERRUPTED}"
+        mv "${OUTPUT}" "${INTERRUPTED}"
+    else
+        echo "Output is not empty and has no last.ckpt: ${OUTPUT}" >&2
+        exit 2
+    fi
 fi
 
 mkdir -p "${OUTPUT}" "${HF_HUB_CACHE}" "${TORCH_HOME}"
@@ -149,3 +163,5 @@ print("Best checkpoint:", checkpoint)
 print("Best validation loss:", score)
 print("Full random-window CLIP training: OK")
 PY
+
+touch "${OUTPUT}/COMPLETED"
