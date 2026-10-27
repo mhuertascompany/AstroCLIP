@@ -86,7 +86,8 @@ class EuclidZooBotDataset(Dataset):
     def __init__(self, sfh_path, stamp_root, rows, galaxy_ids, band='VIS',
                  training=True, sample_posterior=True, image_size=224,
                  image_format='jpg', image_stats=None, asinh_scale=20.0,
-                 sfh_override_path=None):
+                 sfh_override_path=None, random_sfh_pairing=False,
+                 pairing_seed=42):
         self.sfh_path = str(Path(sfh_path))
         self.sfh_override_path = (
             str(Path(sfh_override_path)) if sfh_override_path is not None else None
@@ -105,6 +106,19 @@ class EuclidZooBotDataset(Dataset):
         self.galaxy_ids = np.asarray(galaxy_ids, dtype=np.int64)
         self.training = training
         self.sample_posterior = sample_posterior
+        self.random_sfh_pairing = bool(random_sfh_pairing)
+        self.pairing_seed = int(pairing_seed)
+        if self.random_sfh_pairing and len(self.rows) < 2:
+            raise ValueError('Random SFH pairing requires at least two galaxies.')
+        self._validation_donor_positions = None
+        if self.random_sfh_pairing and not self.training:
+            rng = np.random.default_rng(self.pairing_seed)
+            cycle = rng.permutation(len(self.rows))
+            donor_positions = np.empty(len(self.rows), dtype=np.int64)
+            donor_positions[cycle] = np.roll(cycle, 1)
+            if np.any(donor_positions == np.arange(len(self.rows))):
+                raise RuntimeError('Failed to construct a validation derangement.')
+            self._validation_donor_positions = donor_positions
         if image_format == 'jpg':
             self.transform = (
                 _training_transform(image_size) if training
@@ -166,36 +180,53 @@ class EuclidZooBotDataset(Dataset):
     def __getitem__(self, index):
         row = int(self.rows[index])
         galaxy_id = int(self.galaxy_ids[index])
+        sfh_position = int(index)
+        if self.random_sfh_pairing:
+            if self.training:
+                # Draw uniformly from every other member of this split.  Worker
+                # RNGs are seeded by Lightning/PyTorch, so the donor changes on
+                # subsequent accesses without crossing the train/validation split.
+                sfh_position = int(torch.randint(len(self.rows) - 1, size=()).item())
+                if sfh_position >= index:
+                    sfh_position += 1
+            else:
+                sfh_position = int(self._validation_donor_positions[index])
+        sfh_row = int(self.rows[sfh_position])
+        sfh_donor_id = int(self.galaxy_ids[sfh_position])
         source = self._source()
         sfh_source = self._sfh_source()
         realization_index = -1
         if self.training and self.sample_posterior:
-            valid = np.flatnonzero(source['sfh_realization_valid'][row])
+            valid = np.flatnonzero(source['sfh_realization_valid'][sfh_row])
             if not len(valid):
-                raise ValueError(f'No valid SFH realization for galaxy_id={galaxy_id}.')
+                raise ValueError(
+                    f'No valid SFH realization for donor galaxy_id={sfh_donor_id}.'
+                )
             draw = int(torch.randint(len(valid), size=()).item())
             realization_index = int(valid[draw])
             sfh = np.asarray(
-                source['sfh_realizations'][row, realization_index],
+                source['sfh_realizations'][sfh_row, realization_index],
                 dtype=np.float32,
             )
         else:
-            sfh = np.asarray(sfh_source['sfh'][row], dtype=np.float32)
+            sfh = np.asarray(sfh_source['sfh'][sfh_row], dtype=np.float32)
         if not np.all(np.isfinite(sfh)):
             raise ValueError(f'Nonfinite SFH for galaxy_id={galaxy_id}.')
 
         # A deterministic reference is used to define SFH-neighbour targets,
         # even when a posterior realization is sampled as encoder input.
         if realization_index >= 0:
-            sfh_reference = np.asarray(sfh_source['sfh'][row], dtype=np.float32)
+            sfh_reference = np.asarray(
+                sfh_source['sfh'][sfh_row], dtype=np.float32,
+            )
         else:
             sfh_reference = sfh
 
         if self.sfh_override_path is not None:
             p16 = p84 = sfh
         else:
-            p16 = np.asarray(source['sfh_p16'][row], dtype=np.float32)
-            p84 = np.asarray(source['sfh_p84'][row], dtype=np.float32)
+            p16 = np.asarray(source['sfh_p16'][sfh_row], dtype=np.float32)
+            p84 = np.asarray(source['sfh_p84'][sfh_row], dtype=np.float32)
 
         if self.image_format == 'jpg':
             path = self.stamp_dir / f'{self.band}_{galaxy_id}.jpg'
@@ -215,6 +246,8 @@ class EuclidZooBotDataset(Dataset):
                 p84.copy(),
             ),
             'galaxy_id': torch.tensor(galaxy_id, dtype=torch.int64),
+            'sfh_donor_id': torch.tensor(sfh_donor_id, dtype=torch.int64),
+            'sfh_donor_row': torch.tensor(sfh_row, dtype=torch.int64),
             'sfh_realization': torch.tensor(realization_index, dtype=torch.int64),
         }
 
@@ -231,7 +264,7 @@ class EuclidZooBotDataModule(L.LightningDataModule):
                  eligibility_stamp_root=None,
                  exclude_edge_on_axis_ratio_below=None,
                  exclude_edge_on_probability_above=None,
-                 sfh_override_path=None):
+                 sfh_override_path=None, random_sfh_pairing=False):
         super().__init__()
         self.sfh_path = sfh_path
         self.stamp_root = stamp_root
@@ -256,6 +289,7 @@ class EuclidZooBotDataModule(L.LightningDataModule):
         self.exclude_edge_on_axis_ratio_below = exclude_edge_on_axis_ratio_below
         self.exclude_edge_on_probability_above = exclude_edge_on_probability_above
         self.sfh_override_path = sfh_override_path
+        self.random_sfh_pairing = bool(random_sfh_pairing)
         self.pair_index = None
 
     def setup(self, stage=None):
@@ -309,6 +343,8 @@ class EuclidZooBotDataModule(L.LightningDataModule):
             image_stats=self.image_stats,
             asinh_scale=self.asinh_scale,
             sfh_override_path=self.sfh_override_path,
+            random_sfh_pairing=self.random_sfh_pairing,
+            pairing_seed=self.seed,
         )
         self.train_ds = EuclidZooBotDataset(
             rows=self.pair_index.train_rows,

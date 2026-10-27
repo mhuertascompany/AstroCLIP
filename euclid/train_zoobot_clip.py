@@ -92,6 +92,14 @@ def parse_args():
         default=True,
         help='Draw a valid SFH posterior realization in training (default: on).',
     )
+    data.add_argument(
+        '--random-sfh-pairing', action='store_true',
+        help=(
+            'Null experiment: give every training image a newly sampled SFH '
+            'from another galaxy in the same split. Validation uses a fixed '
+            'seeded derangement for a stable chance-level stopping metric.'
+        ),
+    )
     data.add_argument('--batch-size', type=int, default=128)
     data.add_argument('--num-workers', type=int, default=8)
 
@@ -528,6 +536,7 @@ def main():
             args.exclude_edge_on_probability_above
         ),
         sfh_override_path=args.sfh_override,
+        random_sfh_pairing=args.random_sfh_pairing,
     )
     datamodule.setup('fit')
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -540,6 +549,7 @@ def main():
         sfh_override=np.asarray(
             str(args.sfh_override) if args.sfh_override is not None else ''
         ),
+        random_sfh_pairing=np.asarray(args.random_sfh_pairing),
     )
     if args.max_vis_mag is not None:
         split_data.update(
@@ -689,6 +699,7 @@ def main():
     print(
         f'Training with {n_bins} SFH bins and {n_realizations} posterior '
         f'realizations; posterior sampling={args.sample_posterior}; '
+        f'random SFH pairing={args.random_sfh_pairing}; '
         f'SFH override={args.sfh_override}; '
         f'alignment objective={args.alignment_objective}; '
         f'image encoder={image_encoder_description}; '
