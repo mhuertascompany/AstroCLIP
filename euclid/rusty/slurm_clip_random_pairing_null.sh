@@ -81,4 +81,28 @@ python -u -m euclid.train_zoobot_clip \
     --accelerator gpu --devices 1 --precision 16-mixed \
     "${RESUME_ARGS[@]}"
 
+BEST_CKPT=$(python - "${OUTPUT}/checkpoints" <<'PY'
+import re, sys
+from pathlib import Path
+scored = []
+for path in Path(sys.argv[1]).glob('*.ckpt'):
+    match = re.search(r'val_loss=([0-9.]+)', path.name)
+    if match:
+        scored.append((float(match.group(1).rstrip('.')), path))
+if not scored:
+    raise SystemExit('No validation-scored null checkpoint found')
+print(min(scored)[1])
+PY
+)
+EVALUATION=${OUTPUT}/evaluation_true_pairs
+mkdir -p "${EVALUATION}"
+echo "Evaluating true image--SFH pairs with null-trained checkpoint: ${BEST_CKPT}"
+python -u -m euclid.evaluate_zoobot_clip \
+    --checkpoint "${BEST_CKPT}" --dataset "${DATASET}" \
+    --stamp-root "${STAMP_ROOT}" --split "${OUTPUT}/pair_split.npz" \
+    --output-dir "${EVALUATION}" --band VIS \
+    --batch-size 128 --num-workers "${SLURM_CPUS_PER_TASK}" \
+    --chunk-size 512 --n-permutations 200 --permutation-size 5000 \
+    --shape-subset 2000 --skip-posterior --device cuda
+
 touch "${OUTPUT}/COMPLETED"
