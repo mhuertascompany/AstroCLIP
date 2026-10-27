@@ -13,6 +13,51 @@ from euclid.pretrain_sfh_autoencoder import (
 
 
 class PrecomputeIAAFTTests(unittest.TestCase):
+    def test_full_curve_iaaft_preserves_no_bins_and_unit_integrals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source_path = directory / "source.h5"
+            output_path = directory / "full.h5"
+            rng = np.random.default_rng(205)
+            weights = rng.lognormal(-2.0, 0.8, size=(8, 250))
+            weights /= weights.sum(axis=1, keepdims=True)
+            epsilon = 1e-10
+            with h5py.File(source_path, "w") as source:
+                source.create_dataset("galaxy_id", data=np.arange(8))
+                source.create_dataset("sfh", data=np.log10(weights + epsilon))
+                source.create_dataset("sfh_time_grid", data=np.linspace(0, 1, 250))
+                source.attrs["sfh_log_epsilon"] = epsilon
+
+            report = build_dataset(
+                source_path, output_path, workers=1, chunk_size=4,
+                candidates=3, max_iterations=100, preserve="none",
+            )
+            with h5py.File(output_path, "r") as result:
+                recovered = np.maximum(
+                    10.0 ** np.asarray(result["sfh"], dtype=np.float64) - epsilon,
+                    0.0,
+                )
+                np.testing.assert_allclose(recovered.sum(axis=1), 1.0, atol=2e-6)
+                self.assertEqual(result.attrs["preserved_segment"], "none")
+                self.assertEqual(
+                    result.attrs["transformation"],
+                    "full-curve IAAFT; no bins preserved",
+                )
+                self.assertNotIn("preserved_window_start", result)
+                self.assertTrue(np.all(np.any(recovered != weights, axis=1)))
+                for original, surrogate in zip(weights, recovered):
+                    np.testing.assert_allclose(
+                        np.sort(surrogate), np.sort(original), atol=2e-8, rtol=2e-6,
+                    )
+            self.assertEqual(report["preserved_segment"], "none")
+            self.assertEqual(report["maximum_preserved_segment_error"], 0.0)
+            self.assertTrue(np.isfinite(
+                report["population_correlation_original_surrogate_mean_lookback"]
+            ))
+            self.assertTrue(np.isfinite(
+                report["population_correlation_original_surrogate_recent_10"]
+            ))
+
     def test_compact_dataset_roundtrips_to_unit_integrals(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

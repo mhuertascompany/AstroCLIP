@@ -11,8 +11,21 @@ import h5py
 import numpy as np
 
 from .sfh_surrogates import (
-    past_preserved_iaaft, recent_preserved_iaaft, window_preserved_iaaft,
+    iaaft_surrogate, past_preserved_iaaft, recent_preserved_iaaft,
+    window_preserved_iaaft,
 )
+
+
+def _correlation(left, right):
+    """Return a finite Pearson correlation for candidate selection."""
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    left = left - left.mean()
+    right = right - right.mean()
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    if denominator <= np.finfo(float).eps:
+        return 1.0 if np.allclose(left, right) else 0.0
+    return float(np.dot(left, right) / denominator)
 
 
 def _process_chunk(payload):
@@ -60,7 +73,13 @@ def _process_chunk(payload):
         for candidate in range(candidates):
             candidate_seed = np.random.SeedSequence([seed, source_row, candidate])
             rng = np.random.default_rng(candidate_seed)
-            if preserve in {"window", "random-window"}:
+            if preserve == "none":
+                surrogate, info = iaaft_surrogate(
+                    weights, rng, max_iterations=max_iterations,
+                )
+                info["full_correlation"] = _correlation(weights, surrogate)
+                randomized_key = "full_correlation"
+            elif preserve in {"window", "random-window"}:
                 surrogate, info = window_preserved_iaaft(
                     weights, time, rng, window_start=current_window_start,
                     window_end=current_window_end, transition_bins=transition_bins,
@@ -87,7 +106,10 @@ def _process_chunk(payload):
         _, surrogate, info, candidate = best
 
         integral = float(surrogate.sum())
-        if preserve in {"window", "random-window"}:
+        if preserve == "none":
+            preserved_error = 0.0
+            randomized_correlation = float(info["full_correlation"])
+        elif preserve in {"window", "random-window"}:
             first, last = info["window_start_index"], info["window_end_index"]
             preserved_error = float(
                 np.max(np.abs(surrogate[first:last] - weights[first:last]))
@@ -131,6 +153,10 @@ def _process_chunk(payload):
             int(info["iterations"]), int(candidate),
             float(info.get("window_start", np.nan)),
             float(info.get("window_end", np.nan)),
+            float(np.dot(weights, time)),
+            float(np.dot(surrogate, time)),
+            float(weights[time <= 0.1].sum()),
+            float(surrogate[time <= 0.1].sum()),
         ))
     return first_row, output, np.asarray(diagnostics, dtype=np.float64)
 
@@ -160,9 +186,10 @@ def build_dataset(
         raise ValueError("workers, chunk_size, and candidates must be positive")
     if not 0 < integral_tolerance < 1e-3:
         raise ValueError("integral_tolerance must lie in (0, 1e-3)")
-    if preserve not in {"recent", "past", "window", "random-window"}:
+    if preserve not in {"none", "recent", "past", "window", "random-window"}:
         raise ValueError(
-            "preserve must be 'recent', 'past', 'window', or 'random-window'"
+            "preserve must be 'none', 'recent', 'past', 'window', or "
+            "'random-window'"
         )
     if preserve == "window" and not 0 <= window_start < window_end <= 1:
         raise ValueError("window_start and window_end must define a window within [0, 1]")
@@ -234,21 +261,24 @@ def build_dataset(
             target.create_dataset(
                 "preserved_window_end", data=diagnostics[:, 8].astype(np.float32),
             )
-        preserved_name = (
-            ("random_window" if preserve == "random-window" else "window")
-            if preserve in {"window", "random-window"} else
-            ("recent" if preserve == "recent" else "old")
-        )
-        randomized_name = (
-            "outside" if preserve in {"window", "random-window"} else
-            ("old" if preserve == "recent" else "recent")
-        )
+        if preserve == "none":
+            preserved_name = "none"
+            randomized_name = "full"
+        elif preserve in {"window", "random-window"}:
+            preserved_name = "random_window" if preserve == "random-window" else "window"
+            randomized_name = "outside"
+        else:
+            preserved_name = "recent" if preserve == "recent" else "old"
+            randomized_name = "old" if preserve == "recent" else "recent"
         attributes = {
             "n_galaxies": n_rows,
             "n_bins": n_bins,
             "sfh_log_epsilon": epsilon,
             "source_dataset": str(source_path),
-            "transformation": f"{preserved_name}-preserved IAAFT",
+            "transformation": (
+                "full-curve IAAFT; no bins preserved"
+                if preserve == "none" else f"{preserved_name}-preserved IAAFT"
+            ),
             "preserved_segment": preserved_name,
             "recent_fraction": recent_fraction,
             "window_start": window_start if preserve == "window" else np.nan,
@@ -280,6 +310,12 @@ def build_dataset(
                 np.max(np.abs(diagnostics[:, 3]))
             ),
             "median_spectral_error": float(np.median(diagnostics[:, 4])),
+            "population_correlation_original_surrogate_mean_lookback": float(
+                np.corrcoef(diagnostics[:, 9], diagnostics[:, 10])[0, 1]
+            ),
+            "population_correlation_original_surrogate_recent_10": float(
+                np.corrcoef(diagnostics[:, 11], diagnostics[:, 12])[0, 1]
+            ),
         }
         target.attrs.update(attributes)
     partial.replace(output_path)
@@ -321,6 +357,12 @@ def build_dataset(
             float(np.quantile(diagnostics[:, 3], 0.95)),
         ],
         "spectral_error_median": float(np.median(diagnostics[:, 4])),
+        "population_correlation_original_surrogate_mean_lookback": float(
+            np.corrcoef(diagnostics[:, 9], diagnostics[:, 10])[0, 1]
+        ),
+        "population_correlation_original_surrogate_recent_10": float(
+            np.corrcoef(diagnostics[:, 11], diagnostics[:, 12])[0, 1]
+        ),
     }
     report_path = output_path.with_suffix(".json")
     report_path.write_text(json.dumps(report, indent=2) + "\n")
@@ -335,9 +377,13 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--recent-fraction", type=float, default=0.1)
     parser.add_argument(
-        "--preserve", choices=("recent", "past", "window", "random-window"),
+        "--preserve",
+        choices=("none", "recent", "past", "window", "random-window"),
         default="recent",
-        help="SFH segment copied exactly; IAAFT is applied to the other segment.",
+        help=(
+            "SFH segment copied exactly; IAAFT is applied elsewhere. Use 'none' "
+            "to apply IAAFT to all bins without copying any temporal interval."
+        ),
     )
     parser.add_argument("--transition-bins", type=int, default=10)
     parser.add_argument("--window-start", type=float, default=0.1)
