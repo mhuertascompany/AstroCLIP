@@ -14,18 +14,21 @@
 
 set -euo pipefail
 
-# End-to-end temporal-window ablation:
+# End-to-end temporal ablation. Window modes:
 #   1. preserve exactly [WINDOW_START, WINDOW_START+0.1) in fractional time;
-#   2. independently IAAFT-randomize both outside segments;
+#   2. independently IAAFT-randomize both outside segments.
+# Full mode applies one IAAFT transform to all 250 bins with no copied segment.
+# Both modes then:
 #   3. train a matched SFH autoencoder;
 #   4. train the edge-on-ablated ZooBot/AE-adjacency alignment.
 #
-# Usage: sbatch $0 random|WINDOW_START
+# Usage: sbatch $0 full|random|WINDOW_START
+# Full-curve control: sbatch $0 full
 # Recommended random control: sbatch $0 random
 # Example: sbatch $0 0.1   # preserves [0.1, 0.2)
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: sbatch $0 random|WINDOW_START" >&2
+    echo "Usage: sbatch $0 full|random|WINDOW_START" >&2
     exit 2
 fi
 
@@ -38,7 +41,11 @@ SOURCE=${BASE}/sfh_clip_150k.h5
 STAMP_ROOT=${BASE}/zoobot_stamps_rmax
 PAIR_SPLIT=${BASE}/training_bright_frozen_unrestricted_ae_no_edgeon/pair_split.npz
 WINDOW_START=$1
-if [[ "${WINDOW_START}" == "random" ]]; then
+if [[ "${WINDOW_START}" == "full" ]]; then
+    WINDOW_END=
+    LABEL=full_curve
+    PRESERVE_ARGS=(--preserve none)
+elif [[ "${WINDOW_START}" == "random" ]]; then
     WINDOW_END=
     LABEL=random_window_past90
     PRESERVE_ARGS=(--preserve random-window)
@@ -143,7 +150,9 @@ python -u -m euclid.train_zoobot_clip \
     --lr 1e-4 --weight-decay 0.01 --unfreeze-blocks 0 \
     --accelerator gpu --devices 1 --precision 16-mixed
 
-if [[ "${WINDOW_START}" == "random" ]]; then
+if [[ "${WINDOW_START}" == "full" ]]; then
+    echo "Preserved window: none; full 250-bin SFH randomized by IAAFT"
+elif [[ "${WINDOW_START}" == "random" ]]; then
     echo "Preserved window: deterministic random 0.1 interval in [0.1, 1] per galaxy"
 else
     echo "Preserved fractional-time window: [${WINDOW_START}, ${WINDOW_END})"
