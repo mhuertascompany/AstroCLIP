@@ -551,6 +551,13 @@ def main():
         ),
         random_sfh_pairing=np.asarray(args.random_sfh_pairing),
     )
+    if args.random_sfh_pairing:
+        donor_positions = datamodule.val_ds._validation_donor_positions
+        split_data.update(
+            random_sfh_pairing_seed=np.int64(args.seed),
+            val_sfh_donor_rows=pair_index.val_rows[donor_positions],
+            val_sfh_donor_ids=pair_index.val_ids[donor_positions],
+        )
     if args.max_vis_mag is not None:
         split_data.update(
             max_vis_mag=np.float32(args.max_vis_mag),
