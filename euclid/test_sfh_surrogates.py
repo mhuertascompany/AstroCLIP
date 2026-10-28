@@ -3,8 +3,10 @@ import unittest
 import numpy as np
 
 from euclid.sfh_surrogates import (
+    factorized_independent_sfh,
     iaaft_surrogate,
     past_preserved_iaaft,
+    recent_preserved_independent_past,
     recent_preserved_iaaft,
     window_preserved_iaaft,
 )
@@ -56,6 +58,49 @@ class IAAFTSurrogateTests(unittest.TestCase):
                 surrogate[:diagnostic["old_start"]],
                 values[:diagnostic["old_start"]],
             )
+
+    def test_independent_past_preserves_recent_fraction_and_integral(self):
+        time = np.linspace(0.0, 1.0, 250)
+        target = np.exp(-2.0 * time) + 0.04
+        donor = 0.2 + np.exp(-((time - 0.7) / 0.12) ** 2)
+        target /= target.sum()
+        donor /= donor.sum()
+        result, raw, diagnostic = recent_preserved_independent_past(
+            target, donor, time, recent_fraction=0.1, transition_bins=8,
+        )
+        split = diagnostic["old_start"]
+        np.testing.assert_array_equal(result[:split], target[:split])
+        self.assertAlmostEqual(result[:split].sum(), target[:split].sum(), places=14)
+        self.assertAlmostEqual(result[split:].sum(), target[split:].sum(), places=14)
+        self.assertAlmostEqual(result.sum(), 1.0, places=14)
+        self.assertAlmostEqual(raw.sum(), 1.0, places=14)
+        self.assertGreaterEqual(result.min(), 0.0)
+        self.assertLessEqual(diagnostic["transition_bins"], 8)
+
+    def test_factorized_null_uses_three_donor_components(self):
+        time = np.linspace(0.0, 1.0, 250)
+        fraction = 0.1 + np.exp(-((time - 0.04) / 0.05) ** 2)
+        recent = 0.2 + np.exp(-((time - 0.08) / 0.025) ** 2)
+        past = 0.1 + np.exp(-((time - 0.72) / 0.10) ** 2)
+        fraction /= fraction.sum()
+        recent /= recent.sum()
+        past /= past.sum()
+        result, raw, diagnostic = factorized_independent_sfh(
+            fraction, recent, past, time, recent_fraction=0.1,
+            transition_bins=8,
+        )
+        split = diagnostic["old_start"]
+        expected_fraction = fraction[:split].sum()
+        expected_recent_shape = recent[:split] / recent[:split].sum()
+        np.testing.assert_allclose(
+            result[:split] / result[:split].sum(), expected_recent_shape,
+            atol=1e-14, rtol=0,
+        )
+        self.assertAlmostEqual(result[:split].sum(), expected_fraction, places=14)
+        self.assertAlmostEqual(raw[:split].sum(), expected_fraction, places=14)
+        self.assertAlmostEqual(result.sum(), 1.0, places=14)
+        self.assertAlmostEqual(raw.sum(), 1.0, places=14)
+        self.assertGreaterEqual(result.min(), 0.0)
 
     def test_past_segment_and_recent_integral_are_preserved(self):
         rng = np.random.default_rng(19)
