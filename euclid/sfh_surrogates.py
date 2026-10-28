@@ -264,6 +264,229 @@ def recent_preserved_iaaft(
     return output, diagnostics
 
 
+def recent_preserved_independent_past(
+    target_weights,
+    donor_weights,
+    time,
+    recent_fraction=0.1,
+    transition_bins=8,
+):
+    """Replace the past shape with an independent donor without a hard join.
+
+    The target's recent interval and its mass fraction are copied exactly.  The
+    donor's older interval is normalized to the target's complementary past
+    fraction.  A short smoothstep bridge, confined to the replaced interval,
+    blends a positive extrapolation of the target boundary into the rescaled
+    donor.  Its scale is solved analytically after including the bridge, so the
+    recent fraction and total unit integral remain exact.
+
+    This deliberately does *not* match the donor on any galaxy property.  The
+    only dependence between the two intervals is the mass-composition
+    constraint and the local value/slope information needed for continuity.
+    """
+    target = np.asarray(target_weights, dtype=np.float64)
+    donor = np.asarray(donor_weights, dtype=np.float64)
+    time = np.asarray(time, dtype=np.float64)
+    if (
+        target.ndim != 1
+        or donor.shape != target.shape
+        or time.shape != target.shape
+        or not np.all(np.isfinite(target))
+        or not np.all(np.isfinite(donor))
+        or np.any(target < 0)
+        or np.any(donor < 0)
+        or not np.all(np.isfinite(time))
+        or np.any(np.diff(time) <= 0)
+        or not 0 < recent_fraction < 1
+        or int(transition_bins) < 1
+    ):
+        raise ValueError(
+            "expected finite, non-negative SFHs on an increasing time grid"
+        )
+
+    old_start = int(np.searchsorted(time, recent_fraction, side="right"))
+    if old_start < 2 or len(target) - old_start < 2:
+        raise ValueError("recent_fraction leaves too few recent or old SFH bins")
+    target_total = float(target.sum())
+    donor_total = float(donor.sum())
+    if target_total <= 0 or donor_total <= 0:
+        raise ValueError("target and donor SFHs must have positive integrals")
+    target = (
+        target.copy() if np.isclose(target_total, 1.0, atol=1e-12, rtol=0)
+        else target / target_total
+    )
+    donor = (
+        donor.copy() if np.isclose(donor_total, 1.0, atol=1e-12, rtol=0)
+        else donor / donor_total
+    )
+
+    target_old_sum = float(target[old_start:].sum())
+    donor_old = donor[old_start:]
+    donor_old_sum = float(donor_old.sum())
+    if donor_old_sum <= np.finfo(float).eps:
+        raise ValueError("the donor has no positive mass in the replaced interval")
+    donor_shape = donor_old / donor_old_sum
+    raw_old = target_old_sum * donor_shape
+
+    # Continue the target boundary in log space.  Clipping only prevents a
+    # two-bin numerical slope from exploding; over the short bridge it still
+    # permits roughly an order-of-two change in either direction.
+    epsilon = max(np.finfo(float).eps, 1e-12 * float(target.max()))
+    boundary = max(float(target[old_start - 1]), epsilon)
+    previous = max(float(target[old_start - 2]), epsilon)
+    dt = float(time[old_start - 1] - time[old_start - 2])
+    log_slope = (np.log(boundary) - np.log(previous)) / dt
+    log_slope = float(np.clip(log_slope, -25.0, 25.0))
+    old_time = time[old_start:]
+    extension = boundary * np.exp(
+        log_slope * (old_time - float(time[old_start - 1]))
+    )
+
+    width = min(int(transition_bins), len(donor_shape))
+    while width >= 1:
+        phase = np.arange(1, width + 1, dtype=np.float64) / width
+        alpha = phase * phase * (3.0 - 2.0 * phase)
+        extension_mass = float(np.sum((1.0 - alpha) * extension[:width]))
+        donor_coefficient = float(
+            np.sum(alpha * donor_shape[:width]) + donor_shape[width:].sum()
+        )
+        scale = (
+            (target_old_sum - extension_mass) / donor_coefficient
+            if donor_coefficient > 0 else -1.0
+        )
+        if scale >= 0:
+            break
+        width -= 1
+    if width < 1:
+        raise RuntimeError("could not construct a non-negative boundary bridge")
+
+    smooth_old = scale * donor_shape
+    smooth_old[:width] = (
+        (1.0 - alpha) * extension[:width]
+        + alpha * scale * donor_shape[:width]
+    )
+    # Correct accumulation only in the replaced interval.
+    smooth_old[-1] += target_old_sum - float(smooth_old.sum())
+    if np.any(smooth_old < -1e-14):
+        raise RuntimeError("the boundary bridge produced negative SFH weights")
+    smooth_old = np.maximum(smooth_old, 0.0)
+
+    output = target.copy()
+    output[old_start:] = smooth_old
+    output[-1] += 1.0 - float(output.sum())
+    output[-1] = max(output[-1], 0.0)
+    raw = target.copy()
+    raw[old_start:] = raw_old
+    raw[-1] += 1.0 - float(raw.sum())
+
+    old_correlation = np.corrcoef(
+        target[old_start:], output[old_start:]
+    )[0, 1]
+    if not np.isfinite(old_correlation):
+        old_correlation = 0.0
+    diagnostics = {
+        "old_start": old_start,
+        "n_recent_bins": old_start,
+        "n_old_bins": len(target) - old_start,
+        "transition_bins": width,
+        "recent_sum": float(target[:old_start].sum()),
+        "old_sum": target_old_sum,
+        "integral_error": float(output.sum() - 1.0),
+        "recent_max_error": float(
+            np.max(np.abs(output[:old_start] - target[:old_start]))
+        ),
+        "old_correlation": float(old_correlation),
+        "raw_boundary_jump": float(raw[old_start] - target[old_start - 1]),
+        "smooth_boundary_jump": float(
+            output[old_start] - target[old_start - 1]
+        ),
+        "donor_scale": float(scale),
+    }
+    return output, raw, diagnostics
+
+
+def factorized_independent_sfh(
+    fraction_weights,
+    recent_shape_weights,
+    past_shape_weights,
+    time,
+    recent_fraction=0.1,
+    transition_bins=8,
+):
+    """Assemble an SFH from three independent donor components.
+
+    The recent mass fraction is taken from ``fraction_weights``.  The
+    normalized shapes inside and outside the recent interval are taken from
+    ``recent_shape_weights`` and ``past_shape_weights``, respectively.  The
+    resulting curve therefore contains no component from the target galaxy to
+    which it may later be paired.  The same past-side boundary bridge used by
+    :func:`recent_preserved_independent_past` makes the join smooth while
+    preserving both the recent fraction and the unit integral exactly.
+    """
+    fraction_source = np.asarray(fraction_weights, dtype=np.float64)
+    recent_source = np.asarray(recent_shape_weights, dtype=np.float64)
+    past_source = np.asarray(past_shape_weights, dtype=np.float64)
+    time = np.asarray(time, dtype=np.float64)
+    if (
+        fraction_source.ndim != 1
+        or recent_source.shape != fraction_source.shape
+        or past_source.shape != fraction_source.shape
+        or time.shape != fraction_source.shape
+        or not np.all(np.isfinite(fraction_source))
+        or not np.all(np.isfinite(recent_source))
+        or not np.all(np.isfinite(past_source))
+        or np.any(fraction_source < 0)
+        or np.any(recent_source < 0)
+        or np.any(past_source < 0)
+    ):
+        raise ValueError("donor SFHs must be finite, non-negative, equal-length arrays")
+
+    split = int(np.searchsorted(time, recent_fraction, side="right"))
+    if split < 2 or len(time) - split < 2:
+        raise ValueError("recent_fraction leaves too few recent or past SFH bins")
+
+    totals = [float(x.sum()) for x in (fraction_source, recent_source, past_source)]
+    if any(total <= 0 for total in totals):
+        raise ValueError("all donor SFHs must have positive integrals")
+    fraction_source = fraction_source / totals[0]
+    recent_source = recent_source / totals[1]
+    past_source = past_source / totals[2]
+
+    recent_fraction_value = float(fraction_source[:split].sum())
+    recent_mass = float(recent_source[:split].sum())
+    past_mass = float(past_source[split:].sum())
+    if recent_mass <= np.finfo(float).eps:
+        raise ValueError("recent-shape donor has no mass in the recent interval")
+    if past_mass <= np.finfo(float).eps:
+        raise ValueError("past-shape donor has no mass in the past interval")
+
+    raw = np.empty_like(fraction_source)
+    raw[:split] = recent_fraction_value * recent_source[:split] / recent_mass
+    raw[split:] = (1.0 - recent_fraction_value) * past_source[split:] / past_mass
+    # Put the round-off correction in the largest past bin.  Correcting the
+    # final bin can make an exactly-zero endpoint negative by machine epsilon.
+    correction_index = split + int(np.argmax(raw[split:]))
+    raw[correction_index] += 1.0 - float(raw.sum())
+
+    # A self-donor call applies precisely the bridge used by experiment 2,
+    # while keeping the already factorized recent segment unchanged.
+    output, _, bridge = recent_preserved_independent_past(
+        raw,
+        raw,
+        time,
+        recent_fraction=recent_fraction,
+        transition_bins=transition_bins,
+    )
+    diagnostics = dict(bridge)
+    diagnostics.update({
+        "fraction_donor_recent_sum": recent_fraction_value,
+        "recent_shape_donor_mass": recent_mass,
+        "past_shape_donor_mass": past_mass,
+        "raw_integral_error": float(raw.sum() - 1.0),
+    })
+    return output, raw, diagnostics
+
+
 def past_preserved_iaaft(
     weights,
     time,
