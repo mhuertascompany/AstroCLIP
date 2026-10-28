@@ -25,6 +25,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from .vis_selection import flux_ujy_to_ab_magnitude
 from .sfh_shape import sfh_duration_80, sfh_recent_activity
+from .sfh_quenching import sfh_quenching_summaries
 
 
 log = logging.getLogger(__name__)
@@ -307,6 +308,18 @@ def load_catalog_properties(h5_path, rows, galaxy_ids, archive_redshift=None):
                     + 'denominator=' + '+'.join(answers)
                 )
         properties.update(_sfh_properties(source, rows))
+        if (
+            'log_stellar_mass' in properties and 'redshift' in properties
+            and 'sfh_time_norm' in source
+        ):
+            quenching = sfh_quenching_summaries(
+                _read_rows(source['sfh'], rows),
+                np.asarray(source['sfh_time_grid'], dtype=float),
+                _read_rows(source['sfh_time_norm'], rows),
+                properties['log_stellar_mass'], properties['redshift'],
+                float(source.attrs.get('sfh_log_epsilon', 1e-10)),
+            )
+            properties.update(quenching)
         sources.update({key: 'derived from sfh' for key in properties if key.startswith('sfh_')})
 
     return properties, sources
@@ -375,6 +388,14 @@ def property_specs(properties):
         'sfh_t50_lookback': ('SFH t50 fractional lookback', 'plasma'),
         'sfh_entropy': ('Normalized SFH entropy', 'viridis'),
         'sfh_log_old_recent': ('log(old 20% / recent 20%)', 'coolwarm'),
+        'sfh_log_ssfr_100myr_r0': ('SFH log10(sSFR100 / yr⁻¹), R=0', 'viridis'),
+        'sfh_doubling_number_100myr': ('Doubling number D100 = sSFR100 × tH(zobs)', 'viridis'),
+        'sfh_activity_class': ('SFH activity class (0=Q, 1=transition, 2=SF)', 'viridis'),
+        'sfh_tau_sf_20_80_gyr': ('SFH formation timescale τSF (20–80%) [Gyr]', 'viridis'),
+        'sfh_quenching_timescale_gyr': ('SFH green-valley crossing time [Gyr]', 'viridis'),
+        'sfh_quenching_epoch_lookback_gyr': ('SFH quenching epoch: lookback [Gyr]', 'plasma'),
+        'sfh_quenching_epoch_cosmic_age_gyr': ('SFH quenching epoch: cosmic age [Gyr]', 'plasma'),
+        'sfh_quenching_epoch_redshift': ('SFH quenching epoch: redshift', 'plasma'),
         'paired_cosine': ('Matched image-SFH cosine', 'coolwarm'),
         'image_to_sfh_rank_percentile': ('Image→SFH rank percentile', 'viridis_r'),
         'sfh_to_image_rank_percentile': ('SFH→image rank percentile', 'viridis_r'),
