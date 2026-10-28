@@ -36,6 +36,10 @@ PHYSICAL_KEYS = [
     'sfh_recent_10', 'sfh_recent_20', 'sfh_old_20', 'sfh_mean_lookback',
     'sfh_peak_lookback', 'sfh_duration_80', 'sfh_t50_lookback',
     'sfh_entropy', 'sfh_log_old_recent',
+    'sfh_log_ssfr_100myr_r0', 'sfh_doubling_number_100myr',
+    'sfh_activity_class', 'sfh_tau_sf_20_80_gyr',
+    'sfh_quenching_timescale_gyr', 'sfh_quenching_epoch_lookback_gyr',
+    'sfh_quenching_epoch_cosmic_age_gyr', 'sfh_quenching_epoch_redshift',
 ]
 
 

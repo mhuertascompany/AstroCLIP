@@ -50,6 +50,7 @@ from euclid.sfh_shape import (
     sfh_post_peak_decline,
     sfh_recent_activity,
 )
+from euclid.sfh_quenching import sfh_quenching_summaries
 from euclid.physical_size import angular_radius_to_proper_kpc
 from bokeh.models import (
     BasicTicker,
@@ -122,6 +123,14 @@ _PROPERTY_LABELS = {
     'sfh_recent_mass_fraction_100myr': 'SFH mass fraction formed in latest 100 Myr',
     'sfh_log_sfr_per_stellar_mass_100myr_r0': 'SFH log10(sSFR100 / yr⁻¹), R=0',
     'sfh_log_sfr_100myr_r0': 'SFH log10(SFR100 / M☉ yr⁻¹), R=0',
+    'sfh_log_ssfr_100myr_r0': 'SFH log10(sSFR100 / yr⁻¹), R=0',
+    'sfh_doubling_number_100myr': 'Doubling number D100 = sSFR100 × tH(zobs)',
+    'sfh_activity_class': 'SFH activity class (0=Q, 1=transition, 2=SF)',
+    'sfh_tau_sf_20_80_gyr': 'SFH formation timescale τSF (20–80%) [Gyr]',
+    'sfh_quenching_timescale_gyr': 'SFH green-valley crossing time [Gyr]',
+    'sfh_quenching_epoch_lookback_gyr': 'SFH quenching epoch: lookback [Gyr]',
+    'sfh_quenching_epoch_cosmic_age_gyr': 'SFH quenching epoch: cosmic age [Gyr]',
+    'sfh_quenching_epoch_redshift': 'SFH quenching epoch: redshift',
     'sfh_peak_age_gyr': 'SFH peak time before observation [Gyr]',
     'sfh_mass_weighted_age_gyr': 'SFH mass-weighted age [Gyr]',
     'sfh_post_peak_decline_slope_dex_gyr': 'Post-peak decline slope [dex/Gyr; 300 Myr smooth]',
@@ -355,6 +364,17 @@ def load_data(h5_path, archive_paths, labels=None):
     if redshift is None:
         redshift = np.full(len(galaxy_ids), np.nan)
     redshift = np.asarray(redshift, dtype=float)
+    mass = first_properties.get(_PROPERTY_LABELS['log_stellar_mass'])
+    if mass is not None and age_myr is not None:
+        quenching = sfh_quenching_summaries(
+            sfh_log, sfh_time, age_myr, np.asarray(mass, dtype=float), redshift,
+            epsilon,
+        )
+        for run in runs.values():
+            run['properties'].update({
+                _PROPERTY_LABELS[key]: values
+                for key, values in quenching.items() if key in _PROPERTY_LABELS
+            })
     angular_label = _PROPERTY_LABELS['sersic_radius']
     log_angular_label = _PROPERTY_LABELS['log_sersic_radius']
     physical_label = _PROPERTY_LABELS['sersic_radius_kpc']
