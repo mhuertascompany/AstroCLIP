@@ -240,3 +240,36 @@ class EuclidCounterfactualFlow(nn.Module):
             "sfh_flow_loss": sfh_loss.detach(),
             "common_loss": common_loss.detach(),
         }
+
+    @torch.inference_mode()
+    def sample(self, batch, common_mode="paired", steps=32,
+               image_noise=None, sfh_noise=None):
+        """Euler-integrate both rectified flows from shared fixed noise."""
+        if steps < 2:
+            raise ValueError("steps must be at least two")
+        image = batch["image"]
+        sfh = batch["sfh"]
+        image_condition, sfh_condition, _, _ = self.encode_conditions(
+            image, sfh, batch["donor_images"], batch["donor_sfhs"],
+            batch["covariates"], common_mode=common_mode,
+        )
+        if image_noise is None:
+            image_noise = torch.randn_like(image)
+        if sfh_noise is None:
+            sfh_noise = torch.randn_like(sfh)
+        generated_image = image_noise.clone()
+        generated_sfh = sfh_noise.clone()
+        delta = 1.0 / steps
+        for step in range(steps):
+            time = torch.full(
+                (len(image),), (step + 0.5) * delta,
+                device=image.device, dtype=torch.float32,
+            )
+            time_embedding = time * 1000.0
+            generated_image = generated_image + delta * self.image_velocity(
+                generated_image, time_embedding, image_condition,
+            ).float()
+            generated_sfh = generated_sfh + delta * self.sfh_velocity(
+                generated_sfh, time_embedding, sfh_condition,
+            ).float()
+        return generated_image, generated_sfh

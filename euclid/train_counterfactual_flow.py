@@ -11,9 +11,13 @@ import h5py
 import lightning as L
 import numpy as np
 import torch
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
-from torch.utils.data import DataLoader
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from torch.utils.data import DataLoader, default_collate
 
 from .counterfactual_dataset import (
     CounterfactualEuclidDataset,
@@ -49,6 +53,7 @@ class CounterfactualFlowExperiment(L.LightningModule):
             batch["sfh"].shape, generator=generator, device=self.device,
         )
         results = {}
+        metric_results = {}
         for mode in ("paired", "shuffled", "prior_only"):
             loss, metrics = self.model.loss(
                 batch, common_mode=mode, training=False, time=time_values,
@@ -56,6 +61,7 @@ class CounterfactualFlowExperiment(L.LightningModule):
             )
             prefix = "val" if mode == "paired" else f"val_{mode}"
             results[mode] = loss
+            metric_results[mode] = metrics
             self.log(f"{prefix}_loss", loss, prog_bar=mode == "paired",
                      batch_size=count, sync_dist=True)
             for name, value in metrics.items():
@@ -65,12 +71,159 @@ class CounterfactualFlowExperiment(L.LightningModule):
             "val_common_gain", results["prior_only"] - results["paired"],
             prog_bar=True, batch_size=count, sync_dist=True,
         )
+        for branch in ("image", "sfh"):
+            name = f"{branch}_flow_loss"
+            self.log(
+                f"val_{branch}_common_gain",
+                metric_results["prior_only"][name]
+                - metric_results["paired"][name],
+                batch_size=count, sync_dist=True,
+            )
+        self.log(
+            "val_shuffled_gap", results["shuffled"] - results["paired"],
+            batch_size=count, sync_dist=True,
+        )
 
     def configure_optimizers(self):
         return torch.optim.AdamW(
             self.parameters(), lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
         )
+
+
+class GenerativePreview(L.Callback):
+    """Save and optionally W&B-log fixed-noise image and SFH generations."""
+
+    def __init__(self, dataset, output, every=5, samples=6, steps=32, seed=2718):
+        super().__init__()
+        if min(every, samples) < 1 or steps < 2:
+            raise ValueError(
+                "Preview cadence and samples must be positive; steps must be >= 2"
+            )
+        self.output = Path(output)
+        self.every = int(every)
+        self.steps = int(steps)
+        count = min(int(samples), len(dataset))
+        indices = np.linspace(0, len(dataset) - 1, count, dtype=int)
+        self.batch = default_collate([dataset[int(index)] for index in indices])
+        self.seed = int(seed)
+        self.sfh_mean = torch.as_tensor(dataset.sfh_mean)
+        self.sfh_scale = torch.as_tensor(dataset.sfh_scale)
+
+    @staticmethod
+    def _to_device(batch, device):
+        return {
+            name: value.to(device) if torch.is_tensor(value) else value
+            for name, value in batch.items()
+        }
+
+    def _wandb_logger(self, trainer):
+        for logger in trainer.loggers:
+            if isinstance(logger, WandbLogger):
+                return logger
+        return None
+
+    def on_validation_epoch_end(self, trainer, module):
+        epoch = trainer.current_epoch
+        if (
+            not trainer.is_global_zero
+            or ((epoch + 1) % self.every and epoch + 1 != trainer.max_epochs)
+        ):
+            return
+        import matplotlib.pyplot as plt
+
+        batch = self._to_device(self.batch, module.device)
+        generator = torch.Generator(device=module.device).manual_seed(self.seed)
+        image_noise = torch.randn(
+            batch["image"].shape, generator=generator, device=module.device,
+        )
+        sfh_noise = torch.randn(
+            batch["sfh"].shape, generator=generator, device=module.device,
+        )
+        generated = {}
+        was_training = module.training
+        module.eval()
+        for mode in ("paired", "prior_only", "shuffled"):
+            generated[mode] = module.model.sample(
+                batch, common_mode=mode, steps=self.steps,
+                image_noise=image_noise, sfh_noise=sfh_noise,
+            )
+        module.train(was_training)
+
+        self.output.mkdir(parents=True, exist_ok=True)
+        image_path = self.output / f"epoch_{epoch:03d}_images.png"
+        sfh_path = self.output / f"epoch_{epoch:03d}_sfhs.png"
+        real_images = batch["image"].detach().cpu().numpy()[:, 0]
+        modes = ("paired", "prior_only", "shuffled")
+        figure, axes = plt.subplots(
+            1 + len(modes), len(real_images),
+            figsize=(2.0 * len(real_images), 7.5), squeeze=False,
+        )
+        rows = [("Real", real_images)] + [
+            (
+                mode.replace("_", " ").title(),
+                generated[mode][0].clamp(-1, 1).cpu().numpy()[:, 0],
+            )
+            for mode in modes
+        ]
+        ids = batch["galaxy_id"].cpu().numpy()
+        for row_index, (label, images) in enumerate(rows):
+            for column, image in enumerate(images):
+                axis = axes[row_index, column]
+                axis.imshow(image, cmap="gray", vmin=-1, vmax=1)
+                axis.set_xticks([])
+                axis.set_yticks([])
+                if column == 0:
+                    axis.set_ylabel(label)
+                if row_index == 0:
+                    axis.set_title(str(int(ids[column])), fontsize=8)
+        figure.suptitle(
+            f"Fixed validation galaxies and fixed flow noise · epoch {epoch}",
+        )
+        figure.tight_layout()
+        figure.savefig(image_path, dpi=150)
+        plt.close(figure)
+
+        mean = self.sfh_mean.to(module.device)
+        scale = self.sfh_scale.to(module.device)
+        target_weights = torch.softmax(batch["sfh"] * scale + mean, dim=-1)
+        generated_weights = {
+            mode: torch.softmax(generated[mode][1] * scale + mean, dim=-1)
+            for mode in modes
+        }
+        x = np.linspace(0, 1, target_weights.shape[1])
+        figure, axes = plt.subplots(
+            len(ids), 1, figsize=(8, 2.1 * len(ids)), sharex=True, squeeze=False,
+        )
+        colors = {"paired": "#0072B2", "prior_only": "#D55E00",
+                  "shuffled": "#999999"}
+        for index, axis in enumerate(axes[:, 0]):
+            axis.plot(x, target_weights[index].cpu().numpy(), color="black", lw=1.5,
+                      label="Target")
+            for mode in modes:
+                axis.plot(
+                    x, generated_weights[mode][index].cpu().numpy(),
+                    color=colors[mode], lw=1.0,
+                    label=mode.replace("_", " ").title(),
+                )
+            axis.set_ylabel(str(int(ids[index])), rotation=0, labelpad=38)
+        axes[0, 0].legend(ncol=4, fontsize=8)
+        axes[-1, 0].set_xlabel("Fractional lookback time")
+        figure.supylabel("Normalized SFH weight")
+        figure.suptitle(f"Fixed-noise SFH generations · epoch {epoch}")
+        figure.tight_layout()
+        figure.savefig(sfh_path, dpi=150)
+        plt.close(figure)
+
+        logger = self._wandb_logger(trainer)
+        if logger is not None:
+            import wandb
+            logger.experiment.log({
+                "generations/images": wandb.Image(str(image_path)),
+                "generations/sfhs": wandb.Image(str(sfh_path)),
+                "epoch": epoch,
+                "trainer/global_step": trainer.global_step,
+            })
 
 
 def _read_metadata(dataset):
@@ -174,11 +327,24 @@ def main():
     parser.add_argument("--common-dropout", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--accelerator", choices=("gpu", "cpu"), default="gpu")
+    parser.add_argument("--preview-every", type=int, default=5)
+    parser.add_argument("--preview-samples", type=int, default=6)
+    parser.add_argument("--preview-steps", type=int, default=32)
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument(
+        "--wandb-mode", choices=("online", "offline", "disabled"),
+        default="disabled",
+    )
     args = parser.parse_args()
     if args.image_size % 16:
         parser.error("image-size must be divisible by 16")
     if args.donors > args.pool_size:
         parser.error("donors cannot exceed pool-size")
+    if args.preview_every < 1 or args.preview_samples < 1 or args.preview_steps < 2:
+        parser.error("preview cadence/samples must be positive and steps must be >= 2")
+    if args.wandb_mode != "disabled" and not args.wandb_project:
+        parser.error("--wandb-project is required unless W&B is disabled")
     if args.smoke and args.max_pairs is None:
         args.max_pairs = 2048
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
@@ -211,20 +377,35 @@ def main():
         save_last=True, save_top_k=2,
         filename="counterfactual-{epoch:03d}-{val_loss:.5f}",
     )
-    callbacks = [checkpoint, EarlyStopping(
-        monitor="val_loss", mode="min", patience=args.patience,
-    )]
+    callbacks = [
+        checkpoint,
+        EarlyStopping(monitor="val_loss", mode="min", patience=args.patience),
+        LearningRateMonitor(logging_interval="epoch"),
+        GenerativePreview(
+            val, args.output / "previews",
+            every=1 if args.smoke else args.preview_every,
+            samples=args.preview_samples, steps=args.preview_steps,
+            seed=args.seed + 1000,
+        ),
+    ]
     loader = dict(
         batch_size=args.batch_size, num_workers=args.workers,
         persistent_workers=args.workers > 0,
         pin_memory=args.accelerator == "gpu",
     )
+    loggers = [CSVLogger(str(args.output), name="logs")]
+    if args.wandb_mode != "disabled":
+        loggers.append(WandbLogger(
+            project=args.wandb_project, entity=args.wandb_entity,
+            name=args.output.name, save_dir=str(args.output),
+            offline=args.wandb_mode == "offline", log_model=False,
+        ))
     trainer = L.Trainer(
         accelerator=args.accelerator, devices=1,
         precision="16-mixed" if args.accelerator == "gpu" else "32-true",
         max_epochs=2 if args.smoke else args.epochs,
         callbacks=callbacks,
-        logger=CSVLogger(str(args.output), name="logs"),
+        logger=loggers,
         gradient_clip_val=1.0, log_every_n_steps=5,
         num_sanity_val_steps=0,
     )

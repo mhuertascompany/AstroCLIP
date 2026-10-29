@@ -102,6 +102,23 @@ class CounterfactualFlowModelTests(unittest.TestCase):
             self.assertEqual(image_common.shape, (3, 8))
             self.assertEqual(sfh_common.shape, (3, 8))
 
+        batch = {
+            "image": inputs[0], "sfh": inputs[1],
+            "donor_images": inputs[2], "donor_sfhs": inputs[3],
+            "covariates": inputs[4],
+        }
+        image_noise = torch.randn_like(inputs[0])
+        sfh_noise = torch.randn_like(inputs[1])
+        for mode in ("paired", "shuffled", "prior_only"):
+            generated_image, generated_sfh = model.sample(
+                batch, common_mode=mode, steps=2,
+                image_noise=image_noise, sfh_noise=sfh_noise,
+            )
+            self.assertEqual(generated_image.shape, inputs[0].shape)
+            self.assertEqual(generated_sfh.shape, inputs[1].shape)
+            self.assertTrue(torch.isfinite(generated_image).all())
+            self.assertTrue(torch.isfinite(generated_sfh).all())
+
 
 if __name__ == "__main__":
     unittest.main()
