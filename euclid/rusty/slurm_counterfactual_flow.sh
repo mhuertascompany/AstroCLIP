@@ -19,8 +19,11 @@ set -euo pipefail
 # Usage:
 #   sbatch euclid/rusty/slurm_counterfactual_flow.sh smoke
 #   sbatch euclid/rusty/slurm_counterfactual_flow.sh full
+# Optional environment:
+#   WANDB_PROJECT=euclid-counterfactual-flow WANDB_MODE=online sbatch ...
 
 MODE=${1:-smoke}
+RUN_TAG=${2:-}
 if [[ "${MODE}" != smoke && "${MODE}" != full ]]; then
     echo "MODE must be smoke or full, received ${MODE}" >&2
     exit 2
@@ -41,7 +44,7 @@ BASE=/mnt/home/mhuertas/ceph/euclid/sfh_clip
 ARCHIVE=${BASE}/archives/edfn_vislt22p0_150000
 DATASET=${ARCHIVE}/sfh_clip_150k.h5
 STAMPS=${ARCHIVE}/zoobot_stamps_rmax
-OUTPUT=${BASE}/runs/counterfactual_raw_vis_sfh_${MODE}
+OUTPUT=${BASE}/runs/counterfactual_raw_vis_sfh_${MODE}${RUN_TAG:+_${RUN_TAG}}
 
 cd "${REPO}"
 [[ -f "${DATASET}" ]] || { echo "Missing ${DATASET}" >&2; exit 2; }
@@ -52,6 +55,17 @@ if [[ "${MODE}" == smoke ]]; then
     EXTRA=(--smoke --max-pairs 2048 --epochs 2 --batch-size 8 --donors 4 --pool-size 24)
 else
     EXTRA=(--epochs 100 --batch-size 16 --donors 8 --pool-size 64)
+fi
+WANDB_ARGS=(--wandb-mode "${WANDB_MODE:-disabled}")
+if [[ "${WANDB_MODE:-disabled}" != disabled ]]; then
+    [[ -n "${WANDB_PROJECT:-}" ]] || {
+        echo "WANDB_PROJECT is required when WANDB_MODE is not disabled" >&2
+        exit 2
+    }
+    WANDB_ARGS+=(--wandb-project "${WANDB_PROJECT}")
+    if [[ -n "${WANDB_ENTITY:-}" ]]; then
+        WANDB_ARGS+=(--wandb-entity "${WANDB_ENTITY}")
+    fi
 fi
 if [[ -f "${OUTPUT}/checkpoints/last.ckpt" ]]; then
     EXTRA+=(--resume "${OUTPUT}/checkpoints/last.ckpt")
@@ -73,7 +87,8 @@ python -u -m euclid.train_counterfactual_flow \
     --image-encoder-base 16 --image-flow-base 16 \
     --sfh-d-model 96 --sfh-layers 3 \
     --common-loss-weight 0.05 --common-dropout 0.1 \
+    --preview-every 5 --preview-samples 6 --preview-steps 32 \
     --max-vis-mag 22 \
     --exclude-edge-on-axis-ratio-below 0.5 \
     --exclude-edge-on-probability-above 0.8 \
-    --accelerator gpu "${EXTRA[@]}"
+    --accelerator gpu "${WANDB_ARGS[@]}" "${EXTRA[@]}"
