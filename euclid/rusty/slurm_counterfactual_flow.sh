@@ -26,7 +26,10 @@ if [[ "${MODE}" != smoke && "${MODE}" != full ]]; then
     exit 2
 fi
 
-module load python
+# Rusty's system PyTorch 2.6.0 is built against the CUDA 12/cuDNN 8 stack.
+# Load both explicitly; otherwise convolution backward fails while searching
+# for libcudnn_cnn_train.so.8.
+module load python cuda/12.5.1 cudnn/8.9.7.29-12
 source "${RUSTY_VENV:-${HOME}/.sfh_euclid}/bin/activate"
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
