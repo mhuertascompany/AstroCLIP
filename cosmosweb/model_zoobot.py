@@ -181,6 +181,15 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         cyclip_clip_weight: float = 0.25,
         cyclip_inmodal_weight: float = 1.0,
         cyclip_crossmodal_weight: float = 0.25,
+        shared_dim: int = 32,
+        private_dim: int = 64,
+        shared_private_hidden_dim: int = 256,
+        shared_pair_weight: float = 1.0,
+        shared_variance_weight: float = 1.0,
+        shared_covariance_weight: float = 0.01,
+        shared_private_reconstruction_weight: float = 1.0,
+        shared_private_orthogonality_weight: float = 0.01,
+        shared_variance_target: float = 1.0,
         image_encoder_type: str = 'zoobot',
         galactiktok_checkpoint: str | None = None,
         galactiktok_band: str = 'euclid-vis',
@@ -189,9 +198,12 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         token_pool_layers: int = 2,
     ) -> None:
         super().__init__()
-        if alignment_objective not in {'clip', 'pcmepp', 'cwcl', 'cyclip'}:
+        if alignment_objective not in {
+            'clip', 'pcmepp', 'cwcl', 'cyclip', 'shared_private',
+        }:
             raise ValueError(
-                'alignment_objective must be clip, pcmepp, cwcl, or cyclip.'
+                'alignment_objective must be clip, pcmepp, cwcl, cyclip, '
+                'or shared_private.'
             )
         if image_encoder_type not in {'zoobot', 'galactiktok'}:
             raise ValueError('image_encoder_type must be zoobot or galactiktok.')
@@ -242,6 +254,18 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             + cyclip_crossmodal_weight
         ) == 0:
             raise ValueError('At least one CyCLIP weight must be positive.')
+        if min(shared_dim, private_dim, shared_private_hidden_dim) < 1:
+            raise ValueError('Shared/private dimensions must be positive.')
+        if min(
+            shared_pair_weight,
+            shared_variance_weight,
+            shared_covariance_weight,
+            shared_private_reconstruction_weight,
+            shared_private_orthogonality_weight,
+        ) < 0:
+            raise ValueError('Shared/private loss weights cannot be negative.')
+        if shared_variance_target <= 0:
+            raise ValueError('shared_variance_target must be positive.')
         if not 0.0 <= soft_positive_weight <= 1.0:
             raise ValueError('soft_positive_weight must lie in [0, 1].')
         if soft_positive_k < 1:
@@ -332,7 +356,9 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 'AE adjacency regularization requires freeze_sfh_encoder=True '
                 'so its reference geometry remains fixed.'
             )
-        if alignment_objective in {'pcmepp', 'cwcl', 'cyclip'}:
+        if alignment_objective in {
+            'pcmepp', 'cwcl', 'cyclip', 'shared_private',
+        }:
             incompatible = []
             if queue_size:
                 incompatible.append('queue_size')
@@ -352,6 +378,21 @@ class CosmosWebZooBotCLIP(L.LightningModule):
                 'CWCL requires freeze_sfh_encoder=True so the SFH-AE target '
                 'geometry remains fixed.'
             )
+        if alignment_objective == 'shared_private':
+            if image_encoder_type != 'zoobot':
+                raise ValueError(
+                    'The first shared_private model supports ZooBot only.'
+                )
+            if unfreeze_blocks:
+                raise ValueError(
+                    'shared_private currently requires unfreeze_blocks=0 so '
+                    'the ZooBot reconstruction target remains fixed.'
+                )
+            if not freeze_sfh_encoder:
+                raise ValueError(
+                    'shared_private requires freeze_sfh_encoder=True so the '
+                    'SFH reconstruction target remains fixed.'
+                )
         self.save_hyperparameters()
 
         # ── main encoders (receive gradients) ────────────────────────────────
@@ -411,6 +452,48 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         else:
             self.sfh_decoder = None
 
+        # Shared/private decomposition.  Both modality-specific adapters emit
+        # ``embed_dim`` features, after which the common projector is literally
+        # the same module for both modalities.  Private heads remain separate.
+        # Decoders predict frozen pretrained latents, not the trainable adapter
+        # outputs, avoiding a trivial moving reconstruction target.
+        if alignment_objective == 'shared_private':
+            hidden = shared_private_hidden_dim
+            self.common_projector = FlexibleProjection(
+                embed_dim, shared_dim, hidden_dim=hidden, hidden_layers=1,
+            )
+            self.image_private_projector = FlexibleProjection(
+                embed_dim, private_dim, hidden_dim=hidden, hidden_layers=1,
+            )
+            self.sfh_private_projector = FlexibleProjection(
+                embed_dim, private_dim, hidden_dim=hidden, hidden_layers=1,
+            )
+            image_target_dim = self.image_encoder.backbone_dim
+            self.image_common_decoder = FlexibleProjection(
+                shared_dim, image_target_dim, hidden_dim=hidden,
+                hidden_layers=1, dropout=0.0,
+            )
+            self.image_private_decoder = FlexibleProjection(
+                private_dim, image_target_dim, hidden_dim=hidden,
+                hidden_layers=1, dropout=0.0,
+            )
+            self.sfh_common_decoder = FlexibleProjection(
+                shared_dim, embed_dim, hidden_dim=hidden,
+                hidden_layers=1, dropout=0.0,
+            )
+            self.sfh_private_decoder = FlexibleProjection(
+                private_dim, embed_dim, hidden_dim=hidden,
+                hidden_layers=1, dropout=0.0,
+            )
+        else:
+            self.common_projector = None
+            self.image_private_projector = None
+            self.sfh_private_projector = None
+            self.image_common_decoder = None
+            self.image_private_decoder = None
+            self.sfh_common_decoder = None
+            self.sfh_private_decoder = None
+
         if freeze_sfh_encoder:
             for parameter in self.sfh_encoder.parameters():
                 parameter.requires_grad_(False)
@@ -458,6 +541,8 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             self.sfh_log_variance = None
             self.pcme_scale = None
             self.pcme_bias = None
+        if alignment_objective == 'shared_private':
+            self.log_temp.requires_grad_(False)
 
         # ── circular queues (registered as buffers → saved in checkpoint) ────
         Q = queue_size
@@ -516,7 +601,10 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     # ── encoders (public API, used by evaluate / umap scripts) ───────────────
 
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
-        return self.project_image(self.encode_image_latent(image))
+        projected = self.project_image(self.encode_image_latent(image))
+        if self.hparams.alignment_objective == 'shared_private':
+            return self.common_projector(projected)
+        return projected
 
     def encode_image_latent(self, image: torch.Tensor) -> torch.Tensor:
         """Return frozen image features before the trainable alignment adapter."""
@@ -533,7 +621,34 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         return self.sfh_projection(latent)
 
     def encode_sfh(self, sfh: torch.Tensor) -> torch.Tensor:
-        return self.project_sfh(self.encode_sfh_latent(sfh))
+        projected = self.project_sfh(self.encode_sfh_latent(sfh))
+        if self.hparams.alignment_objective == 'shared_private':
+            return self.common_projector(projected)
+        return projected
+
+    def encode_image_shared_private(
+        self, image: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return common and morphology-private representations."""
+        if self.hparams.alignment_objective != 'shared_private':
+            raise RuntimeError('Shared/private encoding requires shared_private.')
+        projected = self.project_image(self.encode_image_latent(image))
+        return (
+            self.common_projector(projected),
+            self.image_private_projector(projected),
+        )
+
+    def encode_sfh_shared_private(
+        self, sfh: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return common and SFH-private representations."""
+        if self.hparams.alignment_objective != 'shared_private':
+            raise RuntimeError('Shared/private encoding requires shared_private.')
+        projected = self.project_sfh(self.encode_sfh_latent(sfh))
+        return (
+            self.common_projector(projected),
+            self.sfh_private_projector(projected),
+        )
 
     def encode_image_distribution(
         self, image: torch.Tensor,
@@ -609,6 +724,183 @@ class CosmosWebZooBotCLIP(L.LightningModule):
             raise RuntimeError('Alternative step requires CWCL or CyCLIP.')
         return result, sfh_latent, image_embedding, sfh_embedding, logit_scale
 
+    @staticmethod
+    def _standardize_batch(embedding: torch.Tensor) -> torch.Tensor:
+        """Standardize representation dimensions without batch-normalization state."""
+        embedding = embedding.float()
+        centered = embedding - embedding.mean(dim=0, keepdim=True)
+        scale = centered.pow(2).mean(dim=0, keepdim=True).add(1e-4).sqrt()
+        return centered / scale
+
+    @staticmethod
+    def _representation_variance_loss(
+        embedding: torch.Tensor, target: float,
+    ) -> torch.Tensor:
+        embedding = embedding.float()
+        centered = embedding - embedding.mean(dim=0, keepdim=True)
+        std = centered.pow(2).mean(dim=0).add(1e-4).sqrt()
+        return F.relu(float(target) - std).mean()
+
+    @staticmethod
+    def _representation_covariance_loss(
+        embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        embedding = CosmosWebZooBotCLIP._standardize_batch(embedding)
+        n_samples, n_features = embedding.shape
+        if n_samples < 2 or n_features < 2:
+            return embedding.new_zeros(())
+        covariance = embedding.T @ embedding / (n_samples - 1)
+        diagonal = torch.diagonal(covariance)
+        off_diagonal = covariance - torch.diag_embed(diagonal)
+        return off_diagonal.pow(2).sum() / (n_features * (n_features - 1))
+
+    @staticmethod
+    def _cross_covariance_loss(
+        first: torch.Tensor, second: torch.Tensor,
+    ) -> torch.Tensor:
+        first = CosmosWebZooBotCLIP._standardize_batch(first)
+        second = CosmosWebZooBotCLIP._standardize_batch(second)
+        if first.size(0) < 2:
+            return first.new_zeros(())
+        cross_covariance = first.T @ second / (first.size(0) - 1)
+        return cross_covariance.pow(2).mean()
+
+    @staticmethod
+    @torch.no_grad()
+    def _effective_rank(embedding: torch.Tensor) -> torch.Tensor:
+        embedding = embedding.float()
+        centered = embedding - embedding.mean(dim=0, keepdim=True)
+        if centered.size(0) < 2:
+            return embedding.new_ones(())
+        covariance = centered.T @ centered / (centered.size(0) - 1)
+        eigenvalues = torch.linalg.eigvalsh(covariance).clamp_min(0)
+        probabilities = eigenvalues / eigenvalues.sum().clamp_min(1e-12)
+        entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+        return entropy.exp()
+
+    def _shared_private_step(
+        self, images: torch.Tensor, sfhs: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute the first-stage shared/private latent objective."""
+        image_latent = self.encode_image_latent(images)
+        sfh_latent = self.encode_sfh_latent(sfhs)
+        image_adapter = self.project_image(image_latent)
+        sfh_adapter = self.project_sfh(sfh_latent)
+
+        image_common = self.common_projector(image_adapter)
+        sfh_common = self.common_projector(sfh_adapter)
+        image_private = self.image_private_projector(image_adapter)
+        sfh_private = self.sfh_private_projector(sfh_adapter)
+
+        standardized_image_common = self._standardize_batch(image_common)
+        standardized_sfh_common = self._standardize_batch(sfh_common)
+        pair_loss = F.mse_loss(
+            standardized_image_common, standardized_sfh_common,
+        )
+
+        representations = (
+            image_common, sfh_common, image_private, sfh_private,
+        )
+        variance_loss = torch.stack([
+            self._representation_variance_loss(
+                representation, self.hparams.shared_variance_target,
+            )
+            for representation in representations
+        ]).mean()
+        covariance_loss = torch.stack([
+            self._representation_covariance_loss(representation)
+            for representation in representations
+        ]).mean()
+        orthogonality_loss = 0.5 * (
+            self._cross_covariance_loss(image_common, image_private)
+            + self._cross_covariance_loss(sfh_common, sfh_private)
+        )
+
+        image_target = F.layer_norm(
+            image_latent.detach().float(), (image_latent.size(-1),),
+        )
+        sfh_target = F.layer_norm(
+            sfh_latent.detach().float(), (sfh_latent.size(-1),),
+        )
+        image_common_reconstruction = self.image_common_decoder(
+            image_common,
+        ).float()
+        image_private_reconstruction = self.image_private_decoder(
+            image_private,
+        ).float()
+        sfh_common_reconstruction = self.sfh_common_decoder(sfh_common).float()
+        sfh_private_reconstruction = self.sfh_private_decoder(sfh_private).float()
+        image_reconstruction = (
+            image_common_reconstruction + image_private_reconstruction
+        )
+        sfh_reconstruction = sfh_common_reconstruction + sfh_private_reconstruction
+        image_reconstruction_loss = F.mse_loss(
+            image_reconstruction, image_target,
+        )
+        sfh_reconstruction_loss_value = F.mse_loss(
+            sfh_reconstruction, sfh_target,
+        )
+        reconstruction_loss = 0.5 * (
+            image_reconstruction_loss + sfh_reconstruction_loss_value
+        )
+
+        loss = (
+            self.hparams.shared_pair_weight * pair_loss
+            + self.hparams.shared_variance_weight * variance_loss
+            + self.hparams.shared_covariance_weight * covariance_loss
+            + self.hparams.shared_private_reconstruction_weight
+            * reconstruction_loss
+            + self.hparams.shared_private_orthogonality_weight
+            * orthogonality_loss
+        )
+
+        with torch.no_grad():
+            paired_cosine = F.cosine_similarity(
+                image_common.float(), sfh_common.float(), dim=-1,
+            ).mean()
+            image_common_only_mse = F.mse_loss(
+                image_common_reconstruction, image_target,
+            )
+            image_private_only_mse = F.mse_loss(
+                image_private_reconstruction, image_target,
+            )
+            sfh_common_only_mse = F.mse_loss(
+                sfh_common_reconstruction, sfh_target,
+            )
+            sfh_private_only_mse = F.mse_loss(
+                sfh_private_reconstruction, sfh_target,
+            )
+        metrics = {
+            'loss': loss,
+            'pair_loss': pair_loss,
+            'variance_loss': variance_loss,
+            'covariance_loss': covariance_loss,
+            'orthogonality_loss': orthogonality_loss,
+            'reconstruction_loss': reconstruction_loss,
+            'image_reconstruction_loss': image_reconstruction_loss,
+            'sfh_reconstruction_loss': sfh_reconstruction_loss_value,
+            'paired_cosine': paired_cosine,
+            'image_common_only_mse': image_common_only_mse,
+            'image_private_only_mse': image_private_only_mse,
+            'sfh_common_only_mse': sfh_common_only_mse,
+            'sfh_private_only_mse': sfh_private_only_mse,
+            'image_common_effective_rank': self._effective_rank(image_common),
+            'sfh_common_effective_rank': self._effective_rank(sfh_common),
+            'image_private_effective_rank': self._effective_rank(image_private),
+            'sfh_private_effective_rank': self._effective_rank(sfh_private),
+        }
+        return loss, metrics
+
+    def _log_shared_private_metrics(
+        self, prefix: str, metrics: dict[str, torch.Tensor],
+    ) -> None:
+        for name, value in metrics.items():
+            self.log(
+                f'{prefix}_{name}', value,
+                prog_bar=name in {'loss', 'paired_cosine'},
+                sync_dist=True,
+            )
+
     def forward(
         self, image: torch.Tensor, sfh: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -635,6 +927,11 @@ class CosmosWebZooBotCLIP(L.LightningModule):
         sfh_reference = batch.get('sfh_reference', sfhs)
         B = images.size(0)
         Q = self.hparams.queue_size
+
+        if self.hparams.alignment_objective == 'shared_private':
+            loss, metrics = self._shared_private_step(images, sfhs)
+            self._log_shared_private_metrics('train', metrics)
+            return loss
 
         if self.hparams.alignment_objective == 'pcmepp':
             result, sfh_latent, image_mean, sfh_mean, image_logvar, sfh_logvar = (
@@ -912,6 +1209,10 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         images, sfhs = batch['image'], batch['sfh']
         sfh_reference = batch.get('sfh_reference', sfhs)
+        if self.hparams.alignment_objective == 'shared_private':
+            _, metrics = self._shared_private_step(images, sfhs)
+            self._log_shared_private_metrics('val', metrics)
+            return
         if self.hparams.alignment_objective == 'pcmepp':
             result, sfh_latent, image_mean, sfh_mean, image_logvar, sfh_logvar = (
                 self._pcme_step(images, sfhs)

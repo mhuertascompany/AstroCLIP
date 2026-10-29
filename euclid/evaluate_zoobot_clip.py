@@ -121,11 +121,14 @@ def extraction_loader(dataset_path, stamp_root, rows, galaxy_ids, band,
 
 
 def extract_embeddings(model, loader, device, include_image_preprojection=False,
-                       include_pcme_uncertainty=False):
+                       include_pcme_uncertainty=False,
+                       include_shared_private=False):
     image_embeddings = []
     image_preprojection_embeddings = []
     sfh_embeddings = []
     sfh_preprojection_embeddings = []
+    image_private_embeddings = []
+    sfh_private_embeddings = []
     reconstructions = []
     image_log_variances = []
     sfh_log_variances = []
@@ -138,17 +141,34 @@ def extract_embeddings(model, loader, device, include_image_preprojection=False,
             sfhs = batch['sfh'].to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=use_amp):
-                if include_image_preprojection or include_pcme_uncertainty:
+                if (include_image_preprojection or include_pcme_uncertainty
+                        or include_shared_private):
                     image_latent = model.encode_image_latent(images)
                     image_projected = model.project_image(image_latent)
-                    image_embedding = F.normalize(image_projected, dim=-1)
+                    if include_shared_private:
+                        image_embedding = F.normalize(
+                            model.common_projector(image_projected), dim=-1,
+                        )
+                        image_private = F.normalize(
+                            model.image_private_projector(image_projected), dim=-1,
+                        )
+                    else:
+                        image_embedding = F.normalize(image_projected, dim=-1)
                     if include_image_preprojection:
                         image_preprojection = F.normalize(image_latent, dim=-1)
                 else:
                     image_embedding = F.normalize(model.encode_image(images), dim=-1)
                 sfh_latent = model.encode_sfh_latent(sfhs)
                 sfh_projected = model.project_sfh(sfh_latent)
-                sfh_embedding = F.normalize(sfh_projected, dim=-1)
+                if include_shared_private:
+                    sfh_embedding = F.normalize(
+                        model.common_projector(sfh_projected), dim=-1,
+                    )
+                    sfh_private = F.normalize(
+                        model.sfh_private_projector(sfh_projected), dim=-1,
+                    )
+                else:
+                    sfh_embedding = F.normalize(sfh_projected, dim=-1)
                 sfh_preprojection = F.normalize(sfh_latent, dim=-1)
                 if include_pcme_uncertainty:
                     if getattr(model.hparams, 'alignment_objective', 'clip') != 'pcmepp':
@@ -174,6 +194,11 @@ def extract_embeddings(model, loader, device, include_image_preprojection=False,
             sfh_preprojection_embeddings.append(
                 sfh_preprojection.float().cpu().numpy()
             )
+            if include_shared_private:
+                image_private_embeddings.append(
+                    image_private.float().cpu().numpy()
+                )
+                sfh_private_embeddings.append(sfh_private.float().cpu().numpy())
             seen_ids.append(batch['galaxy_id'].numpy())
             if batch_index % 20 == 0:
                 log.info('Encoded %d validation batches', batch_index + 1)
@@ -193,6 +218,11 @@ def extract_embeddings(model, loader, device, include_image_preprojection=False,
         result = result + (
             np.concatenate(image_log_variances),
             np.concatenate(sfh_log_variances),
+        )
+    if include_shared_private:
+        result = result + (
+            np.concatenate(image_private_embeddings),
+            np.concatenate(sfh_private_embeddings),
         )
     return result
 
@@ -713,6 +743,9 @@ def main():
         str(args.checkpoint), map_location='cpu', weights_only=False,
     ).to(device)
     is_pcmepp = getattr(model.hparams, 'alignment_objective', 'clip') == 'pcmepp'
+    is_shared_private = (
+        getattr(model.hparams, 'alignment_objective', 'clip') == 'shared_private'
+    )
     loader = extraction_loader(
         args.dataset, args.stamp_root, val_rows, val_ids, args.band,
         args.image_size, args.batch_size, args.num_workers,
@@ -722,6 +755,7 @@ def main():
     extracted = extract_embeddings(
         model, loader, device, include_image_preprojection=True,
         include_pcme_uncertainty=is_pcmepp,
+        include_shared_private=is_shared_private,
     )
     (image_embedding, sfh_embedding, sfh_preprojection_embedding,
      encoded_ids, reconstruction, image_preprojection_embedding) = extracted[:6]
@@ -729,6 +763,10 @@ def main():
         image_log_variance, sfh_log_variance = extracted[6:8]
     else:
         image_log_variance = sfh_log_variance = None
+    if is_shared_private:
+        image_private_embedding, sfh_private_embedding = extracted[-2:]
+    else:
+        image_private_embedding = sfh_private_embedding = None
     if not np.array_equal(encoded_ids, val_ids):
         raise ValueError('Embedding extraction changed validation ID order.')
 
@@ -761,7 +799,9 @@ def main():
         'split': str(args.split.resolve()),
         'device': str(device),
         'alignment_objective': (
-            'pcmepp_closed_form_sampled_distance' if is_pcmepp else 'clip_cosine'
+            'pcmepp_closed_form_sampled_distance' if is_pcmepp else
+            'shared_private_common_cosine' if is_shared_private else
+            'clip_cosine'
         ),
         'split_integrity': {
             'n_train': len(train_rows),
@@ -789,9 +829,6 @@ def main():
                 sfh_preprojection_embedding, rng,
             ),
         },
-        'sfh_projection_geometry': projection_geometry_diagnostics(
-            sfh_preprojection_embedding, sfh_embedding, rng,
-        ),
         'sfh_shape_neighborhood': sfh_shape_neighborhood_test(
             image_embedding, sfh_embedding, raw_sfh, rng,
             subset_size=args.shape_subset,
@@ -800,6 +837,19 @@ def main():
             redshifts, ranks_i2s, ranks_s2i, paired_cosine,
         ),
     }
+    if sfh_preprojection_embedding.shape[1] == sfh_embedding.shape[1]:
+        report['sfh_projection_geometry'] = projection_geometry_diagnostics(
+            sfh_preprojection_embedding, sfh_embedding, rng,
+        )
+    if is_shared_private:
+        report['embedding_diagnostics'].update({
+            'image_common': report['embedding_diagnostics']['image'],
+            'sfh_common': report['embedding_diagnostics']['sfh'],
+            'image_private': embedding_diagnostics(
+                image_private_embedding, rng,
+            ),
+            'sfh_private': embedding_diagnostics(sfh_private_embedding, rng),
+        })
     if is_pcmepp:
         image_uncertainty = np.exp(
             np.clip(image_log_variance, -12, 8),
@@ -849,6 +899,13 @@ def main():
                 sfh_log_variance=sfh_log_variance.astype(np.float32),
                 image_uncertainty=image_uncertainty.astype(np.float32),
                 sfh_uncertainty=sfh_uncertainty.astype(np.float32),
+            )
+        if is_shared_private:
+            embedding_arrays.update(
+                image_common_embedding=image_embedding,
+                sfh_common_embedding=sfh_embedding,
+                image_private_embedding=image_private_embedding,
+                sfh_private_embedding=sfh_private_embedding,
             )
         np.savez_compressed(
             args.output_dir / 'validation_embeddings.npz', **embedding_arrays,

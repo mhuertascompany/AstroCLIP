@@ -134,6 +134,9 @@ class ZooBotImageEncoder(nn.Module):
             dummy = torch.zeros(1, 3, 224, 224, device=_device)
             out   = self.backbone(dummy)
             backbone_dim = out.flatten(1).shape[1]
+        # Expose the frozen feature width to objectives that reconstruct the
+        # backbone representation rather than the trainable projection.
+        self.backbone_dim = int(backbone_dim)
 
         if projection_type == 'legacy':
             # Preserve the exact module layout expected by existing checkpoints.
