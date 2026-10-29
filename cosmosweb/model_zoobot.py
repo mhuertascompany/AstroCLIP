@@ -768,15 +768,22 @@ class CosmosWebZooBotCLIP(L.LightningModule):
     @staticmethod
     @torch.no_grad()
     def _effective_rank(embedding: torch.Tensor) -> torch.Tensor:
-        embedding = embedding.float()
-        centered = embedding - embedding.mean(dim=0, keepdim=True)
-        if centered.size(0) < 2:
-            return embedding.new_ones(())
-        covariance = centered.T @ centered / (centered.size(0) - 1)
-        eigenvalues = torch.linalg.eigvalsh(covariance).clamp_min(0)
-        probabilities = eigenvalues / eigenvalues.sum().clamp_min(1e-12)
-        entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
-        return entropy.exp()
+        # ``float()`` alone is insufficient under AMP: autocast can cast the
+        # covariance matmul back to float16 before ``eigvalsh``.  CUDA's
+        # symmetric eigensolver does not accept float16 inputs, so keep this
+        # small diagnostic calculation explicitly outside autocast.
+        with torch.autocast(device_type=embedding.device.type, enabled=False):
+            embedding = embedding.float()
+            centered = embedding - embedding.mean(dim=0, keepdim=True)
+            if centered.size(0) < 2:
+                return embedding.new_ones(())
+            covariance = centered.T @ centered / (centered.size(0) - 1)
+            eigenvalues = torch.linalg.eigvalsh(covariance).clamp_min(0)
+            probabilities = eigenvalues / eigenvalues.sum().clamp_min(1e-12)
+            entropy = -(
+                probabilities * probabilities.clamp_min(1e-12).log()
+            ).sum()
+            return entropy.exp()
 
     def _shared_private_step(
         self, images: torch.Tensor, sfhs: torch.Tensor,

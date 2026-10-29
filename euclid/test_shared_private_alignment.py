@@ -109,6 +109,25 @@ class SharedPrivateAlignmentTests(unittest.TestCase):
         self.assertGreater(collapsed_loss.item(), 0.9)
         self.assertLess(spread_loss.item(), 0.05)
 
+    def test_effective_rank_disables_autocast_for_eigendecomposition(self):
+        import torch
+
+        model = self._make_model()
+        embedding = torch.randn(32, 8, dtype=torch.bfloat16)
+        observed_dtypes = []
+        original_eigvalsh = torch.linalg.eigvalsh
+
+        def record_dtype(matrix, *args, **kwargs):
+            observed_dtypes.append(matrix.dtype)
+            return original_eigvalsh(matrix, *args, **kwargs)
+
+        with mock.patch.object(torch.linalg, 'eigvalsh', record_dtype):
+            with torch.autocast('cpu', dtype=torch.bfloat16):
+                rank = model._effective_rank(embedding)
+
+        self.assertTrue(torch.isfinite(rank))
+        self.assertEqual(observed_dtypes, [torch.float32])
+
 
 if __name__ == '__main__':
     unittest.main()
