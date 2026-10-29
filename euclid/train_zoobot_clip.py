@@ -129,12 +129,27 @@ def parse_args():
     model.add_argument('--momentum', type=float, default=0.995)
     model.add_argument(
         '--alignment-objective',
-        choices=('clip', 'pcmepp', 'cwcl', 'cyclip'), default='clip',
+        choices=('clip', 'pcmepp', 'cwcl', 'cyclip', 'shared_private'),
+        default='clip',
         help=(
             'Cross-modal objective: exact-pair CLIP, probabilistic PCME++, '
-            'SFH-AE continuously weighted CWCL, or cyclic-consistency CyCLIP.'
+            'SFH-AE continuously weighted CWCL, cyclic-consistency CyCLIP, '
+            'or a shared/private VICReg decomposition.'
         ),
     )
+    model.add_argument('--shared-dim', type=int, default=32)
+    model.add_argument('--private-dim', type=int, default=64)
+    model.add_argument('--shared-private-hidden-dim', type=int, default=256)
+    model.add_argument('--shared-pair-weight', type=float, default=1.0)
+    model.add_argument('--shared-variance-weight', type=float, default=1.0)
+    model.add_argument('--shared-covariance-weight', type=float, default=0.01)
+    model.add_argument(
+        '--shared-private-reconstruction-weight', type=float, default=1.0,
+    )
+    model.add_argument(
+        '--shared-private-orthogonality-weight', type=float, default=0.01,
+    )
+    model.add_argument('--shared-variance-target', type=float, default=1.0)
     model.add_argument(
         '--pcme-pseudo-positive-weight', type=float, default=0.1,
         help='PCME++ pseudo-positive BCE weight (paper default: 0.1).',
@@ -434,7 +449,9 @@ def validate_args(args):
             raise ValueError(
                 'AE adjacency regularization requires --freeze-sfh-encoder.'
             )
-    if args.alignment_objective in {'pcmepp', 'cwcl', 'cyclip'}:
+    if args.alignment_objective in {
+        'pcmepp', 'cwcl', 'cyclip', 'shared_private',
+    }:
         incompatible = []
         if args.queue_size:
             incompatible.append('--queue-size')
@@ -453,6 +470,29 @@ def validate_args(args):
         raise ValueError(
             'CWCL requires --freeze-sfh-encoder so its SFH-AE targets are fixed.'
         )
+    if args.alignment_objective == 'shared_private':
+        if args.galactiktok_checkpoint is not None:
+            raise ValueError('The first shared_private model supports ZooBot only.')
+        if args.unfreeze_blocks:
+            raise ValueError('shared_private requires --unfreeze-blocks 0.')
+        if not args.freeze_sfh_encoder:
+            raise ValueError('shared_private requires --freeze-sfh-encoder.')
+        if min(
+            args.shared_dim,
+            args.private_dim,
+            args.shared_private_hidden_dim,
+        ) < 1:
+            raise ValueError('Shared/private dimensions must be positive.')
+        if min(
+            args.shared_pair_weight,
+            args.shared_variance_weight,
+            args.shared_covariance_weight,
+            args.shared_private_reconstruction_weight,
+            args.shared_private_orthogonality_weight,
+        ) < 0:
+            raise ValueError('Shared/private weights cannot be negative.')
+        if args.shared_variance_target <= 0:
+            raise ValueError('--shared-variance-target must be positive.')
     if args.sfh_encoder == 'transformer':
         if min(args.sfh_d_model, args.sfh_n_heads, args.sfh_n_layers) < 1:
             raise ValueError('SFH transformer dimensions must be positive.')
@@ -641,6 +681,19 @@ def main():
         cyclip_clip_weight=args.cyclip_clip_weight,
         cyclip_inmodal_weight=args.cyclip_inmodal_weight,
         cyclip_crossmodal_weight=args.cyclip_crossmodal_weight,
+        shared_dim=args.shared_dim,
+        private_dim=args.private_dim,
+        shared_private_hidden_dim=args.shared_private_hidden_dim,
+        shared_pair_weight=args.shared_pair_weight,
+        shared_variance_weight=args.shared_variance_weight,
+        shared_covariance_weight=args.shared_covariance_weight,
+        shared_private_reconstruction_weight=(
+            args.shared_private_reconstruction_weight
+        ),
+        shared_private_orthogonality_weight=(
+            args.shared_private_orthogonality_weight
+        ),
+        shared_variance_target=args.shared_variance_target,
     )
     if args.sfh_pretrained_checkpoint is not None and args.resume_from is None:
         load_sfh_autoencoder_checkpoint(
@@ -731,7 +784,15 @@ def main():
         f'reverse exact weight={args.cwcl_reverse_exact_weight:g}; '
         f'CyCLIP weights clip/in-modal/cross-modal='
         f'{args.cyclip_clip_weight:g}/{args.cyclip_inmodal_weight:g}/'
-        f'{args.cyclip_crossmodal_weight:g}',
+        f'{args.cyclip_crossmodal_weight:g}; '
+        f'shared/private dims={args.shared_dim}/{args.private_dim}, '
+        f'hidden={args.shared_private_hidden_dim}; '
+        f'shared/private weights pair/variance/covariance/reconstruction/'
+        f'orthogonality={args.shared_pair_weight:g}/'
+        f'{args.shared_variance_weight:g}/'
+        f'{args.shared_covariance_weight:g}/'
+        f'{args.shared_private_reconstruction_weight:g}/'
+        f'{args.shared_private_orthogonality_weight:g}',
         flush=True,
     )
     trainer = L.Trainer(
