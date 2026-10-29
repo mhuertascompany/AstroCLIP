@@ -229,6 +229,8 @@ def main():
         num_sanity_val_steps=0,
     )
     start = time.monotonic()
+    if args.accelerator == "gpu":
+        torch.cuda.reset_peak_memory_stats()
     trainer.fit(
         model,
         DataLoader(train, shuffle=True, drop_last=True, **loader),
@@ -239,6 +241,14 @@ def main():
         elapsed_seconds=time.monotonic() - start,
         best_checkpoint=checkpoint.best_model_path,
         optimizer_steps=trainer.global_step,
+        peak_cuda_allocated_gib=(
+            torch.cuda.max_memory_allocated() / 2**30
+            if args.accelerator == "gpu" else None
+        ),
+        peak_cuda_reserved_gib=(
+            torch.cuda.max_memory_reserved() / 2**30
+            if args.accelerator == "gpu" else None
+        ),
     )
     (args.output / "runtime.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2), flush=True)
