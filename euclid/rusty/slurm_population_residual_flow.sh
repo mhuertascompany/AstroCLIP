@@ -16,12 +16,12 @@
 set -euo pipefail
 
 # Stage 1:
-#   WANDB_MODE=online WANDB_PROJECT=euclid-population-residual \
+#   WANDB_MODE=online \
 #     sbatch euclid/rusty/slurm_population_residual_flow.sh population smoke
 #
 # Stage 2 (only after selecting the population checkpoint):
 #   POPULATION_CHECKPOINT=/path/to/population-epoch=...ckpt \
-#   WANDB_MODE=online WANDB_PROJECT=euclid-population-residual \
+#   WANDB_MODE=online \
 #     sbatch euclid/rusty/slurm_population_residual_flow.sh residual smoke
 
 PHASE=${1:-population}
@@ -74,9 +74,10 @@ if [[ "${PHASE}" == residual ]]; then
 fi
 WANDB_ARGS=(--wandb-mode "${WANDB_MODE:-disabled}")
 if [[ "${WANDB_MODE:-disabled}" != disabled ]]; then
-    [[ -n "${WANDB_PROJECT:-}" ]] || { echo "WANDB_PROJECT is required" >&2; exit 2; }
-    WANDB_ARGS+=(--wandb-project "${WANDB_PROJECT}")
-    [[ -z "${WANDB_ENTITY:-}" ]] || WANDB_ARGS+=(--wandb-entity "${WANDB_ENTITY}")
+    WANDB_ARGS+=(
+        --wandb-project "${WANDB_PROJECT:-euclid-counterfactual-flow}"
+        --wandb-entity "${WANDB_ENTITY:-euclid-sfh-morphology}"
+    )
 fi
 if [[ -f "${OUTPUT}/checkpoints/last.ckpt" ]]; then
     EXTRA+=(--resume "${OUTPUT}/checkpoints/last.ckpt")
