@@ -17,6 +17,7 @@ set -euo pipefail
 
 # Usage:
 #   sbatch euclid/rusty/slurm_counterfactual_single_neighbor.sh smoke [lambda_geom]
+#   sbatch euclid/rusty/slurm_counterfactual_single_neighbor.sh pilot [lambda_geom] [tag]
 #   WANDB_MODE=online WANDB_PROJECT=euclid-counterfactual-flow \
 #     sbatch euclid/rusty/slurm_counterfactual_single_neighbor.sh full 0.1
 
@@ -26,8 +27,10 @@ RUN_TAG=${3:-}
 PREVIEW_EVERY=${PREVIEW_EVERY:-2}
 GEOMETRY_EVERY=${GEOMETRY_EVERY:-2}
 BATCH_SIZE=${BATCH_SIZE:-64}
-if [[ "${MODE}" != smoke && "${MODE}" != full ]]; then
-    echo "MODE must be smoke or full" >&2
+DONOR_MATCHING=${DONOR_MATCHING:-mass_redshift_activity}
+MASS_WINDOW=${MASS_WINDOW:-0.5}
+if [[ "${MODE}" != smoke && "${MODE}" != pilot && "${MODE}" != full ]]; then
+    echo "MODE must be smoke, pilot, or full" >&2
     exit 2
 fi
 
@@ -57,6 +60,8 @@ python -c 'import geomloss' || {
 EXTRA=()
 if [[ "${MODE}" == smoke ]]; then
     EXTRA=(--smoke --max-pairs 4096 --epochs 2 --batch-size 16 --pool-size 24)
+elif [[ "${MODE}" == pilot ]]; then
+    EXTRA=(--max-pairs 20000 --epochs 15 --batch-size "${BATCH_SIZE}" --pool-size 64 --patience 8)
 else
     EXTRA=(--epochs 100 --batch-size "${BATCH_SIZE}" --pool-size 64)
 fi
@@ -79,6 +84,8 @@ echo "Geometric weight: ${GEOMETRIC_WEIGHT}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Preview cadence: ${PREVIEW_EVERY} epochs"
 echo "Geometry cadence: ${GEOMETRY_EVERY} epochs"
+echo "Donor matching: ${DONOR_MATCHING}"
+echo "Mass window: ${MASS_WINDOW} dex"
 echo "Output: ${OUTPUT}"
 python -u -m euclid.train_counterfactual_single_neighbor \
     --dataset "${DATASET}" \
@@ -89,6 +96,7 @@ python -u -m euclid.train_counterfactual_single_neighbor \
     --image-encoder-base 16 --image-flow-base 16 \
     --sfh-d-model 96 --sfh-layers 3 \
     --geometric-weight "${GEOMETRIC_WEIGHT}" --sinkhorn-blur 0.01 \
+    --donor-matching "${DONOR_MATCHING}" --mass-window "${MASS_WINDOW}" \
     --control-batches 8 \
     --preview-every "${PREVIEW_EVERY}" --preview-samples 6 --preview-steps 32 \
     --geometry-every "${GEOMETRY_EVERY}" --geometry-samples 512 \
