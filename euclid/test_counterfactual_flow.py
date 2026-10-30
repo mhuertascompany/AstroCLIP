@@ -38,6 +38,22 @@ class CounterfactualDatasetTests(unittest.TestCase):
             self.assertTrue(np.all(activity[donors] == activity[target]))
             self.assertTrue(np.all(np.isin(donors, train)))
 
+    def test_embedding_diagnostics_detect_identity_alignment(self):
+        from euclid.export_counterfactual_embeddings import (
+            _effective_rank,
+            _linear_cka,
+            _paired_retrieval,
+        )
+
+        rng = np.random.default_rng(9)
+        left = rng.normal(size=(80, 12)).astype(np.float32)
+        right = left + 0.01 * rng.normal(size=left.shape).astype(np.float32)
+        diagnostics = _paired_retrieval(left, right, block_size=17)
+        self.assertGreater(_effective_rank(left), 8)
+        self.assertGreater(_linear_cka(left, right), 0.99)
+        self.assertGreater(diagnostics["rank1_fraction"], 0.95)
+        self.assertLess(diagnostics["median_rank_percentile"], 0.02)
+
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is not installed")
 class CounterfactualFlowModelTests(unittest.TestCase):
