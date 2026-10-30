@@ -225,6 +225,7 @@ def main():
     parser.add_argument("--exclude-edge-on-axis-ratio-below", type=float, default=0.5)
     parser.add_argument("--exclude-edge-on-probability-above", type=float, default=0.8)
     parser.add_argument("--pool-size", type=int, default=64)
+    parser.add_argument("--donor-reference-all", action="store_true")
     parser.add_argument("--donor-matching", choices=("mass_redshift_activity", "mass_window"), default="mass_window")
     parser.add_argument("--mass-window", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=16)

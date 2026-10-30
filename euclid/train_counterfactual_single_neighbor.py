@@ -73,25 +73,49 @@ def _prepare(args):
     good = np.isfinite(mass) & np.isfinite(redshift) & (mass > 0) & (redshift >= 0) & (activity >= 0)
     train_rows = train_rows[good[train_rows]]
     val_rows = val_rows[good[val_rows]]
+    donor_rows = train_rows
+    if getattr(args, "donor_reference_all", False):
+        ids, _, _ = inspect_sfh_file(args.dataset)
+        packed_ids = np.load(args.packed_vis / "galaxy_id.npy", mmap_mode="r")
+        valid = np.asarray(
+            np.load(args.packed_vis / "valid.npy", mmap_mode="r"), dtype=bool,
+        )
+        if not np.array_equal(ids, packed_ids):
+            raise ValueError("Packed VIS IDs do not match the training HDF5")
+        bright, _ = bright_row_mask(
+            args.dataset, args.max_vis_mag, "flux_detection_total", "vis_det", True,
+        )
+        eligible = valid & bright
+        if args.exclude_edge_on_axis_ratio_below is not None:
+            eligible &= ~edge_on_exclusion_mask(
+                args.dataset, args.exclude_edge_on_axis_ratio_below,
+                args.exclude_edge_on_probability_above,
+            )
+        rng = np.random.default_rng(args.seed)
+        order = rng.permutation(len(ids))
+        is_validation = np.zeros(len(ids), dtype=bool)
+        is_validation[order[:max(1, round(args.val_fraction * len(ids)))]] = True
+        donor_rows = np.flatnonzero(eligible & ~is_validation & good).astype(np.int64)
     sfh_mean, sfh_scale = fit_sfh_transform(log_sfh, train_rows)
     if args.donor_matching == "mass_window":
         train_pools = mass_window_donor_pools(
-            train_rows, train_rows, mass, args.mass_window,
+            donor_rows, train_rows, mass, args.mass_window,
             args.pool_size, args.seed + 10,
         )
         val_pools = mass_window_donor_pools(
-            train_rows, val_rows, mass, args.mass_window,
+            donor_rows, val_rows, mass, args.mass_window,
             args.pool_size, args.seed + 20,
         )
     else:
         train_pools = matched_donor_pools(
-            train_rows, train_rows, mass, redshift, activity, args.pool_size,
+            donor_rows, train_rows, mass, redshift, activity, args.pool_size,
         )
         val_pools = matched_donor_pools(
-            train_rows, val_rows, mass, redshift, activity, args.pool_size,
+            donor_rows, val_rows, mass, redshift, activity, args.pool_size,
         )
     val_target = np.repeat(val_rows[:, None], val_pools.shape[1], axis=1)
     donor_diagnostics = {
+        "donor_reference_count": int(len(donor_rows)),
         "median_abs_delta_log_mass": float(np.median(np.abs(
             mass[val_pools] - mass[val_target]
         ))),
