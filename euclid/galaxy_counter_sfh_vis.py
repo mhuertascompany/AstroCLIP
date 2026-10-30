@@ -21,14 +21,44 @@ UPSTREAM_URL = "https://github.com/pablomerc/galaxy-counter.git"
 def _upstream_components():
     try:
         from diffusers import UNet2DConditionModel
-        from galaxy_counter.models.double_train_fm_neighbors import ResNetEncoder
+        import timm
         import geomloss
     except ImportError as exc:
         raise ImportError(
             "Install the pinned galaxy-counter source and its diffusers/geomloss "
             "dependencies before using the paper-faithful flow."
         ) from exc
-    return UNet2DConditionModel, ResNetEncoder, geomloss
+    return UNet2DConditionModel, timm, geomloss
+
+
+class ResNetTokenEncoder(nn.Module):
+    """Exact ResNet token wrapper from galaxy-counter at ``UPSTREAM_COMMIT``.
+
+    It is kept here because importing the upstream training module also imports
+    W&B, UMAP and legacy Lightning, which initializes conflicting CUDA/XLA
+    libraries on Rusty before the model can be constructed.
+    """
+
+    def __init__(self, in_channels=1, token_dim=16):
+        super().__init__()
+        _, timm, _ = _upstream_components()
+        self.backbone = timm.create_model(
+            "resnet18", pretrained=False, features_only=True,
+            out_indices=(2, 3, 4),
+        )
+        if in_channels != 3:
+            old = self.backbone.conv1
+            self.backbone.conv1 = nn.Conv2d(
+                in_channels, old.out_channels, kernel_size=old.kernel_size,
+                stride=old.stride, padding=old.padding,
+                bias=old.bias is not None,
+            )
+        self.proj = nn.Conv2d(512, token_dim, kernel_size=1)
+
+    def forward(self, image):
+        feature = self.proj(self.backbone(image)[-1])
+        batch, channels, height, width = feature.shape
+        return feature.view(batch, channels, height * width).permute(0, 2, 1)
 
 
 class SFHTokenEncoder(nn.Module):
@@ -66,15 +96,15 @@ class GalaxyCounterSFHToVIS(nn.Module):
         geometric_weight=0.0, sinkhorn_blur=0.01,
     ):
         super().__init__()
-        UNet2DConditionModel, ResNetEncoder, geomloss = _upstream_components()
+        UNet2DConditionModel, _, geomloss = _upstream_components()
         self.image_size = int(image_size)
         self.geometric_weight = float(geometric_weight)
         self.sfh_common_encoder = SFHTokenEncoder(
             n_sfh_bins, token_dim, sfh_d_model, sfh_layers, sfh_heads,
         )
         # Separate encoders mirror the paper's physics and instrument encoders.
-        self.image_common_encoder = ResNetEncoder(1, token_dim, pretrained=False)
-        self.image_private_encoder = ResNetEncoder(1, token_dim, pretrained=False)
+        self.image_common_encoder = ResNetTokenEncoder(1, token_dim)
+        self.image_private_encoder = ResNetTokenEncoder(1, token_dim)
         widths = tuple(model_channels * value for value in channel_mult)
         attention_down = tuple("CrossAttnDownBlock2D" for _ in widths)
         attention_up = tuple("CrossAttnUpBlock2D" for _ in widths)

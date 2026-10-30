@@ -38,8 +38,8 @@ OUTPUT=${BASE}/runs/galaxy_counter_sfh_vis_${MODE}${TAG:+_${TAG}}
 
 cd "${REPO}"
 python - <<'PY'
-import diffusers, galaxy_counter, geomloss, timm
-print("galaxy-counter imports: OK")
+import diffusers, geomloss, timm
+print("galaxy-counter dependencies: OK")
 print("diffusers:", diffusers.__version__)
 PY
 
