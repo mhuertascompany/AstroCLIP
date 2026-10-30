@@ -15,7 +15,12 @@ from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, Mode
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from torch.utils.data import DataLoader, default_collate
 
-from .counterfactual_dataset import activity_classes, fit_sfh_transform, matched_donor_pools
+from .counterfactual_dataset import (
+    activity_classes,
+    fit_sfh_transform,
+    mass_window_donor_pools,
+    matched_donor_pools,
+)
 from .counterfactual_packed_dataset import PackedCounterfactualDataset
 from .counterfactual_single_neighbor_flow import EuclidSingleNeighborFlow
 from .training_index import edge_on_exclusion_mask, inspect_sfh_file
@@ -69,12 +74,34 @@ def _prepare(args):
     train_rows = train_rows[good[train_rows]]
     val_rows = val_rows[good[val_rows]]
     sfh_mean, sfh_scale = fit_sfh_transform(log_sfh, train_rows)
-    train_pools = matched_donor_pools(
-        train_rows, train_rows, mass, redshift, activity, args.pool_size,
-    )
-    val_pools = matched_donor_pools(
-        train_rows, val_rows, mass, redshift, activity, args.pool_size,
-    )
+    if args.donor_matching == "mass_window":
+        train_pools = mass_window_donor_pools(
+            train_rows, train_rows, mass, args.mass_window,
+            args.pool_size, args.seed + 10,
+        )
+        val_pools = mass_window_donor_pools(
+            train_rows, val_rows, mass, args.mass_window,
+            args.pool_size, args.seed + 20,
+        )
+    else:
+        train_pools = matched_donor_pools(
+            train_rows, train_rows, mass, redshift, activity, args.pool_size,
+        )
+        val_pools = matched_donor_pools(
+            train_rows, val_rows, mass, redshift, activity, args.pool_size,
+        )
+    val_target = np.repeat(val_rows[:, None], val_pools.shape[1], axis=1)
+    donor_diagnostics = {
+        "median_abs_delta_log_mass": float(np.median(np.abs(
+            mass[val_pools] - mass[val_target]
+        ))),
+        "median_abs_delta_redshift": float(np.median(np.abs(
+            redshift[val_pools] - redshift[val_target]
+        ))),
+        "same_activity_fraction": float(np.mean(
+            activity[val_pools] == activity[val_target]
+        )),
+    }
     common = dict(
         path=args.dataset, packed_vis=args.packed_vis,
         sfh_mean=sfh_mean, sfh_scale=sfh_scale,
@@ -89,8 +116,17 @@ def _prepare(args):
         train_rows=train_rows, val_rows=val_rows,
         train_donor_pools=train_pools, val_donor_pools=val_pools,
         activity_class=activity, sfh_mean=sfh_mean, sfh_scale=sfh_scale,
+        donor_median_abs_delta_log_mass=np.float32(
+            donor_diagnostics["median_abs_delta_log_mass"]
+        ),
+        donor_median_abs_delta_redshift=np.float32(
+            donor_diagnostics["median_abs_delta_redshift"]
+        ),
+        donor_same_activity_fraction=np.float32(
+            donor_diagnostics["same_activity_fraction"]
+        ),
     )
-    return train, val, arrays
+    return train, val, arrays, donor_diagnostics
 
 
 class Experiment(L.LightningModule):
@@ -341,6 +377,12 @@ def main():
     parser.add_argument("--exclude-edge-on-axis-ratio-below", type=float, default=0.5)
     parser.add_argument("--exclude-edge-on-probability-above", type=float, default=0.8)
     parser.add_argument("--pool-size", type=int, default=64)
+    parser.add_argument(
+        "--donor-matching",
+        choices=("mass_redshift_activity", "mass_window"),
+        default="mass_redshift_activity",
+    )
+    parser.add_argument("--mass-window", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
@@ -374,12 +416,13 @@ def main():
         parser.error("Output is nonempty; pass --resume or use a new output")
     torch.set_float32_matmul_precision("high")
     L.seed_everything(args.seed, workers=True)
-    train, val, arrays = _prepare(args)
+    train, val, arrays, donor_diagnostics = _prepare(args)
     args.output.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(args.output / "matched_single_neighbors.npz", **arrays)
     (args.output / "run.json").write_text(json.dumps({
         **{key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "train_count": len(train), "val_count": len(val),
+        "donor_diagnostics": donor_diagnostics,
     }, indent=2) + "\n")
     kwargs = dict(
         n_sfh_bins=train.sfh_mean.size, common_dim=args.common_dim,

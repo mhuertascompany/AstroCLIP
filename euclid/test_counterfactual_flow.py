@@ -38,6 +38,21 @@ class CounterfactualDatasetTests(unittest.TestCase):
             self.assertTrue(np.all(activity[donors] == activity[target]))
             self.assertTrue(np.all(np.isin(donors, train)))
 
+    def test_mass_window_pools_ignore_class_and_respect_window(self):
+        from euclid.counterfactual_dataset import mass_window_donor_pools
+
+        train = np.arange(20, dtype=np.int64)
+        query = np.array([3, 9, 15, 20], dtype=np.int64)
+        mass = np.linspace(9.0, 11.0, 21)
+        pools = mass_window_donor_pools(
+            train, query, mass, window=0.5, pool_size=6, seed=17,
+        )
+        self.assertEqual(pools.shape, (4, 6))
+        for target, donors in zip(query, pools):
+            self.assertNotIn(target, donors)
+            self.assertTrue(np.all(np.isin(donors, train)))
+            self.assertTrue(np.all(np.abs(mass[donors] - mass[target]) <= 0.5))
+
     def test_embedding_diagnostics_detect_identity_alignment(self):
         from euclid.export_counterfactual_embeddings import (
             _effective_rank,

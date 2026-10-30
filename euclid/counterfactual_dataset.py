@@ -81,6 +81,48 @@ def matched_donor_pools(train_rows, query_rows, mass, redshift, activity,
     return output
 
 
+def mass_window_donor_pools(train_rows, query_rows, mass, window=0.5,
+                            pool_size=64, seed=42):
+    """Uniformly sample donor pools inside a log-mass window only.
+
+    Redshift and activity class deliberately do not enter this selection.  The
+    sorted-mass index avoids constructing the full query-by-reference distance
+    matrix for the 150k sample.
+    """
+    train_rows = np.asarray(train_rows, dtype=np.int64)
+    query_rows = np.asarray(query_rows, dtype=np.int64)
+    mass = np.asarray(mass, dtype=np.float64)
+    if not np.isfinite(window) or window <= 0:
+        raise ValueError("mass window must be finite and positive")
+    if pool_size < 2:
+        raise ValueError("pool_size must be at least two")
+    valid_train = train_rows[np.isfinite(mass[train_rows])]
+    order = np.argsort(mass[valid_train], kind="stable")
+    sorted_rows = valid_train[order]
+    sorted_mass = mass[sorted_rows]
+    rng = np.random.default_rng(seed)
+    output = np.empty((len(query_rows), pool_size), dtype=np.int64)
+    for position, row in enumerate(query_rows):
+        value = mass[row]
+        if not np.isfinite(value):
+            raise ValueError(f"Nonfinite mass for query row {row}")
+        left = np.searchsorted(sorted_mass, value - window, side="left")
+        right = np.searchsorted(sorted_mass, value + window, side="right")
+        candidates = sorted_rows[left:right]
+        candidates = candidates[candidates != row]
+        if len(candidates) < 2:
+            raise ValueError(
+                f"Fewer than two mass-window donors for query row {row}"
+            )
+        replace = len(candidates) < pool_size
+        output[position] = rng.choice(
+            candidates, size=pool_size, replace=replace,
+        )
+    if np.any(output == query_rows[:, None]):
+        raise RuntimeError("A target appears in its own mass-window donor pool")
+    return output
+
+
 def fit_sfh_transform(log_sfh, train_rows, floor=1e-8):
     clr = weights_to_clr(log_sfh_to_weights(log_sfh[train_rows]), floor)
     mean = clr.mean(0, dtype=np.float64)
