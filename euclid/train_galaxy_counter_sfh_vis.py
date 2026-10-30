@@ -231,6 +231,9 @@ def main():
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--model-channels", type=int, default=128)
+    parser.add_argument("--common-stem-dim", type=int, default=128)
+    parser.add_argument("--common-trunk-layers", type=int, default=2)
+    parser.add_argument("--common-trunk-heads", type=int, default=8)
     parser.add_argument("--geometric-weight", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--control-batches", type=int, default=8)
@@ -259,6 +262,9 @@ def main():
     model = Experiment(dict(
         n_sfh_bins=train.sfh_mean.size, image_size=train.image_size,
         model_channels=args.model_channels, geometric_weight=args.geometric_weight,
+        common_stem_dim=args.common_stem_dim,
+        common_trunk_layers=args.common_trunk_layers,
+        common_trunk_heads=args.common_trunk_heads,
     ), lr=args.lr, control_batches=args.control_batches)
     checkpoint = ModelCheckpoint(
         dirpath=args.output / "checkpoints", monitor="val_loss", mode="min",

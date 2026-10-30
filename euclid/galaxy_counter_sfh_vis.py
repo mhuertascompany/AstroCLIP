@@ -90,6 +90,37 @@ class SFHTokenEncoder(nn.Module):
         return self.projection(self.norm(hidden))
 
 
+class SharedCommonTrunk(nn.Module):
+    """A single common encoder applied after both modality-specific stems."""
+
+    def __init__(self, input_dim=128, output_dim=16, layers=2, heads=8,
+                 tokens=4, dropout=0.1):
+        super().__init__()
+        if input_dim % heads:
+            raise ValueError("Shared common input_dim must be divisible by heads")
+        self.tokens = int(tokens)
+        self.position = nn.Parameter(
+            torch.randn(1, self.tokens, input_dim) * 0.02,
+        )
+        block = nn.TransformerEncoderLayer(
+            d_model=input_dim, nhead=heads, dim_feedforward=4 * input_dim,
+            dropout=dropout, activation="gelu", batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            block, num_layers=layers, norm=nn.LayerNorm(input_dim),
+        )
+        self.output = nn.Linear(input_dim, output_dim)
+
+    def forward(self, tokens):
+        if tokens.ndim != 3 or tokens.shape[1] != self.tokens:
+            raise ValueError(
+                f"Expected common stem tokens shaped (B, {self.tokens}, D); "
+                f"got {tuple(tokens.shape)}"
+            )
+        return self.output(self.transformer(tokens + self.position))
+
+
 class TokenConditionedSFHVelocity(nn.Module):
     """Predict SFH rectified-flow velocity using token cross-attention."""
 
@@ -131,6 +162,7 @@ class GalaxyCounterSFHToVIS(nn.Module):
         self, n_sfh_bins=250, image_size=64, token_dim=16,
         model_channels=128, channel_mult=(1, 2, 4, 4), layers_per_block=2,
         attention_head_dim=8, sfh_d_model=128, sfh_layers=4, sfh_heads=8,
+        common_stem_dim=128, common_trunk_layers=2, common_trunk_heads=8,
         geometric_weight=0.0, sinkhorn_blur=0.01, sfh_loss_weight=1.0,
     ):
         super().__init__()
@@ -138,11 +170,18 @@ class GalaxyCounterSFHToVIS(nn.Module):
         self.image_size = int(image_size)
         self.geometric_weight = float(geometric_weight)
         self.sfh_loss_weight = float(sfh_loss_weight)
-        self.sfh_common_encoder = SFHTokenEncoder(
-            n_sfh_bins, token_dim, sfh_d_model, sfh_layers, sfh_heads,
+        # The raw modalities need different stems, but the representation called
+        # "common" is produced by one weight-shared trunk, matching the paper's
+        # use of a single encoder_1 for either survey.
+        self.sfh_common_stem = SFHTokenEncoder(
+            n_sfh_bins, common_stem_dim, sfh_d_model, sfh_layers, sfh_heads,
         )
-        # Separate encoders mirror the paper's physics and instrument encoders.
-        self.image_common_encoder = ResNetTokenEncoder(1, token_dim)
+        self.image_common_stem = ResNetTokenEncoder(1, common_stem_dim)
+        self.common_trunk = SharedCommonTrunk(
+            input_dim=common_stem_dim, output_dim=token_dim,
+            layers=common_trunk_layers, heads=common_trunk_heads,
+        )
+        # Private encoders remain modality-specific.
         self.image_private_encoder = ResNetTokenEncoder(1, token_dim)
         self.sfh_private_encoder = SFHTokenEncoder(
             n_sfh_bins, token_dim, sfh_d_model, sfh_layers, sfh_heads,
@@ -179,8 +218,8 @@ class GalaxyCounterSFHToVIS(nn.Module):
 
     def target_embeddings(self, image, sfh):
         return {
-            "image_common": self.image_common_encoder(image),
-            "sfh_common": self.sfh_common_encoder(sfh),
+            "image_common": self.common_trunk(self.image_common_stem(image)),
+            "sfh_common": self.common_trunk(self.sfh_common_stem(sfh)),
             "image_private": self.image_private_encoder(image),
             "sfh_private": self.sfh_private_encoder(sfh),
         }
