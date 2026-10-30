@@ -372,6 +372,7 @@ def main():
         parser.error("--wandb-project is required for W&B logging")
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
         parser.error("Output is nonempty; pass --resume or use a new output")
+    torch.set_float32_matmul_precision("high")
     L.seed_everything(args.seed, workers=True)
     train, val, arrays = _prepare(args)
     args.output.mkdir(parents=True, exist_ok=True)

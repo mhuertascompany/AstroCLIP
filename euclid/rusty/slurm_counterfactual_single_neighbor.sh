@@ -23,6 +23,9 @@ set -euo pipefail
 MODE=${1:-smoke}
 GEOMETRIC_WEIGHT=${2:-0.1}
 RUN_TAG=${3:-}
+PREVIEW_EVERY=${PREVIEW_EVERY:-2}
+GEOMETRY_EVERY=${GEOMETRY_EVERY:-2}
+BATCH_SIZE=${BATCH_SIZE:-64}
 if [[ "${MODE}" != smoke && "${MODE}" != full ]]; then
     echo "MODE must be smoke or full" >&2
     exit 2
@@ -55,7 +58,7 @@ EXTRA=()
 if [[ "${MODE}" == smoke ]]; then
     EXTRA=(--smoke --max-pairs 4096 --epochs 2 --batch-size 16 --pool-size 24)
 else
-    EXTRA=(--epochs 100 --batch-size 32 --pool-size 64)
+    EXTRA=(--epochs 100 --batch-size "${BATCH_SIZE}" --pool-size 64)
 fi
 WANDB_ARGS=(--wandb-mode "${WANDB_MODE:-disabled}")
 if [[ "${WANDB_MODE:-disabled}" != disabled ]]; then
@@ -73,6 +76,9 @@ fi
 echo "Repository commit: $(git rev-parse HEAD)"
 echo "Mode: ${MODE}"
 echo "Geometric weight: ${GEOMETRIC_WEIGHT}"
+echo "Batch size: ${BATCH_SIZE}"
+echo "Preview cadence: ${PREVIEW_EVERY} epochs"
+echo "Geometry cadence: ${GEOMETRY_EVERY} epochs"
 echo "Output: ${OUTPUT}"
 python -u -m euclid.train_counterfactual_single_neighbor \
     --dataset "${DATASET}" \
@@ -84,7 +90,8 @@ python -u -m euclid.train_counterfactual_single_neighbor \
     --sfh-d-model 96 --sfh-layers 3 \
     --geometric-weight "${GEOMETRIC_WEIGHT}" --sinkhorn-blur 0.01 \
     --control-batches 8 \
-    --preview-every 5 --preview-samples 6 --preview-steps 32 \
+    --preview-every "${PREVIEW_EVERY}" --preview-samples 6 --preview-steps 32 \
+    --geometry-every "${GEOMETRY_EVERY}" --geometry-samples 512 \
     --max-vis-mag 22 \
     --exclude-edge-on-axis-ratio-below 0.5 \
     --exclude-edge-on-probability-above 0.8 \
