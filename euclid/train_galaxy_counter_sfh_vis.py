@@ -27,8 +27,13 @@ class Experiment(L.LightningModule):
         self.model = GalaxyCounterSFHToVIS(**model_kwargs)
 
     def training_step(self, batch, batch_idx):
-        loss, metrics = self.model.loss(batch)
+        # Match galaxy-counter's idx-parity survey swap: exactly one modality
+        # is the generative anchor on each optimizer step.
+        anchor = "image" if int(self.global_step) % 2 == 0 else "sfh"
+        loss, metrics = self.model.loss(batch, anchor=anchor)
         self.log("train_loss", loss, prog_bar=True, batch_size=len(batch["image"]))
+        self.log("train_anchor_is_image", float(anchor == "image"),
+                 batch_size=len(batch["image"]))
         for name, value in metrics.items():
             self.log(f"train_{name}", value, batch_size=len(batch["image"]))
         return loss
@@ -43,12 +48,24 @@ class Experiment(L.LightningModule):
         sfh_noise = torch.randn(
             batch["sfh"].shape, generator=generator, device=self.device,
         )
-        loss, metrics = self.model.loss(
-            batch, time=time, image_noise=image_noise, sfh_noise=sfh_noise,
+        image_loss, image_metrics = self.model.loss(
+            batch, anchor="image", time=time,
+            image_noise=image_noise, sfh_noise=sfh_noise,
         )
+        sfh_loss, sfh_metrics = self.model.loss(
+            batch, anchor="sfh", time=time,
+            image_noise=image_noise, sfh_noise=sfh_noise,
+        )
+        loss = 0.5 * (image_loss + sfh_loss)
         self.log("val_loss", loss, prog_bar=True, batch_size=count, sync_dist=True)
-        for name, value in metrics.items():
-            self.log(f"val_{name}", value, batch_size=count, sync_dist=True)
+        self.log("val_image_anchor_loss", image_loss, batch_size=count, sync_dist=True)
+        self.log("val_sfh_anchor_loss", sfh_loss, batch_size=count, sync_dist=True)
+        self.log("val_image_flow_loss", image_metrics["image_flow_loss"],
+                 batch_size=count, sync_dist=True)
+        self.log("val_sfh_flow_loss", sfh_metrics["sfh_flow_loss"],
+                 batch_size=count, sync_dist=True)
+        self.log("val_geometric_loss", image_metrics["geometric_loss"],
+                 batch_size=count, sync_dist=True)
         if batch_idx < self.hparams.control_batches:
             for name, common, private in (
                 ("wrong_common", "shuffled", "paired"),
@@ -56,15 +73,26 @@ class Experiment(L.LightningModule):
                 ("wrong_private", "paired", "shuffled"),
                 ("zero_private", "paired", "zero"),
             ):
-                controlled_loss, controlled = self.model.loss(
-                    batch, common, private, time=time,
+                controlled_image_loss, controlled_image = self.model.loss(
+                    batch, "image", common, private, time=time,
                     image_noise=image_noise, sfh_noise=sfh_noise,
                 )
-                self.log(f"val_control_{name}_loss", controlled_loss,
+                controlled_sfh_loss, controlled_sfh = self.model.loss(
+                    batch, "sfh", common, private, time=time,
+                    image_noise=image_noise, sfh_noise=sfh_noise,
+                )
+                self.log(f"val_control_{name}_image_anchor_loss",
+                         controlled_image_loss,
                          batch_size=count, sync_dist=True)
-                for branch in ("image_flow_loss", "sfh_flow_loss"):
-                    self.log(f"val_control_{name}_{branch}", controlled[branch],
-                             batch_size=count, sync_dist=True)
+                self.log(f"val_control_{name}_sfh_anchor_loss",
+                         controlled_sfh_loss,
+                         batch_size=count, sync_dist=True)
+                self.log(f"val_control_{name}_image_flow_loss",
+                         controlled_image["image_flow_loss"],
+                         batch_size=count, sync_dist=True)
+                self.log(f"val_control_{name}_sfh_flow_loss",
+                         controlled_sfh["sfh_flow_loss"],
+                         batch_size=count, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
@@ -223,6 +251,8 @@ def main():
     (args.output / "run.json").write_text(json.dumps({
         **{key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "upstream_url": UPSTREAM_URL, "upstream_commit": UPSTREAM_COMMIT,
+        "anchor_strategy": "alternate_image_sfh_per_optimizer_step",
+        "generative_losses_per_training_step": 1,
         "train_count": len(train), "val_count": len(val),
         "donor_diagnostics": diagnostics,
     }, indent=2) + "\n")
