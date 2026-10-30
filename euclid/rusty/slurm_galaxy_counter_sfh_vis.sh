@@ -17,11 +17,14 @@ set -euo pipefail
 
 # Paper-faithful VIS decoder pilot based on:
 # https://github.com/pablomerc/galaxy-counter @ 19679fa1c40f86cc4e2ce485660076e8add486d5
-# Usage: sbatch euclid/rusty/slurm_galaxy_counter_sfh_vis.sh [smoke|pilot] [tag]
+# Usage: sbatch euclid/rusty/slurm_galaxy_counter_sfh_vis.sh [smoke|pilot|overfit] [tag]
 
 MODE=${1:-smoke}
 TAG=${2:-}
-[[ "${MODE}" == smoke || "${MODE}" == pilot ]] || { echo "MODE must be smoke or pilot" >&2; exit 2; }
+[[ "${MODE}" == smoke || "${MODE}" == pilot || "${MODE}" == overfit ]] || {
+    echo "MODE must be smoke, pilot, or overfit" >&2
+    exit 2
+}
 
 module load python cuda/12.5.1 cudnn/8.9.7.29-12
 source "${RUSTY_VENV:-${HOME}/.sfh_euclid}/bin/activate"
@@ -45,8 +48,19 @@ PY
 
 if [[ "${MODE}" == smoke ]]; then
     EXTRA=(--max-pairs 4096 --epochs 2 --batch-size 8 --pool-size 24 --preview-steps 50)
-else
+    PREVIEW_EVERY=1
+elif [[ "${MODE}" == pilot ]]; then
     EXTRA=(--max-pairs 20000 --epochs 15 --batch-size 16 --pool-size 64 --preview-steps 250)
+    PREVIEW_EVERY=1
+else
+    # Deliberately memorize a tiny fixed dataset to verify that the flow can
+    # causally use common and private conditioning before full-scale training.
+    EXTRA=(
+        --max-pairs 64 --val-fraction 0.125 --epochs 500 --batch-size 8
+        --pool-size 24 --preview-steps 100 --fixed-training-donors
+        --preview-training --validate-every 25
+    )
+    PREVIEW_EVERY=25
 fi
 
 WANDB_ARGS=(--wandb-mode "${WANDB_MODE}")
@@ -64,7 +78,7 @@ python -u -m euclid.train_galaxy_counter_sfh_vis \
     --geometric-weight "${GEOMETRIC_WEIGHT:-0.0}" \
     --donor-matching "${DONOR_MATCHING:-mass_window}" \
     --mass-window "${MASS_WINDOW:-0.5}" \
-    --preview-every 1 --preview-samples 6 --control-batches 8 \
+    --preview-every "${PREVIEW_EVERY}" --preview-samples 6 --control-batches 8 \
     --max-vis-mag 22 --exclude-edge-on-axis-ratio-below 0.5 \
     --exclude-edge-on-probability-above 0.8 \
     "${WANDB_ARGS[@]}" "${EXTRA[@]}"
