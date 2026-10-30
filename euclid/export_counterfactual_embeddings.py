@@ -26,27 +26,42 @@ def _read_rows(dataset, rows):
 
 
 class TargetEmbeddingDataset(Dataset):
-    def __init__(self, stamp_root, galaxy_ids, sfhs, image_size=64, band="VIS"):
+    def __init__(self, stamp_root, galaxy_ids, sfhs, donor_ids, donor_sfhs,
+                 image_size=64, band="VIS"):
         self.stamp_root = Path(stamp_root) / band
         self.galaxy_ids = np.asarray(galaxy_ids, dtype=np.int64)
         self.sfhs = np.asarray(sfhs, dtype=np.float32)
+        self.donor_ids = np.asarray(donor_ids, dtype=np.int64)
+        self.donor_sfhs = np.asarray(donor_sfhs, dtype=np.float32)
         self.image_size = int(image_size)
         self.band = str(band)
+        if self.donor_ids.shape[:1] != (len(self.galaxy_ids),):
+            raise ValueError("One donor set is required per target")
+        if self.donor_sfhs.shape[:2] != self.donor_ids.shape:
+            raise ValueError("Donor ID and SFH arrays are inconsistent")
 
     def __len__(self):
         return len(self.galaxy_ids)
 
-    def __getitem__(self, index):
-        galaxy_id = int(self.galaxy_ids[index])
+    def _image(self, galaxy_id):
         path = self.stamp_root / f"{self.band}_{galaxy_id}.jpg"
         with Image.open(path) as source:
             image = source.convert("L").resize(
                 (self.image_size, self.image_size), Image.Resampling.BICUBIC,
             )
             values = np.asarray(image, dtype=np.float32) / 127.5 - 1.0
+        return torch.from_numpy(values.copy())[None]
+
+    def __getitem__(self, index):
+        galaxy_id = int(self.galaxy_ids[index])
+        donor_images = torch.stack([
+            self._image(int(value)) for value in self.donor_ids[index]
+        ])
         return (
-            torch.from_numpy(values.copy())[None],
+            self._image(galaxy_id),
             torch.from_numpy(self.sfhs[index].copy()),
+            donor_images,
+            torch.from_numpy(self.donor_sfhs[index].copy()),
             galaxy_id,
         )
 
@@ -114,6 +129,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--image-size", type=int, default=64)
+    parser.add_argument("--donors", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     return parser.parse_args()
@@ -129,26 +145,41 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
     with np.load(args.split) as split:
-        rows = np.asarray(split["val_rows"], dtype=np.int64)
+        all_val_rows = np.asarray(split["val_rows"], dtype=np.int64)
+        all_donor_pools = np.asarray(split["val_donor_pools"], dtype=np.int64)
         sfh_mean = np.asarray(split["sfh_mean"], dtype=np.float32)
         sfh_scale = np.asarray(split["sfh_scale"], dtype=np.float32)
         activity_all = np.asarray(split["activity_class"], dtype=np.int8)
+    if not 1 <= args.donors <= all_donor_pools.shape[1]:
+        raise ValueError("donors is incompatible with the saved donor pools")
+    selected = np.arange(len(all_val_rows))
     rng = np.random.default_rng(args.seed)
-    if args.max_objects > 0 and len(rows) > args.max_objects:
-        rows = rng.choice(rows, args.max_objects, replace=False)
-    rows = np.sort(rows)
+    if args.max_objects > 0 and len(selected) > args.max_objects:
+        selected = rng.choice(selected, args.max_objects, replace=False)
+    order = np.argsort(all_val_rows[selected])
+    selected = selected[order]
+    rows = all_val_rows[selected]
+    donor_rows = all_donor_pools[selected, :args.donors]
+    unique_rows = np.unique(np.concatenate((rows, donor_rows.ravel())))
 
     with h5py.File(args.dataset, "r") as source:
-        galaxy_ids = _read_rows(source["galaxy_id"], rows).astype(np.int64)
-        log_sfhs = _read_rows(source["sfh"], rows).astype(np.float32)
+        unique_ids = _read_rows(source["galaxy_id"], unique_rows).astype(np.int64)
+        unique_log_sfhs = _read_rows(source["sfh"], unique_rows).astype(np.float32)
         redshift = _read_rows(source["redshift"], rows).astype(np.float32)
         mass = _read_rows(source["phz_pp_median_stellarmass"], rows).astype(np.float32)
-    clr = weights_to_clr(log_sfh_to_weights(log_sfhs))
-    sfhs = ((clr - sfh_mean) / sfh_scale).astype(np.float32)
+    unique_clr = weights_to_clr(log_sfh_to_weights(unique_log_sfhs))
+    unique_sfhs = ((unique_clr - sfh_mean) / sfh_scale).astype(np.float32)
+    target_positions = np.searchsorted(unique_rows, rows)
+    donor_positions = np.searchsorted(unique_rows, donor_rows)
+    galaxy_ids = unique_ids[target_positions]
+    sfhs = unique_sfhs[target_positions]
+    donor_ids = unique_ids[donor_positions]
+    donor_sfhs = unique_sfhs[donor_positions]
     activity = activity_all[rows]
 
     dataset = TargetEmbeddingDataset(
-        args.stamps, galaxy_ids, sfhs, image_size=args.image_size,
+        args.stamps, galaxy_ids, sfhs, donor_ids, donor_sfhs,
+        image_size=args.image_size,
     )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
@@ -169,9 +200,11 @@ def main():
     )}
     encoded_ids = []
     with torch.inference_mode():
-        for images, batch_sfhs, batch_ids in loader:
+        for images, batch_sfhs, donor_images, batch_donor_sfhs, batch_ids in loader:
             images = images.to(device, non_blocking=True)
             batch_sfhs = batch_sfhs.to(device, non_blocking=True)
+            donor_images = donor_images.to(device, non_blocking=True)
+            batch_donor_sfhs = batch_donor_sfhs.to(device, non_blocking=True)
             with torch.autocast(
                 device_type=device.type, dtype=torch.float16,
                 enabled=device.type == "cuda",
@@ -182,11 +215,18 @@ def main():
                 output["sfh_common"].append(
                     model.sfh_common_encoder(batch_sfhs).float().cpu().numpy()
                 )
+                batch, donors = donor_images.shape[:2]
+                image_prior = model.image_prior_encoder(
+                    donor_images.flatten(0, 1)
+                ).unflatten(0, (batch, donors))
+                sfh_prior = model.sfh_prior_encoder(
+                    batch_donor_sfhs.flatten(0, 1)
+                ).unflatten(0, (batch, donors))
                 output["image_prior"].append(
-                    model.image_prior_encoder(images).float().cpu().numpy()
+                    model.image_prior_pool(image_prior).float().cpu().numpy()
                 )
                 output["sfh_prior"].append(
-                    model.sfh_prior_encoder(batch_sfhs).float().cpu().numpy()
+                    model.sfh_prior_pool(sfh_prior).float().cpu().numpy()
                 )
             encoded_ids.append(np.asarray(batch_ids, dtype=np.int64))
     encoded_ids = np.concatenate(encoded_ids)
@@ -219,6 +259,7 @@ def main():
     diagnostics = {
         "checkpoint": str(args.checkpoint),
         "n_objects": int(len(rows)),
+        "donors_per_object": int(args.donors),
         "common": {
             "image_effective_rank": _effective_rank(common_image),
             "sfh_effective_rank": _effective_rank(common_sfh),

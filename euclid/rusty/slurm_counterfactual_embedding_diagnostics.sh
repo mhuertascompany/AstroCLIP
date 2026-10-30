@@ -52,9 +52,10 @@ python -u -m euclid.export_counterfactual_embeddings \
     --split "${RUN}/matched_donors.npz" \
     --output-dir "${OUTPUT}" \
     --max-objects 10000 \
-    --batch-size 512 \
+    --batch-size 128 \
     --workers "${SLURM_CPUS_PER_TASK}" \
     --image-size 64 \
+    --donors 8 \
     --device cuda
 
 python -u -m euclid.umap_zoobot_clip \
