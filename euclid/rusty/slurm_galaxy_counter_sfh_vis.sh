@@ -58,7 +58,7 @@ else
     EXTRA=(
         --max-pairs 64 --val-fraction 0.125 --epochs 500 --batch-size 8
         --pool-size 24 --preview-steps 100 --fixed-training-donors
-        --preview-training --validate-every 25
+        --preview-training --validate-every 25 --donor-reference-all
     )
     PREVIEW_EVERY=25
 fi
