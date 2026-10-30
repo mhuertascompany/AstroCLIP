@@ -163,13 +163,21 @@ class GalaxyCounterSFHToVIS(nn.Module):
         model_channels=128, channel_mult=(1, 2, 4, 4), layers_per_block=2,
         attention_head_dim=8, sfh_d_model=128, sfh_layers=4, sfh_heads=8,
         common_stem_dim=128, common_trunk_layers=2, common_trunk_heads=8,
-        geometric_weight=0.0, sinkhorn_blur=0.01, sfh_loss_weight=1.0,
+        geometric_weight=0.0, sinkhorn_blur=0.01,
+        geometry_objective="sinkhorn", geometry_variance_weight=1.0,
+        sfh_loss_weight=1.0,
     ):
         super().__init__()
         UNet2DConditionModel, _, geomloss = _upstream_components()
         self.image_size = int(image_size)
         self.geometric_weight = float(geometric_weight)
+        self.geometry_objective = str(geometry_objective)
+        self.geometry_variance_weight = float(geometry_variance_weight)
         self.sfh_loss_weight = float(sfh_loss_weight)
+        if self.geometry_objective not in {"sinkhorn", "paired_cosine_variance"}:
+            raise ValueError(
+                "geometry_objective must be sinkhorn or paired_cosine_variance"
+            )
         # The raw modalities need different stems, but the representation called
         # "common" is produced by one weight-shared trunk, matching the paper's
         # use of a single encoder_1 for either survey.
@@ -200,7 +208,7 @@ class GalaxyCounterSFHToVIS(nn.Module):
             layers=sfh_layers, heads=sfh_heads,
         )
         self.geom_loss_fn = None
-        if self.geometric_weight > 0:
+        if self.geometric_weight > 0 and self.geometry_objective == "sinkhorn":
             self.geom_loss_fn = geomloss.SamplesLoss(
                 loss="sinkhorn", p=2, blur=float(sinkhorn_blur),
                 backend="tensorized", debias=True,
@@ -278,15 +286,34 @@ class GalaxyCounterSFHToVIS(nn.Module):
             )
             generative = self.sfh_loss_weight * sfh_loss
         geometric = generative.new_zeros(())
-        if self.geom_loss_fn is not None:
+        geometry_pair = generative.new_zeros(())
+        geometry_variance = generative.new_zeros(())
+        if self.geometric_weight > 0:
             image_common = embeddings["image_common"].flatten(1).float().contiguous()
             sfh_common = embeddings["sfh_common"].flatten(1).float().contiguous()
-            geometric = self.geom_loss_fn(image_common, sfh_common)
+            if self.geometry_objective == "sinkhorn":
+                geometric = self.geom_loss_fn(image_common, sfh_common)
+            else:
+                geometry_pair = (
+                    1 - F.cosine_similarity(image_common, sfh_common, dim=1)
+                ).mean()
+                image_std = torch.sqrt(image_common.var(dim=0) + 1e-4)
+                sfh_std = torch.sqrt(sfh_common.var(dim=0) + 1e-4)
+                geometry_variance = 0.5 * (
+                    F.relu(1 - image_std).mean()
+                    + F.relu(1 - sfh_std).mean()
+                )
+                geometric = (
+                    geometry_pair
+                    + self.geometry_variance_weight * geometry_variance
+                )
         total = generative + self.geometric_weight * geometric
         return total, {
             "image_flow_loss": image_loss.detach(),
             "sfh_flow_loss": sfh_loss.detach(),
             "geometric_loss": geometric.detach(),
+            "geometry_pair_loss": geometry_pair.detach(),
+            "geometry_variance_loss": geometry_variance.detach(),
         }
 
     @torch.inference_mode()

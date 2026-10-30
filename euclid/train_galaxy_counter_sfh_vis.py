@@ -66,6 +66,11 @@ class Experiment(L.LightningModule):
                  batch_size=count, sync_dist=True)
         self.log("val_geometric_loss", image_metrics["geometric_loss"],
                  batch_size=count, sync_dist=True)
+        self.log("val_geometry_pair_loss", image_metrics["geometry_pair_loss"],
+                 batch_size=count, sync_dist=True)
+        self.log("val_geometry_variance_loss",
+                 image_metrics["geometry_variance_loss"],
+                 batch_size=count, sync_dist=True)
         if batch_idx < self.hparams.control_batches:
             for name, common, private in (
                 ("wrong_common", "shuffled", "paired"),
@@ -179,11 +184,18 @@ class Preview(L.Callback):
             "zero private": "#CC79A7",
         }
         for index, axis in enumerate(axes[:, 0]):
-            axis.plot(x, target[index], color="black", lw=1.6, label="target")
             axis.plot(x, donor[index], color="0.65", lw=1, ls="--",
                       label="private donor")
             for name, values in generated_sfh.items():
-                axis.plot(x, values[index], color=colors[name], lw=1, label=name)
+                if name != "paired":
+                    axis.plot(x, values[index], color=colors[name], lw=1,
+                              alpha=0.7, label=name)
+            # Plot paired and target last so exact overlap with a control cannot
+            # make the scientifically important curves disappear.
+            axis.plot(x, generated_sfh["paired"][index], color=colors["paired"],
+                      lw=2.2, label="paired", zorder=9)
+            axis.plot(x, target[index], color="black", lw=1.8,
+                      label="target", zorder=10)
         axes[0, 0].legend(ncol=4, fontsize=7)
         axes[-1, 0].set_xlabel("Fractional lookback time")
         figure.tight_layout()
@@ -236,6 +248,11 @@ def main():
     parser.add_argument("--common-trunk-layers", type=int, default=2)
     parser.add_argument("--common-trunk-heads", type=int, default=8)
     parser.add_argument("--geometric-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--geometry-objective",
+        choices=("sinkhorn", "paired_cosine_variance"), default="sinkhorn",
+    )
+    parser.add_argument("--geometry-variance-weight", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--control-batches", type=int, default=8)
     parser.add_argument("--fixed-training-donors", action="store_true")
@@ -273,6 +290,8 @@ def main():
         common_stem_dim=args.common_stem_dim,
         common_trunk_layers=args.common_trunk_layers,
         common_trunk_heads=args.common_trunk_heads,
+        geometry_objective=args.geometry_objective,
+        geometry_variance_weight=args.geometry_variance_weight,
     ), lr=args.lr, control_batches=args.control_batches)
     checkpoint = ModelCheckpoint(
         dirpath=args.output / "checkpoints", monitor="val_loss", mode="min",

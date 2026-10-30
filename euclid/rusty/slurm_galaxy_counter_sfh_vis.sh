@@ -76,6 +76,8 @@ python -u -m euclid.train_galaxy_counter_sfh_vis \
     --dataset "${DATASET}" --packed-vis "${PACKED}" --output "${OUTPUT}" \
     --workers "${SLURM_CPUS_PER_TASK}" --model-channels 128 \
     --geometric-weight "${GEOMETRIC_WEIGHT:-0.0}" \
+    --geometry-objective "${GEOMETRY_OBJECTIVE:-sinkhorn}" \
+    --geometry-variance-weight "${GEOMETRY_VARIANCE_WEIGHT:-1.0}" \
     --donor-matching "${DONOR_MATCHING:-mass_window}" \
     --mass-window "${MASS_WINDOW:-0.5}" \
     --preview-every "${PREVIEW_EVERY}" --preview-samples 6 --control-batches 8 \
