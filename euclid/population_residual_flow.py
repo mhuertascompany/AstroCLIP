@@ -75,14 +75,36 @@ class PopulationFlow(nn.Module):
         covariates = batch["covariates"]
         if mode == "shuffled":
             return covariates.roll(1, 0)
+        if mode == "counterfactual":
+            # Choose a deliberately different activity class and, within that
+            # class, the most distant mass/redshift condition in this batch.
+            # A simple roll often preserves class and nearby physical values.
+            labels = covariates[:, 2:].argmax(1)
+            physical = covariates[:, :2]
+            class_mismatch = labels[:, None] != labels[None, :]
+            distance = torch.cdist(physical.float(), physical.float())
+            distance = distance.masked_fill(~class_mismatch, -torch.inf)
+            available = class_mismatch.any(1)
+            result = covariates[distance.argmax(1)].clone()
+            # Very small final validation batches can contain one class only.
+            # Retain their physical values and rotate the one-hot class rather
+            # than dropping the control or failing validation.
+            if not torch.all(available):
+                result[~available] = covariates[~available]
+                result[~available, 2:] = 0
+                replacement = (labels[~available] + 1) % 3
+                result[~available, 2 + replacement] = 1
+            return result
         if mode == "zero":
             return torch.zeros_like(covariates)
         if mode != "paired":
-            raise ValueError("mode must be paired, shuffled, or zero")
+            raise ValueError(
+                "mode must be paired, shuffled, counterfactual, or zero"
+            )
         return covariates
 
     def loss(self, batch, anchor, time=None, noise=None,
-             condition_dropout=0.0, mode="paired"):
+             condition_dropout=0.0, mode="paired", reduction="mean"):
         target = batch[anchor]
         if time is None:
             time = torch.rand(len(target), device=target.device)
@@ -94,7 +116,15 @@ class PopulationFlow(nn.Module):
             covariates = torch.where(drop[:, None], torch.zeros_like(covariates), covariates)
         state, velocity = flow_pair(target, time, noise)
         prediction = self.velocity.predict(anchor, state, time, covariates)
-        return F.mse_loss(prediction.float(), velocity.float())
+        per_element = F.mse_loss(
+            prediction.float(), velocity.float(), reduction="none",
+        )
+        per_example = per_element.flatten(1).mean(1)
+        if reduction == "none":
+            return per_example
+        if reduction != "mean":
+            raise ValueError("reduction must be mean or none")
+        return per_example.mean()
 
     @torch.inference_mode()
     def sample(self, batch, anchor, steps=64, noise=None, mode="paired"):

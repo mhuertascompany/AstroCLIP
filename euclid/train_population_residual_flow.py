@@ -73,17 +73,23 @@ def _population_kwargs(args, n_sfh_bins):
 
 
 class PopulationExperiment(L.LightningModule):
-    def __init__(self, model_kwargs, lr=1e-4, condition_dropout=0.15,
-                 control_batches=8):
+    def __init__(self, model_kwargs, lr=1e-4, condition_dropout=0.0,
+                 control_batches=8, time_power=2.0):
         super().__init__()
+        if time_power <= 0:
+            raise ValueError("time_power must be positive")
         self.save_hyperparameters()
         self.model = PopulationFlow(**model_kwargs)
 
     def training_step(self, batch, batch_idx):
         anchor = "image" if self.global_step % 2 == 0 else "sfh"
-        loss = self.model.loss(
-            batch, anchor, condition_dropout=self.hparams.condition_dropout,
+        # x_t is pure noise at t=0.  Biasing training toward this end prevents
+        # the model from using a nearly revealed target as a shortcut.
+        time_value = torch.rand(len(batch[anchor]), device=self.device).pow(
+            self.hparams.time_power,
         )
+        loss = self.model.loss(batch, anchor, time=time_value,
+                               condition_dropout=self.hparams.condition_dropout)
         self.log("train_loss", loss, prog_bar=True, batch_size=len(batch[anchor]))
         self.log(f"train_{anchor}_loss", loss, batch_size=len(batch[anchor]))
         return loss
@@ -99,18 +105,45 @@ class PopulationExperiment(L.LightningModule):
             noise = torch.randn(
                 batch[anchor].shape, generator=generator, device=self.device,
             )
-            loss = self.model.loss(batch, anchor, time_value, noise)
+            per_example = self.model.loss(
+                batch, anchor, time_value, noise, reduction="none",
+            )
+            loss = per_example.mean()
             self.log(f"val_{anchor}_loss", loss, batch_size=count, sync_dist=True)
             losses.append(loss)
             if batch_idx < self.hparams.control_batches:
-                for mode in ("shuffled", "zero"):
-                    control = self.model.loss(
+                for mode in ("shuffled", "counterfactual", "zero"):
+                    control_values = self.model.loss(
                         batch, anchor, time_value, noise, mode=mode,
+                        reduction="none",
                     )
+                    control = control_values.mean()
                     self.log(
                         f"val_control_{anchor}_{mode}_loss", control,
                         batch_size=count, sync_dist=True,
                     )
+                    self.log(
+                        f"val_control_{anchor}_{mode}_penalty",
+                        control - loss, batch_size=count, sync_dist=True,
+                    )
+                edges = (0.0, 0.25, 0.5, 0.75, 1.00001)
+                counterfactual_values = self.model.loss(
+                    batch, anchor, time_value, noise,
+                    mode="counterfactual", reduction="none",
+                )
+                for index, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
+                    selected = (time_value >= left) & (time_value < right)
+                    if selected.any():
+                        self.log(
+                            f"val_{anchor}_paired_t{index}",
+                            per_example[selected].mean(), batch_size=int(selected.sum()),
+                            sync_dist=True,
+                        )
+                        self.log(
+                            f"val_{anchor}_counterfactual_t{index}",
+                            counterfactual_values[selected].mean(),
+                            batch_size=int(selected.sum()), sync_dist=True,
+                        )
         value = torch.stack(losses).mean()
         self.log("val_loss", value, prog_bar=True, batch_size=len(batch["image"]), sync_dist=True)
 
@@ -202,16 +235,26 @@ class Preview(L.Callback):
             ) for anchor in ("image", "sfh")
         }
         if self.phase == "population":
-            image_rows = {
-                mode: module.model.sample(
-                    batch, "image", self.steps, noises["image"], mode,
-                ).cpu() for mode in ("paired", "shuffled", "zero")
-            }
-            sfh_rows = {
-                mode: module.model.sample(
-                    batch, "sfh", self.steps, noises["sfh"], mode,
-                ).cpu() for mode in ("paired", "shuffled", "zero")
-            }
+            conditions = {"observed": batch["covariates"]}
+            for label, name in enumerate(("class Q", "class transition", "class SF")):
+                values = batch["covariates"].clone()
+                values[:, 2:] = 0
+                values[:, 2 + label] = 1
+                conditions[name] = values
+            for column, name in ((0, "mass"), (1, "redshift")):
+                for offset, suffix in ((-1.0, "-1 sigma"), (1.0, "+1 sigma")):
+                    values = batch["covariates"].clone()
+                    values[:, column] += offset
+                    conditions[f"{name} {suffix}"] = values
+            image_rows, sfh_rows = {}, {}
+            for name, values in conditions.items():
+                conditioned = {**batch, "covariates": values}
+                image_rows[name] = module.model.sample(
+                    conditioned, "image", self.steps, noises["image"], "paired",
+                ).cpu()
+                sfh_rows[name] = module.model.sample(
+                    conditioned, "sfh", self.steps, noises["sfh"], "paired",
+                ).cpu()
         else:
             image_rows = {
                 mode: module.model.sample(
@@ -252,8 +295,8 @@ class Preview(L.Callback):
         figure, axes = plt.subplots(
             len(target), 1, figsize=(8, 2 * len(target)), squeeze=False, sharex=True,
         )
-        colors = {"paired": "#0072B2",
-                  "shuffled": "#D55E00", "zero": "#999999"}
+        palette = plt.get_cmap("tab10")
+        colors = {name: palette(index % 10) for index, name in enumerate(curves)}
         for index, axis in enumerate(axes[:, 0]):
             axis.plot(x, target[index], color="black", lw=1.5, label="target")
             for label, values in curves.items():
@@ -381,7 +424,11 @@ def main():
     parser.add_argument("--sfh-layers", type=int, default=3)
     parser.add_argument("--alignment-weight", type=float, default=0.1)
     parser.add_argument("--variance-weight", type=float, default=1.0)
-    parser.add_argument("--condition-dropout", type=float, default=0.15)
+    parser.add_argument("--condition-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--population-time-power", type=float, default=2.0,
+        help="Train with t = Uniform(0,1)^power; values >1 emphasize noise-dominated times.",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--control-batches", type=int, default=8)
     parser.add_argument("--preview-every", type=int, default=2)
@@ -417,6 +464,7 @@ def main():
         model = PopulationExperiment(
             _population_kwargs(args, train.sfh_mean.size), args.lr,
             args.condition_dropout, args.control_batches,
+            args.population_time_power,
         )
     else:
         kwargs = dict(

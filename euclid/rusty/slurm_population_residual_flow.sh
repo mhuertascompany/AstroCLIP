@@ -102,7 +102,8 @@ python -u -m euclid.train_population_residual_flow \
     --image-encoder-base 16 --image-flow-base 16 \
     --sfh-d-model 96 --sfh-heads 4 --sfh-layers 3 \
     --alignment-weight 0.1 --variance-weight 1.0 \
-    --condition-dropout 0.15 \
+    --condition-dropout "${CONDITION_DROPOUT:-0.0}" \
+    --population-time-power "${POPULATION_TIME_POWER:-2.0}" \
     --control-batches 8 \
     --preview-every "${PREVIEW_EVERY}" --preview-samples 6 --preview-steps 32 \
     --embedding-every "${EMBEDDING_EVERY}" --embedding-samples 512 \
