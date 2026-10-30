@@ -205,8 +205,10 @@ class GalaxyCounterSFHToVIS(nn.Module):
             state, time * 1000.0, encoder_hidden_states=context,
         ).sample
 
-    def loss(self, batch, common_mode="paired", private_mode="paired",
+    def loss(self, batch, anchor, common_mode="paired", private_mode="paired",
              time=None, image_noise=None, sfh_noise=None):
+        if anchor not in {"image", "sfh"}:
+            raise ValueError("anchor must be 'image' or 'sfh'")
         image = batch["image"]
         sfh = batch["sfh"]
         image_context, sfh_context, embeddings = self.encode(
@@ -217,23 +219,31 @@ class GalaxyCounterSFHToVIS(nn.Module):
             time = torch.rand(len(image), device=image.device)
         image_noise = torch.randn_like(image) if image_noise is None else image_noise
         sfh_noise = torch.randn_like(sfh) if sfh_noise is None else sfh_noise
-        image_time = time[:, None, None, None]
-        sfh_time = time[:, None]
-        image_state = (1 - image_time) * image_noise + image_time * image
-        sfh_state = (1 - sfh_time) * sfh_noise + sfh_time * sfh
-        image_prediction = self(image_state, time, image_context)
-        sfh_prediction = self.sfh_velocity_model(sfh_state, time, sfh_context)
-        image_loss = F.mse_loss(image_prediction.float(), (image - image_noise).float())
-        sfh_loss = F.mse_loss(sfh_prediction.float(), (sfh - sfh_noise).float())
-        geometric = image_loss.new_zeros(())
+        zero = image.new_zeros((), dtype=torch.float32)
+        image_loss = zero
+        sfh_loss = zero
+        if anchor == "image":
+            image_time = time[:, None, None, None]
+            image_state = (1 - image_time) * image_noise + image_time * image
+            image_prediction = self(image_state, time, image_context)
+            image_loss = F.mse_loss(
+                image_prediction.float(), (image - image_noise).float(),
+            )
+            generative = image_loss
+        else:
+            sfh_time = time[:, None]
+            sfh_state = (1 - sfh_time) * sfh_noise + sfh_time * sfh
+            sfh_prediction = self.sfh_velocity_model(sfh_state, time, sfh_context)
+            sfh_loss = F.mse_loss(
+                sfh_prediction.float(), (sfh - sfh_noise).float(),
+            )
+            generative = self.sfh_loss_weight * sfh_loss
+        geometric = generative.new_zeros(())
         if self.geom_loss_fn is not None:
             image_common = embeddings["image_common"].flatten(1).float().contiguous()
             sfh_common = embeddings["sfh_common"].flatten(1).float().contiguous()
             geometric = self.geom_loss_fn(image_common, sfh_common)
-        total = (
-            image_loss + self.sfh_loss_weight * sfh_loss
-            + self.geometric_weight * geometric
-        )
+        total = generative + self.geometric_weight * geometric
         return total, {
             "image_flow_loss": image_loss.detach(),
             "sfh_flow_loss": sfh_loss.detach(),
