@@ -1,10 +1,12 @@
-"""SFH-conditioned VIS flow using the published ``galaxy-counter`` decoder.
+"""Bidirectional SFH/VIS flow using the published ``galaxy-counter`` design.
 
 This is deliberately a thin cross-modal adapter around galaxy-counter commit
 19679fa1c40f86cc4e2ce485660076e8add486d5.  The ResNet token encoder,
 Diffusers cross-attention U-Net, rectified-flow path, Euler sampler, and
-Sinkhorn geometry loss follow that implementation.  Only the paired
-same-galaxy image encoder is replaced by a one-dimensional SFH token encoder.
+Sinkhorn geometry loss follow that implementation.  The image-to-image
+same-galaxy branch is generalized to a genuinely multimodal pair: each raw
+modality is reconstructed from the other modality's common tokens and one
+same-modality donor's private tokens.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from .sfh_conditional_diffusion import sinusoidal_time_embedding
 
 
 UPSTREAM_COMMIT = "19679fa1c40f86cc4e2ce485660076e8add486d5"
@@ -86,25 +90,63 @@ class SFHTokenEncoder(nn.Module):
         return self.projection(self.norm(hidden))
 
 
+class TokenConditionedSFHVelocity(nn.Module):
+    """Predict SFH rectified-flow velocity using token cross-attention."""
+
+    def __init__(self, n_bins=250, context_dim=16, d_model=128, layers=4,
+                 heads=8, dropout=0.1):
+        super().__init__()
+        self.n_bins = int(n_bins)
+        self.input = nn.Linear(1, d_model)
+        self.position = nn.Parameter(torch.randn(1, self.n_bins, d_model) * 0.02)
+        self.time = nn.Sequential(
+            nn.Linear(64, d_model), nn.SiLU(), nn.Linear(d_model, d_model),
+        )
+        self.context = nn.Linear(context_dim, d_model)
+        block = nn.TransformerDecoderLayer(
+            d_model=d_model, nhead=heads, dim_feedforward=4 * d_model,
+            dropout=dropout, activation="gelu", batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerDecoder(
+            block, num_layers=layers, norm=nn.LayerNorm(d_model),
+        )
+        self.output = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, 1))
+
+    def forward(self, state, time, context):
+        if state.ndim != 2 or state.shape[1] != self.n_bins:
+            raise ValueError(
+                f"Expected SFH state shaped (B, {self.n_bins}); got {tuple(state.shape)}"
+            )
+        query = self.input(state[..., None]) + self.position
+        query = query + self.time(sinusoidal_time_embedding(time))[:, None]
+        hidden = self.transformer(query, self.context(context))
+        return self.output(hidden).squeeze(-1)
+
+
 class GalaxyCounterSFHToVIS(nn.Module):
-    """Generate a VIS anchor from paired SFH tokens and one donor VIS prior."""
+    """Reconstruct both raw modalities from common and private information."""
 
     def __init__(
         self, n_sfh_bins=250, image_size=64, token_dim=16,
         model_channels=128, channel_mult=(1, 2, 4, 4), layers_per_block=2,
         attention_head_dim=8, sfh_d_model=128, sfh_layers=4, sfh_heads=8,
-        geometric_weight=0.0, sinkhorn_blur=0.01,
+        geometric_weight=0.0, sinkhorn_blur=0.01, sfh_loss_weight=1.0,
     ):
         super().__init__()
         UNet2DConditionModel, _, geomloss = _upstream_components()
         self.image_size = int(image_size)
         self.geometric_weight = float(geometric_weight)
+        self.sfh_loss_weight = float(sfh_loss_weight)
         self.sfh_common_encoder = SFHTokenEncoder(
             n_sfh_bins, token_dim, sfh_d_model, sfh_layers, sfh_heads,
         )
         # Separate encoders mirror the paper's physics and instrument encoders.
         self.image_common_encoder = ResNetTokenEncoder(1, token_dim)
         self.image_private_encoder = ResNetTokenEncoder(1, token_dim)
+        self.sfh_private_encoder = SFHTokenEncoder(
+            n_sfh_bins, token_dim, sfh_d_model, sfh_layers, sfh_heads,
+        )
         widths = tuple(model_channels * value for value in channel_mult)
         attention_down = tuple("CrossAttnDownBlock2D" for _ in widths)
         attention_up = tuple("CrossAttnUpBlock2D" for _ in widths)
@@ -113,6 +155,10 @@ class GalaxyCounterSFHToVIS(nn.Module):
             layers_per_block=layers_per_block, block_out_channels=widths,
             down_block_types=attention_down, up_block_types=attention_up,
             cross_attention_dim=token_dim, attention_head_dim=attention_head_dim,
+        )
+        self.sfh_velocity_model = TokenConditionedSFHVelocity(
+            n_bins=n_sfh_bins, context_dim=token_dim, d_model=sfh_d_model,
+            layers=sfh_layers, heads=sfh_heads,
         )
         self.geom_loss_fn = None
         if self.geometric_weight > 0:
@@ -131,10 +177,28 @@ class GalaxyCounterSFHToVIS(nn.Module):
             return torch.zeros_like(value)
         raise ValueError("mode must be paired, shuffled, or zero")
 
-    def encode(self, image, sfh, donor_image, common_mode="paired", private_mode="paired"):
-        sfh_common = self._control(self.sfh_common_encoder(sfh), common_mode)
-        image_private = self._control(self.image_private_encoder(donor_image), private_mode)
-        return torch.cat((sfh_common, image_private), dim=1)
+    def target_embeddings(self, image, sfh):
+        return {
+            "image_common": self.image_common_encoder(image),
+            "sfh_common": self.sfh_common_encoder(sfh),
+            "image_private": self.image_private_encoder(image),
+            "sfh_private": self.sfh_private_encoder(sfh),
+        }
+
+    def encode(self, image, sfh, donor_image, donor_sfh,
+               common_mode="paired", private_mode="paired"):
+        embeddings = self.target_embeddings(image, sfh)
+        sfh_common = self._control(embeddings["sfh_common"], common_mode)
+        image_common = self._control(embeddings["image_common"], common_mode)
+        image_private = self._control(
+            self.image_private_encoder(donor_image), private_mode,
+        )
+        sfh_private = self._control(
+            self.sfh_private_encoder(donor_sfh), private_mode,
+        )
+        image_context = torch.cat((sfh_common, image_private), dim=1)
+        sfh_context = torch.cat((image_common, sfh_private), dim=1)
+        return image_context, sfh_context, embeddings
 
     def forward(self, state, time, context):
         return self.velocity_model(
@@ -142,41 +206,61 @@ class GalaxyCounterSFHToVIS(nn.Module):
         ).sample
 
     def loss(self, batch, common_mode="paired", private_mode="paired",
-             time=None, noise=None):
+             time=None, image_noise=None, sfh_noise=None):
         image = batch["image"]
-        context = self.encode(
-            image, batch["sfh"], batch["donor_image"], common_mode, private_mode,
+        sfh = batch["sfh"]
+        image_context, sfh_context, embeddings = self.encode(
+            image, sfh, batch["donor_image"], batch["donor_sfh"],
+            common_mode, private_mode,
         )
         if time is None:
             time = torch.rand(len(image), device=image.device)
-        if noise is None:
-            noise = torch.randn_like(image)
-        expanded = time[:, None, None, None]
-        state = (1 - expanded) * noise + expanded * image
-        target_velocity = image - noise
-        prediction = self(state, time, context)
-        generative = F.mse_loss(prediction.float(), target_velocity.float())
-        geometric = generative.new_zeros(())
+        image_noise = torch.randn_like(image) if image_noise is None else image_noise
+        sfh_noise = torch.randn_like(sfh) if sfh_noise is None else sfh_noise
+        image_time = time[:, None, None, None]
+        sfh_time = time[:, None]
+        image_state = (1 - image_time) * image_noise + image_time * image
+        sfh_state = (1 - sfh_time) * sfh_noise + sfh_time * sfh
+        image_prediction = self(image_state, time, image_context)
+        sfh_prediction = self.sfh_velocity_model(sfh_state, time, sfh_context)
+        image_loss = F.mse_loss(image_prediction.float(), (image - image_noise).float())
+        sfh_loss = F.mse_loss(sfh_prediction.float(), (sfh - sfh_noise).float())
+        geometric = image_loss.new_zeros(())
         if self.geom_loss_fn is not None:
-            image_common = self.image_common_encoder(image).flatten(1).float().contiguous()
-            sfh_common = self.sfh_common_encoder(batch["sfh"]).flatten(1).float().contiguous()
+            image_common = embeddings["image_common"].flatten(1).float().contiguous()
+            sfh_common = embeddings["sfh_common"].flatten(1).float().contiguous()
             geometric = self.geom_loss_fn(image_common, sfh_common)
-        total = generative + self.geometric_weight * geometric
-        return total, {"generative_loss": generative.detach(), "geometric_loss": geometric.detach()}
+        total = (
+            image_loss + self.sfh_loss_weight * sfh_loss
+            + self.geometric_weight * geometric
+        )
+        return total, {
+            "image_flow_loss": image_loss.detach(),
+            "sfh_flow_loss": sfh_loss.detach(),
+            "geometric_loss": geometric.detach(),
+        }
 
     @torch.inference_mode()
     def sample(self, batch, common_mode="paired", private_mode="paired",
-               steps=250, noise=None):
-        context = self.encode(
+               steps=250, image_noise=None, sfh_noise=None):
+        image_context, sfh_context, _ = self.encode(
             batch["image"], batch["sfh"], batch["donor_image"],
-            common_mode, private_mode,
+            batch["donor_sfh"], common_mode, private_mode,
         )
-        state = torch.randn_like(batch["image"]) if noise is None else noise.clone()
+        image = (
+            torch.randn_like(batch["image"]) if image_noise is None
+            else image_noise.clone()
+        )
+        sfh = (
+            torch.randn_like(batch["sfh"]) if sfh_noise is None
+            else sfh_noise.clone()
+        )
         delta = 1.0 / int(steps)
         for index in range(int(steps)):
             time = torch.full(
-                (len(state),), index * delta, device=state.device,
+                (len(image),), (index + 0.5) * delta, device=image.device,
                 dtype=torch.float32,
             )
-            state.add_(delta * self(state, time, context))
-        return state
+            image.add_(delta * self(image, time, image_context))
+            sfh.add_(delta * self.sfh_velocity_model(sfh, time, sfh_context))
+        return image, sfh

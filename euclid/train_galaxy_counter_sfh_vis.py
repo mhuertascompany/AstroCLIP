@@ -37,8 +37,15 @@ class Experiment(L.LightningModule):
         count = len(batch["image"])
         generator = torch.Generator(device=self.device).manual_seed(10000 + batch_idx)
         time = torch.rand(count, generator=generator, device=self.device)
-        noise = torch.randn(batch["image"].shape, generator=generator, device=self.device)
-        loss, metrics = self.model.loss(batch, time=time, noise=noise)
+        image_noise = torch.randn(
+            batch["image"].shape, generator=generator, device=self.device,
+        )
+        sfh_noise = torch.randn(
+            batch["sfh"].shape, generator=generator, device=self.device,
+        )
+        loss, metrics = self.model.loss(
+            batch, time=time, image_noise=image_noise, sfh_noise=sfh_noise,
+        )
         self.log("val_loss", loss, prog_bar=True, batch_size=count, sync_dist=True)
         for name, value in metrics.items():
             self.log(f"val_{name}", value, batch_size=count, sync_dist=True)
@@ -49,13 +56,15 @@ class Experiment(L.LightningModule):
                 ("wrong_private", "paired", "shuffled"),
                 ("zero_private", "paired", "zero"),
             ):
-                _, controlled = self.model.loss(
-                    batch, common, private, time=time, noise=noise,
+                controlled_loss, controlled = self.model.loss(
+                    batch, common, private, time=time,
+                    image_noise=image_noise, sfh_noise=sfh_noise,
                 )
-                self.log(
-                    f"val_control_{name}_generative_loss",
-                    controlled["generative_loss"], batch_size=count, sync_dist=True,
-                )
+                self.log(f"val_control_{name}_loss", controlled_loss,
+                         batch_size=count, sync_dist=True)
+                for branch in ("image_flow_loss", "sfh_flow_loss"):
+                    self.log(f"val_control_{name}_{branch}", controlled[branch],
+                             batch_size=count, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
@@ -67,6 +76,7 @@ class Experiment(L.LightningModule):
 
 class Preview(L.Callback):
     def __init__(self, dataset, output, every=1, samples=6, steps=250, seed=1042):
+        self.dataset = dataset
         self.batch = default_collate([
             dataset[int(index)] for index in np.linspace(
                 0, len(dataset) - 1, min(samples, len(dataset)), dtype=int,
@@ -81,7 +91,12 @@ class Preview(L.Callback):
         import matplotlib.pyplot as plt
         batch = {key: value.to(module.device) for key, value in self.batch.items()}
         generator = torch.Generator(device=module.device).manual_seed(self.seed)
-        noise = torch.randn(batch["image"].shape, generator=generator, device=module.device)
+        image_noise = torch.randn(
+            batch["image"].shape, generator=generator, device=module.device,
+        )
+        sfh_noise = torch.randn(
+            batch["sfh"].shape, generator=generator, device=module.device,
+        )
         modes = {
             "paired": ("paired", "paired"),
             "wrong common": ("shuffled", "paired"),
@@ -90,10 +105,16 @@ class Preview(L.Callback):
             "zero private": ("paired", "zero"),
         }
         generated = {
-            name: module.model.sample(batch, common, private, self.steps, noise).cpu()
+            name: tuple(value.cpu() for value in module.model.sample(
+                batch, common, private, self.steps, image_noise, sfh_noise,
+            ))
             for name, (common, private) in modes.items()
         }
-        rows = {"real": batch["image"].cpu(), "donor": batch["donor_image"].cpu(), **generated}
+        rows = {
+            "real": batch["image"].cpu(),
+            "private donor": batch["donor_image"].cpu(),
+            **{name: values[0] for name, values in generated.items()},
+        }
         figure, axes = plt.subplots(
             len(rows), len(batch["image"]),
             figsize=(2 * len(batch["image"]), 2 * len(rows)), squeeze=False,
@@ -109,10 +130,59 @@ class Preview(L.Callback):
         path = self.output / f"epoch_{trainer.current_epoch:03d}.png"
         figure.savefig(path, dpi=150)
         plt.close(figure)
+
+        sfh_path = self.output / f"epoch_{trainer.current_epoch:03d}_sfhs.png"
+        mean = torch.as_tensor(self.dataset.sfh_mean)
+        scale = torch.as_tensor(self.dataset.sfh_scale)
+        target = torch.softmax(batch["sfh"].cpu() * scale + mean, dim=-1)
+        donor = torch.softmax(batch["donor_sfh"].cpu() * scale + mean, dim=-1)
+        generated_sfh = {
+            name: torch.softmax(values[1] * scale + mean, dim=-1)
+            for name, values in generated.items()
+        }
+        x = np.linspace(0, 1, target.shape[1])
+        figure, axes = plt.subplots(
+            len(target), 1, figsize=(8, 2 * len(target)),
+            squeeze=False, sharex=True,
+        )
+        colors = {
+            "paired": "#0072B2", "wrong common": "#D55E00",
+            "zero common": "#999999", "wrong private": "#009E73",
+            "zero private": "#CC79A7",
+        }
+        for index, axis in enumerate(axes[:, 0]):
+            axis.plot(x, target[index], color="black", lw=1.6, label="target")
+            axis.plot(x, donor[index], color="0.65", lw=1, ls="--",
+                      label="private donor")
+            for name, values in generated_sfh.items():
+                axis.plot(x, values[index], color=colors[name], lw=1, label=name)
+        axes[0, 0].legend(ncol=4, fontsize=7)
+        axes[-1, 0].set_xlabel("Fractional lookback time")
+        figure.tight_layout()
+        figure.savefig(sfh_path, dpi=150)
+        plt.close(figure)
+
+        paired_image, paired_sfh = generated["paired"]
+        sensitivity = {}
+        for name, (images, sfhs) in generated.items():
+            if name == "paired":
+                continue
+            key = name.replace(" ", "_")
+            sensitivity[f"conditioning/{key}_image_mean_abs_delta"] = (
+                images - paired_image
+            ).abs().mean().item()
+            sensitivity[f"conditioning/{key}_sfh_mean_abs_delta"] = (
+                sfhs - paired_sfh
+            ).abs().mean().item()
         for logger in trainer.loggers:
             if isinstance(logger, WandbLogger):
                 import wandb
-                logger.experiment.log({"generations/fixed_noise_controls": wandb.Image(str(path))})
+                logger.experiment.log({
+                    "generations/fixed_noise_images": wandb.Image(str(path)),
+                    "generations/fixed_noise_sfhs": wandb.Image(str(sfh_path)),
+                    **sensitivity,
+                    "epoch": trainer.current_epoch,
+                })
 
 
 def main():
