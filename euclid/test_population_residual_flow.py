@@ -73,7 +73,22 @@ def test_population_controls_reuse_identical_target_time_and_noise():
     )
     time = torch.rand(len(batch["sfh"]))
     noise = torch.randn_like(batch["sfh"])
+    # Ensure the synthetic batch contains all activity classes.
+    batch["covariates"][:, 2:] = 0
+    batch["covariates"][torch.arange(4), 2 + torch.tensor([0, 1, 2, 0])] = 1
     losses = [model.loss(batch, "sfh", time, noise, mode=mode)
-              for mode in ("paired", "shuffled", "zero")]
+              for mode in ("paired", "shuffled", "counterfactual", "zero")]
     assert all(torch.isfinite(value) for value in losses)
     assert not torch.equal(losses[0], losses[1])
+
+
+def test_counterfactual_control_always_changes_activity_class():
+    model = PopulationFlow(
+        n_sfh_bins=16, image_base=8, sfh_d_model=16,
+        sfh_heads=4, sfh_layers=1,
+    )
+    batch = _batch(batch_size=3)
+    batch["covariates"][:, 2:] = 0
+    batch["covariates"][:, 2] = 1  # exercise the single-class fallback
+    changed = model._covariates(batch, "counterfactual")
+    assert torch.all(changed[:, 2:].argmax(1) != 0)
