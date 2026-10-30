@@ -237,6 +237,9 @@ def main():
     parser.add_argument("--geometric-weight", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--control-batches", type=int, default=8)
+    parser.add_argument("--fixed-training-donors", action="store_true")
+    parser.add_argument("--preview-training", action="store_true")
+    parser.add_argument("--validate-every", type=int, default=1)
     parser.add_argument("--preview-every", type=int, default=1)
     parser.add_argument("--preview-samples", type=int, default=6)
     parser.add_argument("--preview-steps", type=int, default=250)
@@ -249,6 +252,10 @@ def main():
     L.seed_everything(args.seed, workers=True)
     torch.set_float32_matmul_precision("high")
     train, val, arrays, diagnostics = _prepare(args)
+    if args.fixed_training_donors:
+        # Diagnostic memorization mode: donor identity and image orientation
+        # must remain fixed so conditioning is the only changing signal.
+        train.training = False
     args.output.mkdir(parents=True)
     np.savez_compressed(args.output / "matched_neighbors.npz", **arrays)
     (args.output / "run.json").write_text(json.dumps({
@@ -284,12 +291,14 @@ def main():
     )
     if args.workers:
         loader["prefetch_factor"] = 4
+    preview_dataset = train if args.preview_training else val
     trainer = L.Trainer(
         accelerator="gpu", devices=1, precision="bf16-mixed",
         max_epochs=args.epochs, callbacks=[checkpoint, Preview(
-            val, args.output / "previews", args.preview_every,
+            preview_dataset, args.output / "previews", args.preview_every,
             args.preview_samples, args.preview_steps, args.seed + 1000,
         )], logger=loggers, log_every_n_steps=5, num_sanity_val_steps=0,
+        check_val_every_n_epoch=args.validate_every,
     )
     start = time.monotonic()
     trainer.fit(
