@@ -149,11 +149,12 @@ class LatentPredictor(nn.Module):
 
     def forward(self, encoded_context, visible):
         batch = len(encoded_context)
-        tokens = self.mask_token.expand(
+        projected = self.context_projection(encoded_context)
+        tokens = self.mask_token.to(dtype=projected.dtype).expand(
             batch, self.sequence_length, -1,
         ).clone()
-        tokens[:, visible] = self.context_projection(encoded_context)
-        tokens = tokens + self.position
+        tokens[:, visible] = projected
+        tokens = tokens + self.position.to(dtype=tokens.dtype)
         return self.output(self.norm(self.transformer(tokens)))
 
 

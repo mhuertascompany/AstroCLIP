@@ -66,3 +66,11 @@ def test_ema_update_and_embedding_shapes():
     )
     for mode in ("joint", "image", "sfh"):
         assert model.embed(image, sfh, mode).shape == (len(image), 32)
+
+
+def test_predictor_accepts_mixed_precision_context():
+    model = _model()
+    image, sfh = _inputs()
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        loss, _ = model.loss(image, sfh, "sfh_to_image")
+    assert torch.isfinite(loss)
