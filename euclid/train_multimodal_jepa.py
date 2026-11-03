@@ -321,7 +321,7 @@ def main():
     parser.add_argument("--predictor-width", type=int, default=192)
     parser.add_argument("--predictor-heads", type=int, default=6)
     parser.add_argument("--predictor-layers", type=int, default=3)
-    parser.add_argument("--global-weight", type=float, default=1.0)
+    parser.add_argument("--global-weight", type=float, default=0.0)
     parser.add_argument("--ema-start", type=float, default=0.996)
     parser.add_argument("--ema-end", type=float, default=0.9999)
     parser.add_argument("--lr", type=float, default=2e-4)
