@@ -25,6 +25,14 @@ def test_all_masking_tasks_have_visible_context_and_targets():
         assert spec.visible[1:].any()
         assert spec.target.any()
         assert not torch.any(spec.visible & spec.target)
+        teacher = model.target_visible(task, torch.device("cpu"))
+        assert teacher[0]
+        if task == "sfh_to_image":
+            assert teacher[model.online.image_slice].all()
+            assert not teacher[model.online.sfh_slice].any()
+        if task == "image_to_sfh":
+            assert not teacher[model.online.image_slice].any()
+            assert teacher[model.online.sfh_slice].all()
 
 
 def test_all_task_losses_are_finite_and_target_is_frozen():

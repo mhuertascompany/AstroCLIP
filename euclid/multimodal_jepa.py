@@ -164,7 +164,7 @@ class MultimodalJEPA(nn.Module):
     def __init__(self, image_size=64, image_patch=8, n_sfh_bins=250,
                  sfh_patch=5, width=256, heads=8, layers=6,
                  predictor_width=192, predictor_heads=6,
-                 predictor_layers=3, global_weight=1.0):
+                 predictor_layers=3, global_weight=0.0):
         super().__init__()
         self.global_weight = float(global_weight)
         self.online = JointTokenEncoder(
@@ -259,6 +259,18 @@ class MultimodalJEPA(nn.Module):
             raise RuntimeError("Invalid JEPA mask without context or targets")
         return MaskSpec(task, visible, target)
 
+    def target_visible(self, task, device):
+        """Full, target-modality-only view used by the EMA teacher."""
+        visible = torch.zeros(
+            self.online.sequence_length, dtype=torch.bool, device=device,
+        )
+        visible[0] = True
+        if task in ("image_within", "sfh_to_image", "joint_masked"):
+            visible[self.online.image_slice] = True
+        if task in ("sfh_within", "image_to_sfh", "joint_masked"):
+            visible[self.online.sfh_slice] = True
+        return visible
+
     def predict(self, image, sfh, task, generator=None, shuffle_source=False):
         spec = self.make_mask(task, image.device, generator)
         context_image, context_sfh = image, sfh
@@ -274,7 +286,12 @@ class MultimodalJEPA(nn.Module):
         )
         prediction = self.predictor(context, spec.visible)
         with torch.no_grad():
-            target = self.target(image, sfh)
+            target_visible = self.target_visible(task, image.device)
+            encoded_target = self.target(image, sfh, target_visible)
+            target = encoded_target.new_zeros(
+                len(image), self.online.sequence_length, self.online.width,
+            )
+            target[:, target_visible] = encoded_target
         return prediction, target, spec
 
     def loss(self, image, sfh, task, generator=None, shuffle_source=False):
@@ -298,12 +315,20 @@ class MultimodalJEPA(nn.Module):
         global_cosine = F.cosine_similarity(
             prediction[:, 0].float(), target[:, 0].float(), dim=-1,
         ).mean()
+        target_batch_std = target[:, spec.target].float().std(
+            dim=0, unbiased=False,
+        ).mean()
+        prediction_batch_std = prediction[:, spec.target].float().std(
+            dim=0, unbiased=False,
+        ).mean()
         total = token_loss + self.global_weight * global_loss
         return total, {
             "token_loss": token_loss.detach(),
             "global_loss": global_loss.detach(),
             "token_cosine": token_cosine.detach(),
             "global_cosine": global_cosine.detach(),
+            "target_batch_std": target_batch_std.detach(),
+            "prediction_batch_std": prediction_batch_std.detach(),
             "target_fraction": spec.target.float().mean().detach(),
         }
 
@@ -320,7 +345,12 @@ class MultimodalJEPA(nn.Module):
             visible[self.online.sfh_slice] = True
         if mode not in ("joint", "image", "sfh"):
             raise ValueError("mode must be joint, image, or sfh")
-        return self.online(image, sfh, visible)[:, 0]
+        encoded = self.online(image, sfh, visible)
+        if mode in ("image", "sfh"):
+            return encoded[:, 1:].mean(1)
+        image_tokens = encoded[:, self.online.image_slice]
+        sfh_tokens = encoded[:, self.online.sfh_slice]
+        return 0.5 * (image_tokens.mean(1) + sfh_tokens.mean(1))
 
     @torch.inference_mode()
     def cross_modal_errors(self, image, sfh, task, shuffle_source=False):

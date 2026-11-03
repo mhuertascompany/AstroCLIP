@@ -81,7 +81,7 @@ python -u -m euclid.train_multimodal_jepa \
     --image-patch 8 --sfh-patch 5 \
     --width 256 --heads 8 --layers 6 \
     --predictor-width 192 --predictor-heads 6 --predictor-layers 3 \
-    --global-weight 1.0 --ema-start 0.996 --ema-end 0.9999 \
+    --global-weight 0.0 --ema-start 0.996 --ema-end 0.9999 \
     --lr 2e-4 --weight-decay 0.05 --control-batches 8 \
     --preview-every "${PREVIEW_EVERY}" \
     --max-vis-mag 22 \
