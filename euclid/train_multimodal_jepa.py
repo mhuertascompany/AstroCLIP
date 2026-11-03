@@ -313,6 +313,10 @@ def main():
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument(
+        "--no-early-stopping", action="store_true",
+        help="Run to --epochs even when the moving-target validation loss rises.",
+    )
     parser.add_argument("--image-patch", type=int, default=8)
     parser.add_argument("--sfh-patch", type=int, default=5)
     parser.add_argument("--width", type=int, default=256)
@@ -373,7 +377,6 @@ def main():
     )
     callbacks = [
         checkpoint,
-        EarlyStopping(monitor="val_loss", mode="min", patience=args.patience),
         LearningRateMonitor(logging_interval="epoch"),
         EmbeddingPreview(
             val, args.output / "embeddings",
@@ -386,6 +389,13 @@ def main():
             samples=args.error_samples, seed=args.seed + 3000,
         ),
     ]
+    if not args.no_early_stopping:
+        callbacks.insert(
+            1,
+            EarlyStopping(
+                monitor="val_loss", mode="min", patience=args.patience,
+            ),
+        )
     loggers = [CSVLogger(str(args.output), name="logs")]
     if args.wandb_mode != "disabled":
         loggers.append(WandbLogger(
