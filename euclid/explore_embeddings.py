@@ -127,7 +127,7 @@ _PROPERTY_LABELS = {
     'sfh_doubling_number_100myr': 'Doubling number D100 = sSFR100 × tH(zobs)',
     'sfh_activity_class': 'SFH activity class (0=Q, 1=transition, 2=SF)',
     'sfh_tau_sf_20_80_gyr': 'SFH formation timescale τSF (20–80%) [Gyr]',
-    'sfh_quenching_timescale_gyr': 'SFH green-valley crossing time [Gyr]',
+    'sfh_quenching_timescale_gyr': 'SFH quenching timescale (green-valley crossing) [Gyr]',
     'sfh_quenching_epoch_lookback_gyr': 'SFH quenching epoch: lookback [Gyr]',
     'sfh_quenching_epoch_cosmic_age_gyr': 'SFH quenching epoch: cosmic age [Gyr]',
     'sfh_quenching_epoch_redshift': 'SFH quenching epoch: redshift',
@@ -170,6 +170,8 @@ _COORDINATES = {
     'Shared aligned UMAP: SFH': 'xy_shared_sfh',
 }
 
+_SHARED_OVERLAY = 'Shared UMAP: image + SFH overlay'
+
 _ARCHIVE_RESERVED = {
     'galaxy_id', 'h5_row', 'image_embedding', 'sfh_embedding',
     'image_preprojection_embedding',
@@ -193,6 +195,10 @@ def _parse_args():
                         help='Diagnostic NPZ; repeat to compare runs.')
     parser.add_argument('--label', action='append', default=[],
                         help='Optional display label for each --umap, in order.')
+    parser.add_argument('--left-embedding',
+                        help='Optional initial coordinate-space label for the left panel.')
+    parser.add_argument('--right-embedding',
+                        help='Optional initial coordinate-space label for the right panel.')
     parser.add_argument('--band', default='VIS')
     parser.add_argument('--port', type=int, default=5007)
     parser.add_argument('--selection-output', type=Path,
@@ -756,7 +762,8 @@ def _bounds(values):
     return safe, float(full_lower), float(full_upper), float(lower), float(upper), step
 
 
-def build_app(h5_path, stamp_dir, data, band, selection_output):
+def build_app(h5_path, stamp_dir, data, band, selection_output,
+              left_embedding_initial=None, right_embedding_initial=None):
     rng = np.random.default_rng(42)
     n_objects = len(data['galaxy_ids'])
     run_names = list(data['runs'])
@@ -776,9 +783,28 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
 
     def coordinate_values(run_name, embedding_name):
         coordinates = data['runs'][run_name]['coordinates']
+        if embedding_name == _SHARED_OVERLAY:
+            embedding_name = 'Shared aligned UMAP: image'
         if embedding_name not in coordinates:
             embedding_name = next(iter(coordinates))
         return coordinates[embedding_name]
+
+    def coordinate_options(run_name):
+        coordinates = data['runs'][run_name]['coordinates']
+        options = list(coordinates)
+        if (
+            'Shared aligned UMAP: image' in coordinates
+            and 'Shared aligned UMAP: SFH' in coordinates
+        ):
+            options.append(_SHARED_OVERLAY)
+        return options
+
+    def overlay_values(run_name):
+        coordinates = data['runs'][run_name]['coordinates']
+        return (
+            coordinates['Shared aligned UMAP: image'],
+            coordinates['Shared aligned UMAP: SFH'],
+        )
 
     def latent_values(run_name, embedding_name):
         embeddings = data['runs'][run_name]['embeddings']
@@ -792,8 +818,16 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             return embeddings['Aligned SFH projection']
         return None
 
-    left_embedding_default = next(iter(data['runs'][left_run_default]['coordinates']))
-    right_embedding_default = next(iter(data['runs'][right_run_default]['coordinates']))
+    left_options = coordinate_options(left_run_default)
+    right_options = coordinate_options(right_run_default)
+    left_embedding_default = (
+        left_embedding_initial
+        if left_embedding_initial in left_options else left_options[0]
+    )
+    right_embedding_default = (
+        right_embedding_initial
+        if right_embedding_initial in right_options else right_options[0]
+    )
     if stamp_dir is None and 'Redshift z' in all_properties:
         left_color_default = 'Redshift z'
     else:
@@ -812,8 +846,12 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     source = ColumnDataSource(dict(
         x_left=left_xy[:, 0].tolist(),
         y_left=left_xy[:, 1].tolist(),
+        x_left_overlay=left_xy[:, 0].tolist(),
+        y_left_overlay=left_xy[:, 1].tolist(),
         x_right=right_xy[:, 0].tolist(),
         y_right=right_xy[:, 1].tolist(),
+        x_right_overlay=right_xy[:, 0].tolist(),
+        y_right_overlay=right_xy[:, 1].tolist(),
         color_left=property_values(left_run_default, left_color_default).tolist(),
         color_right=property_values(right_run_default, right_color_default).tolist(),
         galaxy_id=data['galaxy_ids'].tolist(),
@@ -843,6 +881,12 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             tools='lasso_select,box_select,wheel_zoom,pan,reset',
             active_drag='lasso_select', title=title, output_backend='webgl',
         )
+        connector = plot.segment(
+            x0=x_field, y0=y_field,
+            x1=f'{x_field}_overlay', y1=f'{y_field}_overlay',
+            source=source, view=view, line_color='#737373',
+            line_alpha=0.055, line_width=0.45, visible=False,
+        )
         continuous = plot.scatter(
             x_field, y_field, source=source, view=view,
             color={'field': color_field, 'transform': mapper},
@@ -860,24 +904,54 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             selection_line_width=0.6,
             nonselection_alpha=0.8, visible=False,
         )
+        image_overlay = plot.scatter(
+            x_field, y_field, source=source, view=view,
+            color='#0072B2', size=3, alpha=0.62, line_width=0,
+            selection_fill_color='#0072B2', selection_alpha=1,
+            selection_line_color='#111111', selection_line_width=0.7,
+            nonselection_alpha=0.62, visible=False,
+            legend_label='image embedding',
+        )
+        sfh_overlay = plot.scatter(
+            f'{x_field}_overlay', f'{y_field}_overlay', source=source, view=view,
+            color='#D55E00', size=3, alpha=0.62, line_width=0,
+            selection_fill_color='#D55E00', selection_alpha=1,
+            selection_line_color='#111111', selection_line_width=0.7,
+            nonselection_alpha=0.62, visible=False,
+            legend_label='SFH embedding',
+        )
         continuous.selection_glyph.size = 4
         dynamic.selection_glyph.size = 4
-        plot.add_layout(ColorBar(
+        image_overlay.selection_glyph.size = 5
+        sfh_overlay.selection_glyph.size = 5
+        color_bar = ColorBar(
             color_mapper=mapper, ticker=BasicTicker(), label_standoff=8,
             width=12, location=(0, 0),
-        ), 'right')
+        )
+        plot.add_layout(color_bar, 'right')
+        overlay_legend = plot.legend[0]
+        overlay_legend.visible = False
+        overlay_legend.location = 'top_left'
+        overlay_legend.click_policy = 'hide'
         plot.add_tools(HoverTool(tooltips=[
             ('galaxy ID', '@galaxy_id'), ('redshift', '@redshift{0.000}'),
         ]))
         plot.xaxis.axis_label = 'UMAP 1'
         plot.yaxis.axis_label = 'UMAP 2'
-        return plot, mapper, continuous, dynamic
+        return (
+            plot, mapper, continuous, dynamic, color_bar,
+            connector, image_overlay, sfh_overlay, overlay_legend,
+        )
 
-    left_plot, left_mapper, left_continuous, left_dynamic = make_plot(
+    (left_plot, left_mapper, left_continuous, left_dynamic, left_color_bar,
+     left_connector, left_image_overlay, left_sfh_overlay,
+     left_overlay_legend) = make_plot(
         'x_left', 'y_left', 'color_left',
         property_values(left_run_default, left_color_default), 'Left UMAP',
     )
-    right_plot, right_mapper, right_continuous, right_dynamic = make_plot(
+    (right_plot, right_mapper, right_continuous, right_dynamic, right_color_bar,
+     right_connector, right_image_overlay, right_sfh_overlay,
+     right_overlay_legend) = make_plot(
         'x_right', 'y_right', 'color_right',
         property_values(right_run_default, right_color_default), 'Right UMAP',
     )
@@ -888,12 +962,12 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
                                   value=right_run_default, width=260)
     left_embedding = pn.widgets.Select(
         name='Left embedding',
-        options=list(data['runs'][left_run_default]['coordinates']),
+        options=coordinate_options(left_run_default),
         value=left_embedding_default, width=260,
     )
     right_embedding = pn.widgets.Select(
         name='Right embedding',
-        options=list(data['runs'][right_run_default]['coordinates']),
+        options=coordinate_options(right_run_default),
         value=right_embedding_default, width=260,
     )
     left_color = pn.widgets.Select(name='Left color', options=all_properties,
@@ -928,31 +1002,73 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         range_widget.step, range_widget.value = step, (lower, upper)
         continuous.visible, dynamic.visible = True, False
 
+    def set_overlay_mode(enabled, continuous, dynamic, color_bar, connector,
+                         image_overlay, sfh_overlay, legend):
+        continuous.visible = not enabled
+        dynamic.visible = False
+        color_bar.visible = not enabled
+        connector.visible = enabled
+        image_overlay.visible = enabled
+        sfh_overlay.visible = enabled
+        legend.visible = enabled
+
+    def update_left_color(event=None):
+        update_color(
+            left_run, left_color, left_range, 'color_left', left_mapper,
+            left_continuous, left_dynamic,
+        )
+        set_overlay_mode(
+            left_embedding.value == _SHARED_OVERLAY,
+            left_continuous, left_dynamic, left_color_bar, left_connector,
+            left_image_overlay, left_sfh_overlay, left_overlay_legend,
+        )
+
+    def update_right_color(event=None):
+        update_color(
+            right_run, right_color, right_range, 'color_right', right_mapper,
+            right_continuous, right_dynamic,
+        )
+        set_overlay_mode(
+            right_embedding.value == _SHARED_OVERLAY,
+            right_continuous, right_dynamic, right_color_bar, right_connector,
+            right_image_overlay, right_sfh_overlay, right_overlay_legend,
+        )
+
     def update_left_coordinates(event=None):
-        available = list(data['runs'][left_run.value]['coordinates'])
+        available = coordinate_options(left_run.value)
         left_embedding.options = available
         if left_embedding.value not in available:
             left_embedding.value = available[0]
-        coordinates = coordinate_values(left_run.value, left_embedding.value)
+        if left_embedding.value == _SHARED_OVERLAY:
+            coordinates, overlay = overlay_values(left_run.value)
+        else:
+            coordinates = coordinate_values(left_run.value, left_embedding.value)
+            overlay = coordinates
         source.data['x_left'] = coordinates[:, 0].tolist()
         source.data['y_left'] = coordinates[:, 1].tolist()
+        source.data['x_left_overlay'] = overlay[:, 0].tolist()
+        source.data['y_left_overlay'] = overlay[:, 1].tolist()
         left_plot.title.text = f'{left_run.value}: {left_embedding.value}'
-        update_color(left_run, left_color, left_range, 'color_left', left_mapper,
-                     left_continuous, left_dynamic)
+        update_left_color()
         if event is not None:
             update_filter_bounds()
 
     def update_right_coordinates(event=None):
-        available = list(data['runs'][right_run.value]['coordinates'])
+        available = coordinate_options(right_run.value)
         right_embedding.options = available
         if right_embedding.value not in available:
             right_embedding.value = available[0]
-        coordinates = coordinate_values(right_run.value, right_embedding.value)
+        if right_embedding.value == _SHARED_OVERLAY:
+            coordinates, overlay = overlay_values(right_run.value)
+        else:
+            coordinates = coordinate_values(right_run.value, right_embedding.value)
+            overlay = coordinates
         source.data['x_right'] = coordinates[:, 0].tolist()
         source.data['y_right'] = coordinates[:, 1].tolist()
+        source.data['x_right_overlay'] = overlay[:, 0].tolist()
+        source.data['y_right_overlay'] = overlay[:, 1].tolist()
         right_plot.title.text = f'{right_run.value}: {right_embedding.value}'
-        update_color(right_run, right_color, right_range, 'color_right', right_mapper,
-                     right_continuous, right_dynamic)
+        update_right_color()
 
     redshift_finite = z_finite[np.isfinite(z_finite)]
     z_low = float(np.floor(redshift_finite.min() * 10) / 10) if len(redshift_finite) else 0
@@ -1220,10 +1336,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             for widget in (left_color, right_color, filter_property):
                 widget.options = properties
             left_color.value, right_color.value = labels[:2]
-            update_color(left_run, left_color, left_range, 'color_left', left_mapper,
-                         left_continuous, left_dynamic)
-            update_color(right_run, right_color, right_range, 'color_right', right_mapper,
-                         right_continuous, right_dynamic)
+            update_left_color()
+            update_right_color()
             update_filter_bounds()
             ms_deviation_info.object = (f"Computed for {np.isfinite(values[:, 0]).sum():,}/{n_objects:,} galaxies. "
                 'Colors and filters retain settings in their names; recompute after changing MS controls.')
@@ -1249,8 +1363,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
             for widget in (left_color, right_color, filter_property):
                 widget.options = properties
             left_color.value = REJ_LABELS['candidate']
-            update_color(left_run, left_color, left_range, 'color_left', left_mapper,
-                         left_continuous, left_dynamic)
+            update_left_color()
             update_filter_bounds()
             count = int(np.nansum(values['candidate']))
             detail = ('Posterior fraction available (valid draws only).'
@@ -1278,8 +1391,7 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
                 widget.options = properties
             angle = next(key for key in values if 'angle Φ' in key)
             left_color.value = angle
-            update_color(left_run, left_color, left_range, 'color_left', left_mapper,
-                         left_continuous, left_dynamic)
+            update_left_color()
             update_filter_bounds()
             valid_key = next(key for key in values if 'measurable endpoints' in key)
             count = int(np.nansum(values[valid_key]))
@@ -1313,6 +1425,15 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         update_view()
 
     def cluster_visible(event=None):
+        if (
+            left_embedding.value == _SHARED_OVERLAY
+            or right_embedding.value == _SHARED_OVERLAY
+        ):
+            cluster_info.object = (
+                'Choose single image, SFH or joint embeddings in both panels '
+                'before clustering; an overlay contains two points per galaxy.'
+            )
+            return
         try:
             from sklearn.cluster import KMeans
         except ImportError:
@@ -1362,8 +1483,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         source.selected.indices = []
         refresh([])
         cluster_info.object = ''
-        left_continuous.visible, left_dynamic.visible = True, False
-        right_continuous.visible, right_dynamic.visible = True, False
+        update_left_color()
+        update_right_color()
 
     def save_selection(event=None):
         selected = np.asarray(source.selected.indices, dtype=int)
@@ -1394,18 +1515,8 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
     right_run.param.watch(update_right_coordinates, 'value')
     left_embedding.param.watch(update_left_coordinates, 'value')
     right_embedding.param.watch(update_right_coordinates, 'value')
-    left_color.param.watch(
-        lambda event: update_color(
-            left_run, left_color, left_range, 'color_left', left_mapper,
-            left_continuous, left_dynamic,
-        ), 'value',
-    )
-    right_color.param.watch(
-        lambda event: update_color(
-            right_run, right_color, right_range, 'color_right', right_mapper,
-            right_continuous, right_dynamic,
-        ), 'value',
-    )
+    left_color.param.watch(update_left_color, 'value')
+    right_color.param.watch(update_right_color, 'value')
     left_range.param.watch(
         lambda event: setattr(left_mapper, 'low', float(event.new[0])), 'value',
     )
@@ -1450,7 +1561,9 @@ def build_app(h5_path, stamp_dir, data, band, selection_output):
         pn.pane.Markdown('## Euclid embedding explorer'),
         pn.pane.Markdown(
             'Choose aligned or unaligned coordinates independently above each '
-            'panel. Selections remain linked by galaxy ID.',
+            'panel. The shared overlay shows image and SFH embeddings together '
+            'in one UMAP coordinate system; gray segments connect true pairs. '
+            'Selections remain linked by galaxy ID.',
             styles={'font-size': '11px'},
         ),
         pn.layout.Divider(),
@@ -1527,6 +1640,7 @@ if _STAMP_DIR is not None and not _STAMP_DIR.is_dir():
 _DATA = load_data(_ARGS.h5, _ARGS.umap, _ARGS.label or None)
 app = build_app(
     _ARGS.h5, _STAMP_DIR, _DATA, _ARGS.band, _ARGS.selection_output,
+    _ARGS.left_embedding, _ARGS.right_embedding,
 )
 app.servable()
 
