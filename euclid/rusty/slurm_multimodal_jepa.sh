@@ -51,11 +51,14 @@ EXTRA=()
 if [[ "${MODE}" == smoke ]]; then
     EXTRA=(--smoke --max-pairs 2048 --epochs 2 --batch-size 16 --embedding-samples 128 --error-samples 16)
 elif [[ "${MODE}" == pilot ]]; then
-    EXTRA=(--max-pairs 20000 --epochs 30 --patience 10 --batch-size "${BATCH_SIZE}")
+    EXTRA=(--max-pairs 20000 --epochs 30 --patience "${PATIENCE:-10}" --batch-size "${BATCH_SIZE}")
 else
-    EXTRA=(--epochs 100 --patience 15 --batch-size "${BATCH_SIZE}")
+    EXTRA=(--epochs 100 --patience "${PATIENCE:-15}" --batch-size "${BATCH_SIZE}")
 fi
 WANDB_ARGS=(--wandb-mode "${WANDB_MODE:-disabled}")
+if [[ "${NO_EARLY_STOPPING:-0}" == 1 ]]; then
+    EXTRA+=(--no-early-stopping)
+fi
 if [[ "${WANDB_MODE:-disabled}" != disabled ]]; then
     WANDB_ARGS+=(
         --wandb-project "${WANDB_PROJECT:-euclid-counterfactual-flow}"
