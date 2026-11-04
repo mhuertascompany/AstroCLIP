@@ -105,12 +105,26 @@ def _load_properties(path: Path | None, galaxy_ids: np.ndarray):
     with np.load(path, allow_pickle=False) as archive:
         source_ids = np.asarray(archive["galaxy_id"], dtype=np.int64)
         position = {int(value): index for index, value in enumerate(source_ids)}
-        indices = np.array([position[int(value)] for value in galaxy_ids])
+        indices = np.array(
+            [position.get(int(value), -1) for value in galaxy_ids],
+            dtype=np.int64,
+        )
+        matched = indices >= 0
+        print(
+            f"Morphology properties cover {matched.sum():,}/{len(galaxy_ids):,} "
+            "retrieval galaxies", flush=True,
+        )
         output = {}
         for name in archive.files:
             values = np.asarray(archive[name])
-            if values.ndim == 1 and len(values) == len(source_ids):
-                output[name] = values[indices]
+            if (
+                name != "galaxy_id" and values.ndim == 1
+                and len(values) == len(source_ids)
+                and values.dtype.kind in "biuf"
+            ):
+                selected = np.full(len(galaxy_ids), np.nan, dtype=np.float32)
+                selected[matched] = values[indices[matched]].astype(np.float32)
+                output[name] = selected
     return output
 
 

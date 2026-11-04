@@ -1,6 +1,10 @@
 import numpy as np
 
-from euclid.evaluate_multimodal_jepa_retrieval import _retrieval, _summary
+from euclid.evaluate_multimodal_jepa_retrieval import (
+    _load_properties,
+    _retrieval,
+    _summary,
+)
 
 
 def test_exact_retrieval_recovers_paired_gallery_and_control_ranks():
@@ -29,3 +33,15 @@ def test_retrieval_accepts_flattened_patch_tokens():
     )
     assert np.all(result["rank"] == 1)
     assert result["top_index"].shape == (7, 2)
+
+
+def test_property_loading_keeps_retrieval_ids_missing_from_archive(tmp_path):
+    path = tmp_path / "properties.npz"
+    np.savez(
+        path,
+        galaxy_id=np.array([11, 13]),
+        redshift=np.array([0.4, 0.8]),
+    )
+    loaded = _load_properties(path, np.array([11, 12, 13]))
+    np.testing.assert_allclose(loaded["redshift"][[0, 2]], [0.4, 0.8])
+    assert np.isnan(loaded["redshift"][1])
