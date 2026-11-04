@@ -340,7 +340,7 @@ def _example_pdf(
                     f"Patch grid #{column}\nID {galaxy_ids[gallery_index]}",
                 )
             figure.suptitle(
-                f"SFH→VIS JEPA retrieval · paired pooled rank {pooled['rank'][query]:,}",
+                f"SFH-to-VIS JEPA retrieval - paired pooled rank {pooled['rank'][query]:,}",
                 fontsize=13,
             )
             figure.tight_layout(rect=(0, 0, 1, 0.96))
