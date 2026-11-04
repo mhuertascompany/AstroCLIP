@@ -127,8 +127,50 @@ def _histogram_edges(control, retrieved, key, bins=10):
     return np.linspace(lower - padding, upper + padding, bins + 1)
 
 
+def _scatter68(values):
+    """Robust one-sigma-like scatter: half the 16th-to-84th percentile range."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return np.nan
+    lower, upper = np.percentile(values, (16.0, 84.0))
+    return 0.5 * (upper - lower)
+
+
+def _scatter_statistics(control, retrieved, rng, bootstrap_samples=3000):
+    control = np.asarray(control, dtype=float)
+    retrieved = np.asarray(retrieved, dtype=float)
+    control = control[np.isfinite(control)]
+    retrieved = retrieved[np.isfinite(retrieved)]
+    control_scatter = _scatter68(control)
+    retrieved_scatter = _scatter68(retrieved)
+    ratio = (
+        retrieved_scatter / control_scatter
+        if np.isfinite(control_scatter) and control_scatter > 0.0 else np.nan
+    )
+    bootstrap = np.full(bootstrap_samples, np.nan, dtype=float)
+    for index in range(bootstrap_samples):
+        control_draw = rng.choice(control, size=len(control), replace=True)
+        retrieved_draw = rng.choice(retrieved, size=len(retrieved), replace=True)
+        denominator = _scatter68(control_draw)
+        if np.isfinite(denominator) and denominator > 0.0:
+            bootstrap[index] = _scatter68(retrieved_draw) / denominator
+    valid = bootstrap[np.isfinite(bootstrap) & (bootstrap > 0.0)]
+    if len(valid):
+        ratio_lower, ratio_upper = np.percentile(valid, (16.0, 84.0))
+    else:
+        ratio_lower = ratio_upper = np.nan
+    return {
+        "control_scatter68": float(control_scatter),
+        "retrieved_scatter68": float(retrieved_scatter),
+        "scatter_ratio": float(ratio),
+        "scatter_ratio_p16": float(ratio_lower),
+        "scatter_ratio_p84": float(ratio_upper),
+    }
+
+
 def _plot_parameter_distribution(
-    axis, control, retrieved, query_value, key, title,
+    axis, control, retrieved, query_value, key, title, rng,
 ):
     control = np.asarray(control, dtype=float)
     retrieved = np.asarray(retrieved, dtype=float)
@@ -152,12 +194,68 @@ def _plot_parameter_distribution(
             query_value, color="#D55E00", lw=1.5, ls="--",
             label="query's true VIS",
         )
+    statistics = _scatter_statistics(control, retrieved, rng)
+    scatter_ratio = statistics["scatter_ratio"]
+    ratio_text = f"{scatter_ratio:.2f}x" if np.isfinite(scatter_ratio) else "undefined"
     axis.set_title(
-        f"{title}\nmedian difference = {retrieved_median - control_median:+.3f}",
-        fontsize=10,
+        f"{title}\nmedian difference = {retrieved_median - control_median:+.3f}\n"
+        f"scatter $\\sigma_{{68}}$: C={statistics['control_scatter68']:.3f}, "
+        f"N={statistics['retrieved_scatter68']:.3f} ({ratio_text})",
+        fontsize=8.7,
     )
     axis.set_ylabel("Density")
     axis.grid(axis="y", alpha=0.18)
+    return statistics
+
+
+def _scatter_summary_figure(statistics, query_id):
+    labels = [row["label"] for row in statistics]
+    ratios = np.asarray([row["scatter_ratio"] for row in statistics], dtype=float)
+    lower = np.asarray([row["scatter_ratio_p16"] for row in statistics], dtype=float)
+    upper = np.asarray([row["scatter_ratio_p84"] for row in statistics], dtype=float)
+    valid = (
+        np.isfinite(ratios) & (ratios > 0.0)
+        & np.isfinite(lower) & (lower > 0.0)
+        & np.isfinite(upper) & (upper > 0.0)
+    )
+    figure, axis = plt.subplots(figsize=(9.2, 7.0))
+    y = np.arange(len(labels))[::-1]
+    x = np.log2(ratios[valid])
+    interval_lower = np.minimum(lower[valid], ratios[valid])
+    interval_upper = np.maximum(upper[valid], ratios[valid])
+    xerr = np.vstack((
+        x - np.log2(interval_lower), np.log2(interval_upper) - x,
+    ))
+    colors = np.where(ratios[valid] >= 1.0, "#D55E00", "#0072B2")
+    axis.errorbar(
+        x, y[valid], xerr=xerr, fmt="none", ecolor="0.45", elinewidth=1.4,
+        capsize=3, zorder=1,
+    )
+    axis.scatter(x, y[valid], color=colors, s=58, zorder=2)
+    axis.axvline(0.0, color="black", lw=1.2, ls="--")
+    axis.set_yticks(y, labels)
+    ticks = np.arange(-3, 4, dtype=float)
+    axis.set_xticks(ticks, ["1/8", "1/4", "1/2", "1", "2", "4", "8"])
+    finite_bounds = np.concatenate((np.log2(interval_lower), np.log2(interval_upper)))
+    bound = max(3.0, np.nanmax(np.abs(finite_bounds)) + 0.35) if len(finite_bounds) else 3.0
+    axis.set_xlim(-bound, bound)
+    axis.set_xlabel(
+        "Scatter ratio: JEPA-CSLS neighbours / matched controls\n"
+        "points: observed $\\sigma_{68}$ ratio; bars: bootstrap 16-84% interval"
+    )
+    axis.set_title(
+        f"Morphological scatter selected from one SFH\nQuery ID {query_id}",
+        fontsize=14,
+    )
+    axis.grid(axis="x", alpha=0.2)
+    figure.text(
+        0.5, 0.02,
+        "Orange: retrieved neighbours are more dispersed. Blue: controls are more dispersed. "
+        "$\\sigma_{68}=(P_{84}-P_{16})/2$.",
+        ha="center", fontsize=9,
+    )
+    figure.tight_layout(rect=(0, 0.06, 1, 0.94))
+    return figure
 
 
 def _read_stamp(stamps: Path, galaxy_id: int) -> np.ndarray | None:
@@ -346,11 +444,15 @@ def plot(args):
 
     available = [(key, label) for key, label in PARAMETERS if key in properties]
     figure, axes = plt.subplots(4, 3, figsize=(14, 15), squeeze=False)
+    rng = np.random.default_rng(args.seed)
+    scatter_statistics = []
     for axis, (key, label) in zip(axes.flat, available):
         values = np.asarray(properties[key], dtype=float)
-        _plot_parameter_distribution(
-            axis, values[control], values[retrieved], values[query], key, label,
+        statistics = _plot_parameter_distribution(
+            axis, values[control], values[retrieved], values[query], key, label, rng,
         )
+        statistics.update({"parameter": key, "label": label})
+        scatter_statistics.append(statistics)
     for axis in axes.flat[len(available):]:
         axis.axis("off")
     axes.flat[0].legend(loc="best", fontsize=7)
@@ -378,6 +480,11 @@ def plot(args):
     pdf = args.output / f"{stem}.pdf"
     png = args.output / f"{stem}.png"
     figure.savefig(png, dpi=180, bbox_inches="tight")
+    scatter_png = args.output / f"{stem}_scatter.png"
+    scatter_figure = _scatter_summary_figure(
+        scatter_statistics, int(galaxy_ids[query]),
+    )
+    scatter_figure.savefig(scatter_png, dpi=180, bbox_inches="tight")
     retrieved_stamps_png = args.output / f"{stem}_retrieved_stamps.png"
     control_stamps_png = args.output / f"{stem}_control_stamps.png"
     query_png = args.output / f"{stem}_query_sfh.png"
@@ -407,9 +514,11 @@ def plot(args):
         if query_figure is not None:
             document.savefig(query_figure, bbox_inches="tight")
         document.savefig(figure, bbox_inches="tight")
+        document.savefig(scatter_figure, bbox_inches="tight")
         for stamp_figure in stamp_figures:
             document.savefig(stamp_figure, bbox_inches="tight")
     plt.close(figure)
+    plt.close(scatter_figure)
     if query_figure is not None:
         plt.close(query_figure)
     for stamp_figure in stamp_figures:
@@ -435,6 +544,11 @@ def plot(args):
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    scatter_csv_path = args.output / f"{stem}_scatter.csv"
+    with scatter_csv_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(scatter_statistics[0]))
+        writer.writeheader()
+        writer.writerows(scatter_statistics)
     metadata = {
         "query_galaxy_id": int(galaxy_ids[query]),
         "query_index": query,
@@ -458,6 +572,10 @@ def plot(args):
         "control_ids": galaxy_ids[control].astype(int).tolist(),
         "pdf": str(pdf),
         "png": str(png),
+        "scatter_png": str(scatter_png),
+        "scatter_csv": str(scatter_csv_path),
+        "scatter_definition": "sigma68 = (84th percentile - 16th percentile) / 2",
+        "scatter_statistics": scatter_statistics,
         "query_sfh_png": str(query_png) if args.h5 is not None else None,
         "retrieved_stamps_png": (
             str(retrieved_stamps_png) if args.stamps is not None else None
