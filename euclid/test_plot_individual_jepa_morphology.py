@@ -3,6 +3,7 @@ import numpy as np
 from euclid.plot_individual_jepa_morphology import (
     _histogram_edges,
     _matched_control_indices,
+    _sfh_density,
 )
 
 
@@ -25,3 +26,12 @@ def test_probability_histograms_use_common_physical_range():
     )
     assert edges[0] == 0.0
     assert edges[-1] == 1.0
+
+
+def test_sfh_density_integrates_to_input_weight():
+    time = np.linspace(0.0, 1.0, 5)
+    weights = np.full(5, 0.2)
+    epsilon = 1e-10
+    density = _sfh_density(np.log10(weights + epsilon), time, 10.0, epsilon)
+    edges = np.concatenate(([0.0], 0.5 * (time[:-1] + time[1:]), [1.0]))
+    np.testing.assert_allclose(np.sum(density * np.diff(edges) * 10.0), 1.0)

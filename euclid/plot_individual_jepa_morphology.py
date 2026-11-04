@@ -7,6 +7,7 @@ import csv
 import json
 from pathlib import Path
 
+import h5py
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -178,6 +179,113 @@ def _read_stamp(stamps: Path, galaxy_id: int) -> np.ndarray | None:
     return np.clip(np.nan_to_num(image), 0.0, 1.0)
 
 
+def _read_query_sfh(h5_path: Path, galaxy_id: int):
+    with h5py.File(h5_path, "r") as source:
+        ids = np.asarray(source["galaxy_id"], dtype=np.int64)
+        matches = np.flatnonzero(ids == galaxy_id)
+        if len(matches) != 1:
+            raise ValueError(f"Galaxy ID {galaxy_id} is absent or duplicated in {h5_path}")
+        row = int(matches[0])
+        epsilon = float(source.attrs.get("sfh_log_epsilon", 1e-10))
+        output = {
+            "time": np.asarray(source["sfh_time_grid"], dtype=float),
+            "age_gyr": float(source["sfh_time_norm"][row]) / 1000.0,
+            "median": np.asarray(source["sfh"][row], dtype=float),
+            "p16": (
+                np.asarray(source["sfh_p16"][row], dtype=float)
+                if "sfh_p16" in source else None
+            ),
+            "p84": (
+                np.asarray(source["sfh_p84"][row], dtype=float)
+                if "sfh_p84" in source else None
+            ),
+            "epsilon": epsilon,
+        }
+    return output
+
+
+def _sfh_density(log_weights, time, age_gyr, epsilon):
+    weights = np.maximum(np.power(10.0, log_weights) - epsilon, 0.0)
+    edges = np.empty(len(time) + 1, dtype=float)
+    edges[1:-1] = 0.5 * (time[:-1] + time[1:])
+    edges[0], edges[-1] = 0.0, 1.0
+    widths = np.diff(edges) * age_gyr
+    return weights / np.maximum(widths, np.finfo(float).eps)
+
+
+def _query_figure(
+    h5_path: Path, stamps: Path | None, galaxy_id: int, mass: float,
+    redshift: float, log_sfr: float, paired_rank: int, gallery_size: int,
+    properties: dict[str, np.ndarray], query: int,
+):
+    sfh = _read_query_sfh(h5_path, galaxy_id)
+    lookback = sfh["time"] * sfh["age_gyr"]
+    median = _sfh_density(
+        sfh["median"], sfh["time"], sfh["age_gyr"], sfh["epsilon"],
+    )
+    lower = upper = None
+    if sfh["p16"] is not None and sfh["p84"] is not None:
+        lower = _sfh_density(
+            sfh["p16"], sfh["time"], sfh["age_gyr"], sfh["epsilon"],
+        )
+        upper = _sfh_density(
+            sfh["p84"], sfh["time"], sfh["age_gyr"], sfh["epsilon"],
+        )
+
+    figure = plt.figure(figsize=(12.5, 6.5))
+    grid = figure.add_gridspec(1, 2, width_ratios=(2.15, 1.0), wspace=0.18)
+    sfh_axis = figure.add_subplot(grid[0, 0])
+    image_axis = figure.add_subplot(grid[0, 1])
+    if lower is not None:
+        sfh_axis.fill_between(
+            lookback, lower, upper, color="#56B4E9", alpha=0.25,
+            label="posterior 16-84%",
+        )
+    sfh_axis.plot(
+        lookback, median, color="#0072B2", lw=2.2,
+        label="median normalized SFH",
+    )
+    sfh_axis.axvspan(0.0, min(0.1, sfh["age_gyr"]), color="#E69F00", alpha=0.2,
+                     label="latest 100 Myr")
+    sfh_axis.set_xlabel("Lookback time [Gyr]")
+    sfh_axis.set_ylabel("Normalized star-formation rate [Gyr$^{-1}$]")
+    sfh_axis.set_xlim(0.0, sfh["age_gyr"])
+    sfh_axis.set_ylim(bottom=0.0)
+    sfh_axis.grid(alpha=0.2)
+    sfh_axis.legend(loc="best", fontsize=9)
+    sfh_axis.set_title("Query star-formation history")
+
+    stamp = _read_stamp(stamps, galaxy_id) if stamps is not None else None
+    if stamp is None:
+        image_axis.text(0.5, 0.5, "true VIS stamp unavailable", ha="center", va="center")
+    else:
+        image_axis.imshow(stamp, cmap="gray", vmin=0.0, vmax=1.0, origin="upper")
+    image_axis.set_title("True paired VIS morphology")
+    image_axis.set_xticks([])
+    image_axis.set_yticks([])
+
+    extra = []
+    for key, label, unit in (
+        ("sfh_mass_weighted_age_gyr", "mass-weighted age", "Gyr"),
+        ("sfh_t50_lookback", "$t_{50}/t_H$", ""),
+        ("sfh_duration_80", "$(t_{80}-t_{20})/t_H$", ""),
+    ):
+        if key in properties and np.isfinite(properties[key][query]):
+            suffix = f" {unit}" if unit else ""
+            extra.append(f"{label}={properties[key][query]:.2f}{suffix}")
+    figure.suptitle(
+        f"Individual SFH-to-morphology diagnostic | ID {galaxy_id}\n"
+        f"log(M*/Msun)={mass:.3f}, z={redshift:.3f}, "
+        f"log(SFR100/[Msun yr^-1])={log_sfr:.3f} | "
+        f"paired rank {paired_rank:,}/{gallery_size:,}",
+        fontsize=15,
+    )
+    if extra:
+        figure.text(0.5, 0.025, " | ".join(extra), ha="center", fontsize=10)
+    figure.subplots_adjust(left=0.07, right=0.98, bottom=0.12, top=0.78, wspace=0.22)
+    return figure
+
+
 def _stamp_figure(
     stamps: Path, galaxy_ids: np.ndarray, indices: np.ndarray,
     mass: np.ndarray, redshift: np.ndarray, log_sfr: np.ndarray,
@@ -272,6 +380,15 @@ def plot(args):
     figure.savefig(png, dpi=180, bbox_inches="tight")
     retrieved_stamps_png = args.output / f"{stem}_retrieved_stamps.png"
     control_stamps_png = args.output / f"{stem}_control_stamps.png"
+    query_png = args.output / f"{stem}_query_sfh.png"
+    query_figure = None
+    if args.h5 is not None:
+        query_figure = _query_figure(
+            args.h5, args.stamps, int(galaxy_ids[query]), mass[query],
+            redshift[query], log_sfr[query], int(ranks[query]), len(galaxy_ids),
+            properties, query,
+        )
+        query_figure.savefig(query_png, dpi=180, bbox_inches="tight")
     stamp_figures = []
     if args.stamps is not None:
         stamp_figures = [
@@ -287,10 +404,14 @@ def plot(args):
         stamp_figures[0].savefig(retrieved_stamps_png, dpi=180, bbox_inches="tight")
         stamp_figures[1].savefig(control_stamps_png, dpi=180, bbox_inches="tight")
     with PdfPages(pdf) as document:
+        if query_figure is not None:
+            document.savefig(query_figure, bbox_inches="tight")
         document.savefig(figure, bbox_inches="tight")
         for stamp_figure in stamp_figures:
             document.savefig(stamp_figure, bbox_inches="tight")
     plt.close(figure)
+    if query_figure is not None:
+        plt.close(query_figure)
     for stamp_figure in stamp_figures:
         plt.close(stamp_figure)
 
@@ -337,6 +458,7 @@ def plot(args):
         "control_ids": galaxy_ids[control].astype(int).tolist(),
         "pdf": str(pdf),
         "png": str(png),
+        "query_sfh_png": str(query_png) if args.h5 is not None else None,
         "retrieved_stamps_png": (
             str(retrieved_stamps_png) if args.stamps is not None else None
         ),
@@ -354,6 +476,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csls", type=Path, required=True)
     parser.add_argument("--properties", type=Path, required=True)
+    parser.add_argument("--h5", type=Path)
     parser.add_argument("--stamps", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/pdf"))
     parser.add_argument("--galaxy-id", type=int)
