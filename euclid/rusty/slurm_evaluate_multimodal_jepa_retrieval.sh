@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=jepa_retrieve
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=04:00:00
