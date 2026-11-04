@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import warnings
 from pathlib import Path
 
 import h5py
@@ -261,13 +262,17 @@ def _morphology_figure(
     for axis, (key, label) in zip(axes.flat, available):
         values = np.asarray(properties[key], dtype=float)
         true = values[query]
-        retrieved_median = np.nanmedian(values[retrieved], axis=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            retrieved_median = np.nanmedian(values[retrieved], axis=1)
         good = np.isfinite(true) & np.isfinite(retrieved_median)
         rho = spearmanr(true[good], retrieved_median[good]).statistic if good.sum() > 2 else np.nan
         axis.scatter(true[good], retrieved_median[good], s=8, alpha=0.35,
                      color="#0072B2", label=f"retrieval, rho={rho:.2f}")
         if controls is not None:
-            control_median = np.nanmedian(values[controls], axis=1)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                control_median = np.nanmedian(values[controls], axis=1)
             control_good = np.isfinite(true) & np.isfinite(control_median)
             control_rho = (
                 spearmanr(true[control_good], control_median[control_good]).statistic
@@ -458,8 +463,28 @@ def evaluate(args):
     )
 
     properties = _load_properties(args.properties, galaxy_ids)
+    eligible = np.ones(len(data), dtype=bool)
+    for key in ("log_stellar_mass", "redshift"):
+        if key in properties:
+            eligible &= np.isfinite(np.asarray(properties[key], dtype=float))
+    if properties:
+        morphology_keys = [
+            key for key in (
+                "zoobot_featured_probability", "zoobot_spiral_probability",
+                "zoobot_merger_probability", "sersic_index",
+            ) if key in properties
+        ]
+        if morphology_keys:
+            eligible &= np.any(np.column_stack([
+                np.isfinite(np.asarray(properties[key], dtype=float))
+                for key in morphology_keys
+            ]), axis=1)
+    eligible_indices = np.flatnonzero(eligible)
+    if not len(eligible_indices):
+        eligible_indices = np.arange(len(data))
     morphology_query = rng.choice(
-        len(data), min(args.morphology_queries, len(data)), replace=False,
+        eligible_indices,
+        min(args.morphology_queries, len(eligible_indices)), replace=False,
     )
     morphology_top = pooled["top_index"][morphology_query, :args.morphology_k]
     controls = _matched_controls(
