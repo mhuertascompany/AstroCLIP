@@ -331,17 +331,14 @@ def _example_pdf(
                 axis = figure.add_subplot(grid[1, column])
                 _show_image(
                     axis, images[rows[gallery_index]],
-                    f"Pooled #{column}\nID {galaxy_ids[gallery_index]}",
+                    f"Mean pooled #{column}\nID {galaxy_ids[gallery_index]}",
                 )
             for column, gallery_index in enumerate(patch_top, start=1):
                 axis = figure.add_subplot(grid[2, column])
                 _show_image(
                     axis, images[rows[gallery_index]],
-                    f"Patch #{column}\nID {galaxy_ids[gallery_index]}",
+                    f"Patch grid #{column}\nID {galaxy_ids[gallery_index]}",
                 )
-            figure.text(0.27, 0.62, "Mean-pooled retrieval", fontsize=10, weight="bold")
-            if patch is not None:
-                figure.text(0.27, 0.31, "Patch-grid retrieval", fontsize=10, weight="bold")
             figure.suptitle(
                 f"SFH→VIS JEPA retrieval · paired pooled rank {pooled['rank'][query]:,}",
                 fontsize=13,
