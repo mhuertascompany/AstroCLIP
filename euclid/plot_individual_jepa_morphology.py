@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
 
 PARAMETERS = (
@@ -112,34 +113,103 @@ def _representative_query(
     return int(candidates[np.argmin(np.abs(rank[candidates] - target))])
 
 
-def _plot_parameter(axis, control, retrieved, query_value, title, rng):
-    groups = (np.asarray(control, dtype=float), np.asarray(retrieved, dtype=float))
-    colors = ("0.55", "#0072B2")
-    for x, (values, color) in enumerate(zip(groups, colors)):
-        values = values[np.isfinite(values)]
-        if not len(values):
-            continue
-        jitter = rng.uniform(-0.12, 0.12, len(values))
-        axis.scatter(
-            np.full(len(values), x) + jitter, values, s=22, alpha=0.7,
-            color=color, edgecolor="white", linewidth=0.3, zorder=2,
-        )
-        q25, median, q75 = np.percentile(values, [25, 50, 75])
-        axis.vlines(x, q25, q75, color="black", lw=3, zorder=3)
-        axis.scatter(x, median, marker="_", s=180, color="black", lw=2, zorder=4)
+def _histogram_edges(control, retrieved, key, bins=10):
+    combined = np.concatenate((control, retrieved))
+    combined = combined[np.isfinite(combined)]
+    if key.startswith("zoobot_") or key == "axis_ratio":
+        return np.linspace(0.0, 1.0, bins + 1)
+    lower, upper = np.nanmin(combined), np.nanmax(combined)
+    if np.isclose(lower, upper):
+        padding = max(abs(lower) * 0.05, 0.05)
+    else:
+        padding = 0.04 * (upper - lower)
+    return np.linspace(lower - padding, upper + padding, bins + 1)
+
+
+def _plot_parameter_distribution(
+    axis, control, retrieved, query_value, key, title,
+):
+    control = np.asarray(control, dtype=float)
+    retrieved = np.asarray(retrieved, dtype=float)
+    control = control[np.isfinite(control)]
+    retrieved = retrieved[np.isfinite(retrieved)]
+    edges = _histogram_edges(control, retrieved, key)
+    axis.hist(
+        control, bins=edges, density=True, histtype="stepfilled", alpha=0.28,
+        color="0.45", edgecolor="0.35", linewidth=1.5, label="M,z,SFR controls",
+    )
+    axis.hist(
+        retrieved, bins=edges, density=True, histtype="step", color="#0072B2",
+        linewidth=2.2, label="JEPA-CSLS neighbours",
+    )
+    control_median = np.nanmedian(control)
+    retrieved_median = np.nanmedian(retrieved)
+    axis.axvline(control_median, color="0.25", lw=1.5, ls=":")
+    axis.axvline(retrieved_median, color="#0072B2", lw=1.5, ls=":")
     if np.isfinite(query_value):
-        axis.axhline(
+        axis.axvline(
             query_value, color="#D55E00", lw=1.5, ls="--",
             label="query's true VIS",
         )
-    retrieved_median = np.nanmedian(groups[1])
-    control_median = np.nanmedian(groups[0])
     axis.set_title(
         f"{title}\nmedian difference = {retrieved_median - control_median:+.3f}",
         fontsize=10,
     )
-    axis.set_xticks((0, 1), ("M,z,SFR\ncontrols", "JEPA-CSLS\nneighbours"))
+    axis.set_ylabel("Density")
     axis.grid(axis="y", alpha=0.18)
+
+
+def _read_stamp(stamps: Path, galaxy_id: int) -> np.ndarray | None:
+    candidates = (
+        stamps / f"VIS_{galaxy_id}.jpg",
+        stamps / f"VIS_{galaxy_id}.jpeg",
+        stamps / f"VIS_{galaxy_id}.png",
+        stamps / f"{galaxy_id}.jpg",
+        stamps / f"{galaxy_id}.png",
+    )
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if path is None:
+        return None
+    image = np.asarray(plt.imread(path), dtype=float)
+    if image.ndim == 3:
+        image = image[..., :3].mean(axis=-1)
+    if np.nanmax(image) > 1.0:
+        image /= 255.0
+    return np.clip(np.nan_to_num(image), 0.0, 1.0)
+
+
+def _stamp_figure(
+    stamps: Path, galaxy_ids: np.ndarray, indices: np.ndarray,
+    mass: np.ndarray, redshift: np.ndarray, log_sfr: np.ndarray,
+    query_id: int, title: str,
+):
+    columns = 5
+    rows = int(np.ceil(len(indices) / columns))
+    figure, axes = plt.subplots(rows, columns, figsize=(12.5, 2.55 * rows))
+    axes = np.asarray(axes).reshape(rows, columns)
+    for rank, (axis, index) in enumerate(zip(axes.flat, indices), start=1):
+        galaxy_id = int(galaxy_ids[index])
+        image = _read_stamp(stamps, galaxy_id)
+        if image is None:
+            axis.text(0.5, 0.5, "stamp missing", ha="center", va="center")
+        else:
+            axis.imshow(image, cmap="gray", vmin=0.0, vmax=1.0, origin="upper")
+        axis.set_title(
+            f"#{rank}  ID {galaxy_id}\n"
+            f"M={mass[index]:.2f}, z={redshift[index]:.2f}, "
+            f"SFR={log_sfr[index]:.2f}",
+            fontsize=7,
+        )
+        axis.set_xticks([])
+        axis.set_yticks([])
+    for axis in axes.flat[len(indices):]:
+        axis.axis("off")
+    figure.suptitle(
+        f"{title}\nSFH query ID {query_id} | stored VIS scaling fixed to [0, 1]",
+        fontsize=14,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.94), h_pad=0.9, w_pad=0.35)
+    return figure
 
 
 def plot(args):
@@ -168,18 +238,17 @@ def plot(args):
 
     available = [(key, label) for key, label in PARAMETERS if key in properties]
     figure, axes = plt.subplots(4, 3, figsize=(14, 15), squeeze=False)
-    rng = np.random.default_rng(args.seed)
     for axis, (key, label) in zip(axes.flat, available):
         values = np.asarray(properties[key], dtype=float)
-        _plot_parameter(
-            axis, values[control], values[retrieved], values[query], label, rng,
+        _plot_parameter_distribution(
+            axis, values[control], values[retrieved], values[query], key, label,
         )
     for axis in axes.flat[len(available):]:
         axis.axis("off")
-    axes.flat[0].legend(loc="best", fontsize=8)
+    axes.flat[0].legend(loc="best", fontsize=7)
     median_delta = np.median(np.abs(control_delta), axis=0)
     figure.suptitle(
-        "Morphology selected from one SFH\n"
+        "Morphology distributions selected from one SFH\n"
         f"ID {galaxy_ids[query]} | CSLS k={args.csls_k} | "
         f"paired rank {ranks[query]:,}/{len(galaxy_ids):,}\n"
         f"log(M*/Msun)={mass[query]:.3f}, z={redshift[query]:.3f}, "
@@ -200,9 +269,30 @@ def plot(args):
     stem = f"individual_sfh_morphology_{int(galaxy_ids[query])}"
     pdf = args.output / f"{stem}.pdf"
     png = args.output / f"{stem}.png"
-    figure.savefig(pdf, bbox_inches="tight")
     figure.savefig(png, dpi=180, bbox_inches="tight")
+    retrieved_stamps_png = args.output / f"{stem}_retrieved_stamps.png"
+    control_stamps_png = args.output / f"{stem}_control_stamps.png"
+    stamp_figures = []
+    if args.stamps is not None:
+        stamp_figures = [
+            _stamp_figure(
+                args.stamps, galaxy_ids, retrieved, mass, redshift, log_sfr,
+                int(galaxy_ids[query]), "JEPA-CSLS retrieved VIS neighbours",
+            ),
+            _stamp_figure(
+                args.stamps, galaxy_ids, control, mass, redshift, log_sfr,
+                int(galaxy_ids[query]), "Mass-redshift-SFR matched VIS controls",
+            ),
+        ]
+        stamp_figures[0].savefig(retrieved_stamps_png, dpi=180, bbox_inches="tight")
+        stamp_figures[1].savefig(control_stamps_png, dpi=180, bbox_inches="tight")
+    with PdfPages(pdf) as document:
+        document.savefig(figure, bbox_inches="tight")
+        for stamp_figure in stamp_figures:
+            document.savefig(stamp_figure, bbox_inches="tight")
     plt.close(figure)
+    for stamp_figure in stamp_figures:
+        plt.close(stamp_figure)
 
     rows = []
     for group, indices in (("retrieved", retrieved), ("physical_control", control)):
@@ -247,6 +337,12 @@ def plot(args):
         "control_ids": galaxy_ids[control].astype(int).tolist(),
         "pdf": str(pdf),
         "png": str(png),
+        "retrieved_stamps_png": (
+            str(retrieved_stamps_png) if args.stamps is not None else None
+        ),
+        "control_stamps_png": (
+            str(control_stamps_png) if args.stamps is not None else None
+        ),
         "csv": str(csv_path),
     }
     metadata_path = args.output / f"{stem}.json"
@@ -258,6 +354,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csls", type=Path, required=True)
     parser.add_argument("--properties", type=Path, required=True)
+    parser.add_argument("--stamps", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/pdf"))
     parser.add_argument("--galaxy-id", type=int)
     parser.add_argument("--csls-k", type=int, default=100)

@@ -1,6 +1,9 @@
 import numpy as np
 
-from euclid.plot_individual_jepa_morphology import _matched_control_indices
+from euclid.plot_individual_jepa_morphology import (
+    _histogram_edges,
+    _matched_control_indices,
+)
 
 
 def test_physical_controls_exclude_query_and_retrieved_and_match_nearest():
@@ -13,3 +16,12 @@ def test_physical_controls_exclude_query_and_retrieved_and_match_nearest():
     )
     np.testing.assert_array_equal(selected, np.array([2, 3]))
     assert delta.shape == (2, 3)
+
+
+def test_probability_histograms_use_common_physical_range():
+    edges = _histogram_edges(
+        np.array([0.1, 0.2]), np.array([0.8, 0.9]),
+        "zoobot_spiral_probability",
+    )
+    assert edges[0] == 0.0
+    assert edges[-1] == 1.0
