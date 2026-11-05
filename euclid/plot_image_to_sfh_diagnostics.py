@@ -70,8 +70,47 @@ def _load_sfhs(path: Path, galaxy_ids: np.ndarray):
         if np.any(rows < 0):
             missing = galaxy_ids[rows < 0]
             raise ValueError(f"SFH file is missing {len(missing)} retrieval galaxies")
-        log_weights = np.asarray(source["sfh"][rows], dtype=float)
-    return time, _sfh_fractional_density(log_weights, time, epsilon)
+        order = np.argsort(rows)
+        reverse = np.argsort(order)
+        log_weights = np.asarray(source["sfh"][rows[order]], dtype=float)[reverse]
+        age_gyr = np.asarray(source["sfh_time_norm"][rows[order]], dtype=float)[reverse] / 1000.0
+    density = _sfh_fractional_density(log_weights, time, epsilon)
+    return time, age_gyr, density
+
+
+def _weighted_quantile(time, weights, probability):
+    cumulative = np.cumsum(weights, axis=1)
+    index = np.argmax(cumulative >= probability, axis=1)
+    return np.asarray(time, dtype=float)[index]
+
+
+def _sfh_summaries(time, age_gyr, density):
+    """Summary quantities derived consistently from the plotted SFHs."""
+    widths = _fractional_widths(time)
+    weights = density * widths
+    weights /= np.maximum(weights.sum(1, keepdims=True), np.finfo(float).eps)
+    t20 = _weighted_quantile(time, weights, 0.2)
+    t50 = _weighted_quantile(time, weights, 0.5)
+    t80 = _weighted_quantile(time, weights, 0.8)
+    recent_fraction = np.empty(len(weights), dtype=float)
+    for index, age in enumerate(age_gyr):
+        recent_fraction[index] = weights[index, np.asarray(time) * age <= 0.1].sum()
+    entropy = -np.sum(
+        np.where(weights > 0, weights * np.log(np.maximum(weights, 1e-30)), 0.0),
+        axis=1,
+    ) / np.log(weights.shape[1])
+    return {
+        "sfh_mass_weighted_age_gyr": np.sum(
+            weights * np.asarray(time)[None, :] * age_gyr[:, None], axis=1,
+        ),
+        "sfh_t50_lookback": t50,
+        "sfh_duration_80": np.abs(t80 - t20),
+        "sfh_recent_mass_fraction_100myr": recent_fraction,
+        "sfh_peak_age_gyr": (
+            np.asarray(time)[np.argmax(density, axis=1)] * age_gyr
+        ),
+        "sfh_entropy": entropy,
+    }
 
 
 def _retrieved_without_pair(top: np.ndarray, query: int, count: int) -> np.ndarray:
@@ -150,9 +189,11 @@ def _sfh_overview_figure(
     control_q = np.percentile(control_values, (16, 50, 84), axis=0)
     retrieved_scatter = 0.5 * (retrieved_q[2] - retrieved_q[0])
     control_scatter = 0.5 * (control_q[2] - control_q[0])
-    ratio = _smooth(retrieved_scatter) / np.maximum(
-        _smooth(control_scatter), np.finfo(float).eps,
-    )
+    smooth_retrieved = _smooth(retrieved_scatter)
+    smooth_control = _smooth(control_scatter)
+    ratio = smooth_retrieved / np.maximum(smooth_control, np.finfo(float).eps)
+    informative = smooth_control > 0.05 * np.nanmax(smooth_control)
+    ratio[~informative] = np.nan
 
     figure = plt.figure(figsize=(13.5, 9.5))
     grid = figure.add_gridspec(
@@ -209,8 +250,8 @@ def _sfh_overview_figure(
         time, retrieved_scatter, color="#0072B2", lw=1.5, alpha=0.8,
         label="retrieved $\\sigma_{68}$",
     )
-    scatter_axis.plot(time, _smooth(control_scatter), color="0.2", lw=2.3)
-    scatter_axis.plot(time, _smooth(retrieved_scatter), color="#0072B2", lw=2.3)
+    scatter_axis.plot(time, smooth_control, color="0.2", lw=2.3)
+    scatter_axis.plot(time, smooth_retrieved, color="#0072B2", lw=2.3)
     scatter_axis.set(
         xlabel="Fractional lookback time $t_{LB}/t_H$",
         ylabel="$\\sigma_{68}$ of SFH density",
@@ -232,7 +273,7 @@ def _sfh_overview_figure(
     )
     ratio_axis.set(
         xlabel="$t_{LB}/t_H$", ylabel="Scatter ratio",
-        title="retrieved / control",
+        title="retrieved / control\nshown where control scatter >5% of its maximum",
         xlim=(0, 1), ylim=(0, min(4.0, max(2.0, np.nanpercentile(ratio, 98)))),
     )
     ratio_axis.grid(alpha=0.18)
@@ -247,13 +288,13 @@ def _sfh_overview_figure(
 
 
 def _summary_distribution_figure(
-    properties, query, retrieved, controls, feature, galaxy_id, rng,
+    summaries, query, retrieved, controls, feature, galaxy_id, rng,
 ):
-    available = [(key, label) for key, label in SFH_PARAMETERS if key in properties]
+    available = [(key, label) for key, label in SFH_PARAMETERS if key in summaries]
     figure, axes = plt.subplots(2, 3, figsize=(13.5, 8.2), squeeze=False)
     statistics = []
     for axis, (key, label) in zip(axes.flat, available):
-        values = np.asarray(properties[key], dtype=float)
+        values = np.asarray(summaries[key], dtype=float)
         control = values[controls]
         selected = values[retrieved]
         control_finite = control[np.isfinite(control)]
@@ -364,7 +405,8 @@ def plot(args):
     properties, covered = _align_properties(args.properties, galaxy_ids)
     mass = np.asarray(properties["log_stellar_mass"], dtype=float)
     redshift = np.asarray(properties["redshift"], dtype=float)
-    time, sfhs = _load_sfhs(args.h5, galaxy_ids)
+    time, age_gyr, sfhs = _load_sfhs(args.h5, galaxy_ids)
+    summaries = _sfh_summaries(time, age_gyr, sfhs)
 
     args.output.mkdir(parents=True, exist_ok=True)
     selected_queries = []
@@ -399,7 +441,7 @@ def plot(args):
         )
         rng = np.random.default_rng(args.seed + query)
         distributions, statistics = _summary_distribution_figure(
-            properties, query, retrieved, controls, feature, galaxy_id, rng,
+            summaries, query, retrieved, controls, feature, galaxy_id, rng,
         )
         scatter = _scatter_ratio_figure(statistics, feature, galaxy_id)
         individual = _individual_curve_figure(
@@ -424,8 +466,8 @@ def plot(args):
                     "redshift": float(redshift[index]),
                 }
                 row.update({
-                    parameter: float(properties[parameter][index])
-                    for parameter, _ in SFH_PARAMETERS if parameter in properties
+                    parameter: float(summaries[parameter][index])
+                    for parameter, _ in SFH_PARAMETERS if parameter in summaries
                 })
                 rows.append(row)
         csv_path = args.output / f"{stem}.csv"

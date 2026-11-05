@@ -6,6 +6,7 @@ from euclid.plot_image_to_sfh_diagnostics import (
     _mass_redshift_controls,
     _retrieved_without_pair,
     _sfh_fractional_density,
+    _sfh_summaries,
 )
 
 
@@ -46,3 +47,15 @@ def test_query_selection_spans_mass_bins():
     )
     assert len(np.unique(selected)) == 3
     assert np.ptp(mass[selected]) > 1.0
+
+
+def test_sfh_summaries_are_finite_and_ordered():
+    time = np.linspace(0.0, 1.0, 8)
+    density = np.vstack((
+        np.linspace(8.0, 1.0, 8),
+        np.linspace(1.0, 8.0, 8),
+    ))
+    density /= np.sum(density * _fractional_widths(time), axis=1)[:, None]
+    summary = _sfh_summaries(time, np.array([10.0, 10.0]), density)
+    assert all(np.all(np.isfinite(value)) for value in summary.values())
+    assert summary["sfh_mass_weighted_age_gyr"][0] < summary["sfh_mass_weighted_age_gyr"][1]
